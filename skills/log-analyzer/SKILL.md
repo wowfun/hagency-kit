@@ -11,7 +11,7 @@ Analyze logs by deciding what evidence is needed before choosing tools. Stay rea
 
 1. Identify the source: local files, archives, server/runtime logs, cloud logs, observability UI, CI output, or pasted excerpts.
 2. Frame the question: time window, deploy/config change, affected service/route/job, expected behavior, and user decision needed.
-3. Estimate volume: file count, size, approximate line/record count, compression, and observed time span. Use this to decide whether full-log analysis is reasonable or whether to narrow first.
+3. **Estimate volume**: file count, size, approximate line/record count, compression, and observed time span. **Default to narrow first** when any source is over **256 KiB** of raw/uncompressed text, over **2,000 lines/records**, or compressed/rotated with likely expanded size over either limit.
 4. Classify records: plain text, JSONL, server access records, runtime logs, multiline traces, compressed/rotated files, or mixed format.
 5. Choose available tooling: native log viewer first when present; otherwise use structured queries, editor search, terminal utilities, PowerShell, notebook, or small language snippets.
 6. Gather compact evidence: counts, top repeated messages, time range, statuses, endpoints/jobs, hosts/IPs, request IDs, trace IDs, and slow operations.

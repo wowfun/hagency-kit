@@ -133,7 +133,7 @@ def to_int(value: str) -> int:
 
 def extension_for(path: str) -> str:
     suffix = Path(path).suffix
-    return suffix[1:] if suffix.startswith(".") else suffix
+    return suffix
 
 
 def build_tracked_tables(

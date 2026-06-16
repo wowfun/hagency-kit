@@ -1,5 +1,7 @@
 # Hagency Kit
 
+语言：简体中文 | [English](README.md)
+
 实用 Agent 技能，用于审阅、诊断和维护 AI 辅助工程工作。
 
 ## Skills
@@ -11,3 +13,15 @@
 | [`eval-skill-quality`](skills/eval-skill-quality/SKILL.md) | 审阅 skill，或在发布前整理 skill | 评估 skill 质量、触发可靠性、语义清晰度、SRL 可靠性、泄漏风险、可维护性和实际价值。 |
 | [`git-collab-flow`](skills/git-collab-flow/SKILL.md) | 管理 `dev`、`feat-*` / `dev-*` 和 `local-*` 分支工作流 | 生成安全的 git 命令序列，用于同步主线更新、变基功能分支、cherry-pick 可公开提交，并保持 PR 历史干净。 |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | 调查应用、服务器、JSON、CI 或轮转 gzip 日志 | 通过采样和分析日志解释故障、错误峰值、慢请求、流量模式和事故信号，同时控制证据范围并做脱敏处理。 |
+
+## Profiles
+
+Profile 是用于 Agent 工作流场景的轻量级捆绑定义。
+
+外部 skill 来源统一登记在 [`skills/config.toml`](skills/config.toml)。每个 profile 在 `profiles/<name>/config.toml` 中声明要启用的 source；生成的 `.agents/skills/` 链接不进入 git。先同步 remote source，再把 profile 初始化到目标 workspace。
+
+```sh
+uv tool install -e tools/hagency-cli
+hagency skill -se --profile content --dry-run
+hagency profile init -p ~/workspaces/content content --dry-run
+```

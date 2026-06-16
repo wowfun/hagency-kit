@@ -1,3 +1,7 @@
-.references/
+__pycache__
 
 .codex
+.local/
+.references/
+
+profiles/*/.agents/skills/

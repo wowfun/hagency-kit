@@ -1,0 +1,13 @@
+[project]
+name = "hagency-cli"
+version = "0.1.0"
+description = "CLI helpers for Hagency Kit profiles and external skill sources."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+hagency = "hagency_cli.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

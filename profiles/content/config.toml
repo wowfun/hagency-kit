@@ -1,0 +1,11 @@
+name = "content"
+description = "Content creation profile."
+
+[[skills]]
+source = "baoyu-skills"
+
+[[skills]]
+source = "frontend-slides"
+
+[[skills]]
+source = "guizang-ppt-skill"

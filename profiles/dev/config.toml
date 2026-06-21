@@ -1,0 +1,16 @@
+name = "dev"
+
+[skill.awesome-copilot]
+include = ["refactor"]
+
+[skill.superpowers]
+include = ["systematic-debugging"]
+
+[skill.skills]
+include = ["frontend-design"]
+
+[skill.Waza]
+include = ["skills/write", "skills/design"]
+
+[skill."mattpocock/skills"]
+include = ["prototype"]

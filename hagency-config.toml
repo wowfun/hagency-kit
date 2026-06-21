@@ -1,0 +1,43 @@
+[defaults]
+checkout_dir = "~/Projects/references"
+depth = 1
+
+[source.baoyu-skills]
+
+[source.baoyu-skills.remote]
+url = "https://github.com/JimLiu/baoyu-skills.git"
+
+[source.frontend-slides]
+
+[source.frontend-slides.remote]
+url = "https://github.com/zarazhangrui/frontend-slides.git"
+
+[source.guizang-ppt-skill]
+
+[source.guizang-ppt-skill.remote]
+url = "https://github.com/op7418/guizang-ppt-skill.git"
+
+[source.Waza]
+
+[source.Waza.remote]
+url = "https://github.com/tw93/Waza.git"
+
+[source.awesome-copilot]
+
+[source.awesome-copilot.remote]
+url = "https://github.com/github/awesome-copilot"
+
+[source.superpowers]
+
+[source.superpowers.remote]
+url = "https://github.com/obra/superpowers"
+
+[source.skills]
+
+[source.skills.remote]
+url = "https://github.com/anthropics/skills"
+
+[source."mattpocock/skills"]
+
+[source."mattpocock/skills".remote]
+url = "https://github.com/mattpocock/skills.git"

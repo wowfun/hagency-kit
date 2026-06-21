@@ -1,11 +1,8 @@
 name = "content"
 description = "Content creation profile."
 
-[[skills]]
-source = "baoyu-skills"
+[skill.baoyu-skills]
 
-[[skills]]
-source = "frontend-slides"
+[skill.frontend-slides]
 
-[[skills]]
-source = "guizang-ppt-skill"
+[skill.guizang-ppt-skill]

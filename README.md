@@ -18,10 +18,12 @@ Practical agent skills for reviewing, diagnosing, and operating AI-assisted engi
 
 A profile is a lightweight bundle definition for an agent workflow scene.
 
-External skill sources are registered in [`skills/config.toml`](skills/config.toml). A profile lists the source names it enables in `profiles/<name>/config.toml`; generated `.agents/skills/` links are ignored by git. Sync remote sources first, then initialize the profile into a target workspace.
+External skill sources are registered in [`hagency-config.toml`](hagency-config.toml). A profile lists the source names it enables in `profiles/<name>/config.toml`; generated `.agents/skills/` links are ignored by git. Sync remote sources first, then initialize the profile into a target workspace.
 
 ```sh
 uv tool install -e tools/hagency-cli
-hagency skill -se --profile content --dry-run
+hagency source sync --profile content --dry-run
 hagency profile init -p ~/workspaces/content content --dry-run
 ```
+
+`[defaults].depth` in `hagency-config.toml` sets the default source sync depth; pass `--depth` to override it. Use `hagency source add <git-url> --sync` to add and immediately sync a source; if the inferred repo name already exists, Git URLs fall back to `owner/repo`, or pass `--name` to choose a custom name. Profile skill management accepts either a source name or a skill name; ambiguous skill names fail. `hagency source sync` automatically retries transient Git clone/fetch/pull failures. If a source fails after retries, rerun a subset with 1-based indexes, for example `hagency source sync -s 4:` after `sync source [4/5] Waza` fails, or `-s 1,3:` to sync source 1 plus source 3 through the end.

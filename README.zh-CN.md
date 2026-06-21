@@ -18,10 +18,12 @@
 
 Profile 是用于 Agent 工作流场景的轻量级捆绑定义。
 
-外部 skill 来源统一登记在 [`skills/config.toml`](skills/config.toml)。每个 profile 在 `profiles/<name>/config.toml` 中声明要启用的 source；生成的 `.agents/skills/` 链接不进入 git。先同步 remote source，再把 profile 初始化到目标 workspace。
+外部 skill 来源统一登记在 [`hagency-config.toml`](hagency-config.toml)。每个 profile 在 `profiles/<name>/config.toml` 中声明要启用的 source；生成的 `.agents/skills/` 链接不进入 git。先同步 remote source，再把 profile 初始化到目标 workspace。
 
 ```sh
 uv tool install -e tools/hagency-cli
-hagency skill -se --profile content --dry-run
+hagency source sync --profile content --dry-run
 hagency profile init -p ~/workspaces/content content --dry-run
 ```
+
+`hagency-config.toml` 中的 `[defaults].depth` 用于设置 source sync 的默认深度；传入 `--depth` 时会覆盖它。使用 `hagency source add <git-url> --sync` 可以添加 source 后立即同步；如果推断出的 repo 名已存在，Git URL 会 fallback 到 `owner/repo`，也可以传 `--name` 自定义名称。Profile skill 管理可传 source 名或 skill 名；skill 名有歧义时会报错。`hagency source sync` 会自动重试临时性的 Git clone/fetch/pull 失败。如果某个 source 重试后仍失败，可以用 1-based index 同步子集，例如 `sync source [4/5] Waza` 失败后运行 `hagency source sync -s 4:`，或用 `-s 1,3:` 同步第 1 个加第 3 个及其之后的 source。

@@ -1,255 +1,579 @@
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
-from dataclasses import dataclass
+import shlex
+import shutil
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    sys.stderr.write("Error: Python 3.11+ is required for stdlib tomllib.\n")
-    raise SystemExit(1)
+from .common import die, read_toml, write_toml
+from .sources import Source, require_source_path
+
+SKIP_DISCOVERY_DIRS = {
+    ".agents",
+    ".codex",
+    ".git",
+    ".hg",
+    ".local",
+    ".references",
+    ".svn",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "target",
+}
 
 
-def die(message: str) -> None:
-    sys.stderr.write(f"Error: {message}\n")
-    raise SystemExit(1)
+def validate_profile_name(profile_name: str) -> None:
+    if not profile_name or profile_name in {".", ".."} or "/" in profile_name or "\\" in profile_name:
+        die(f"unsafe profile name: {profile_name}")
 
 
-def expand_path(value: str, base: Path) -> Path:
-    path = Path(os.path.expanduser(value))
-    if not path.is_absolute():
-        path = base / path
-    return path
+def profiles_root_path(repo_root: Path) -> Path:
+    return repo_root / "profiles"
 
 
-def read_toml(path: Path) -> dict:
-    if not path.exists():
-        die(f"missing config: {path}")
-    with path.open("rb") as handle:
-        return tomllib.load(handle)
-
-
-def run(cmd: list[str], *, cwd: Path | None = None, dry_run: bool = False) -> subprocess.CompletedProcess[str] | None:
-    prefix = f"(cd {cwd} && " if cwd else ""
-    suffix = ")" if cwd else ""
-    print("+ " + prefix + " ".join(cmd) + suffix)
-    if dry_run:
-        return None
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True)
-
-
-def git_ok(cmd: list[str], *, cwd: Path) -> bool:
-    return subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-
-
-@dataclass(frozen=True)
-class Remote:
-    name: str
-    url: str
-    ref: str
-
-
-@dataclass(frozen=True)
-class Source:
-    name: str
-    path: Path
-    skills_path: str
-    remote: Remote | None
-
-    @property
-    def skills_root(self) -> Path:
-        path = Path(self.skills_path)
-        if path.is_absolute():
-            return path
-        return self.path / path
-
-
-def resolve_sources(registry: dict, *, repo_root: Path, checkout_override: str | None) -> dict[str, Source]:
-    defaults = registry.get("defaults", {})
-    checkout_dir_value = checkout_override or defaults.get("checkout_dir")
-    checkout_dir = expand_path(checkout_dir_value, repo_root) if checkout_dir_value else None
-    default_skills_path = defaults.get("skills_path", ".")
-    default_remote_name = defaults.get("remote_name", "origin")
-    default_remote_ref = defaults.get("remote_ref", "main")
-
-    sources: dict[str, Source] = {}
-    for raw_source in registry.get("sources", []):
-        name = raw_source.get("name")
-        if not name:
-            die("source is missing required field: name")
-        if name in sources:
-            die(f"duplicate source name: {name}")
-
-        raw_remote = raw_source.get("remote")
-        remote = None
-        if raw_remote:
-            url = raw_remote.get("url")
-            if not url:
-                die(f"source {name} remote is missing required field: url")
-            remote = Remote(
-                name=raw_remote.get("name") or default_remote_name,
-                url=url,
-                ref=raw_remote.get("ref") or default_remote_ref,
-            )
-
-        raw_path = raw_source.get("path")
-        if raw_path:
-            path = expand_path(raw_path, repo_root)
-        elif remote and checkout_dir:
-            path = checkout_dir / name
-        else:
-            die(f"source {name} needs path, or remote plus defaults.checkout_dir")
-
-        sources[name] = Source(
-            name=name,
-            path=path,
-            skills_path=raw_source.get("skills_path") or default_skills_path,
-            remote=remote,
-        )
-
-    return sources
+def profile_dir_path(repo_root: Path, profile_name: str) -> Path:
+    validate_profile_name(profile_name)
+    return profiles_root_path(repo_root) / profile_name
 
 
 def profile_config_path(repo_root: Path, profile_name: str) -> Path:
-    return repo_root / "profiles" / profile_name / "config.toml"
+    return profile_dir_path(repo_root, profile_name) / "config.toml"
+
+
+def require_profile_schema(profile: dict) -> None:
+    if "skills" in profile:
+        die("legacy [[skills]] profile config is no longer supported; use [skill.<source>]")
+
+
+def read_profile_config(repo_root: Path, profile_name: str) -> dict:
+    profile = read_toml(profile_config_path(repo_root, profile_name))
+    require_profile_schema(profile)
+    return profile
+
+
+def write_profile_config(repo_root: Path, profile_name: str, profile: dict) -> None:
+    path = profile_config_path(repo_root, profile_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_toml(path, profile)
+
+
+def list_profile_configs(repo_root: Path) -> list[tuple[str, dict]]:
+    profiles_root = profiles_root_path(repo_root)
+    if not profiles_root.exists():
+        return []
+
+    profiles = []
+    for config_path in sorted(profiles_root.glob("*/config.toml"), key=lambda path: path.parent.name):
+        profile = read_toml(config_path)
+        require_profile_schema(profile)
+        profiles.append((config_path.parent.name, profile))
+    return profiles
 
 
 def profile_source_names(profile: dict) -> list[str]:
     names = []
-    for entry in profile.get("skills", []):
-        source_name = entry.get("source")
-        if not source_name:
-            die("profile skill entry is missing required field: source")
-        names.append(source_name)
+    require_profile_schema(profile)
+    for source_name in profile.get("skill", {}):
+        if source_name != "workspace":
+            names.append(source_name)
     return names
 
 
-def select_sources(sources: dict[str, Source], names: list[str]) -> list[Source]:
-    selected = []
-    seen = set()
-    for name in names:
-        source = sources.get(name)
-        if source is None:
-            die(f"unknown source: {name}")
-        if name not in seen:
-            selected.append(source)
-            seen.add(name)
-    return selected
+def profile_skill_names(profile: dict) -> list[str]:
+    require_profile_schema(profile)
+    return list(profile.get("skill", {}))
 
 
-def sync_source(source: Source, *, dry_run: bool) -> None:
-    remote = source.remote
-    if source.path.exists():
-        if remote is None:
-            if not source.path.is_dir():
-                die(f"local source is not a directory: {source.path}")
-            return
-        if not git_ok(["git", "rev-parse", "--is-inside-work-tree"], cwd=source.path):
-            die(f"remote-bound source exists but is not a git repo: {source.path}")
-        current_url = subprocess.run(
-            ["git", "remote", "get-url", remote.name],
-            cwd=source.path,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        if current_url.returncode != 0:
-            run(["git", "remote", "add", remote.name, remote.url], cwd=source.path, dry_run=dry_run)
-        elif current_url.stdout.strip() != remote.url:
-            run(["git", "remote", "set-url", remote.name, remote.url], cwd=source.path, dry_run=dry_run)
-        run(["git", "fetch", remote.name], cwd=source.path, dry_run=dry_run)
-        if not dry_run:
-            remote_branch = f"refs/remotes/{remote.name}/{remote.ref}"
-            local_branch = f"refs/heads/{remote.ref}"
-            if git_ok(["git", "rev-parse", "--verify", local_branch], cwd=source.path):
-                run(["git", "checkout", remote.ref], cwd=source.path, dry_run=False)
-                run(["git", "pull", "--ff-only", remote.name, remote.ref], cwd=source.path, dry_run=False)
-            elif git_ok(["git", "rev-parse", "--verify", remote_branch], cwd=source.path):
-                run(
-                    ["git", "checkout", "-b", remote.ref, "--track", f"{remote.name}/{remote.ref}"],
-                    cwd=source.path,
-                    dry_run=False,
-                )
-            else:
-                run(["git", "checkout", remote.ref], cwd=source.path, dry_run=False)
+def validate_profile_skill_source(source_name: str, sources: dict[str, Source]) -> None:
+    if source_name == "workspace" or source_name in sources:
+        return
+    die(f"unknown source: {source_name}")
+
+
+def iter_skill_name_matches(
+    skill_name: str,
+    sources: dict[str, Source],
+    workspace_root: Path,
+) -> list[tuple[str, Path]]:
+    workspace = workspace_source(workspace_root)
+    source_roots = {source.path for source in sources.values()}
+    candidates = {"workspace": workspace, **sources}
+    matches: list[tuple[str, Path]] = []
+    for source_name, source in candidates.items():
+        if not source.path.exists() or not source.path.is_dir():
+            continue
+        skip_roots = source_roots if source_name == "workspace" else None
+        for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
+            if target.name == skill_name:
+                matches.append((source_name, target))
+    return matches
+
+
+def split_source_selector_reference(value: str, sources: dict[str, Source]) -> tuple[str, str] | None:
+    source_name, separator, selector = value.partition(":")
+    if not separator or (source_name != "workspace" and source_name not in sources):
+        return None
+    if not selector:
+        die(f"profile skill reference {value!r} is missing selector after ':'")
+    return (source_name, selector)
+
+
+def source_for_reference(source_name: str, sources: dict[str, Source], workspace_root: Path) -> Source:
+    if source_name == "workspace":
+        return workspace_source(workspace_root)
+    return sources[source_name]
+
+
+def source_relative_selector(source: Source, target: Path) -> str:
+    try:
+        return target.resolve().relative_to(source.path.resolve()).as_posix()
+    except ValueError:
+        return target.as_posix()
+
+
+def format_reference_choices(
+    matches: list[tuple[str, Path]],
+    sources: dict[str, Source],
+    workspace_root: Path,
+    *,
+    command_prefix: str | None,
+    option: str | None,
+) -> str:
+    lines = []
+    for source_name, path in matches:
+        source = source_for_reference(source_name, sources, workspace_root)
+        reference = f"{source_name}:{source_relative_selector(source, path)}"
+        if command_prefix and option:
+            lines.append(f"  {command_prefix} {option} {shlex.quote(reference)}")
         else:
-            run(["git", "checkout", remote.ref], cwd=source.path, dry_run=True)
+            lines.append(f"  {reference}")
+    return "\n".join(lines)
+
+
+def resolve_profile_skill_reference(
+    value: str,
+    sources: dict[str, Source],
+    workspace_root: Path,
+    *,
+    command_prefix: str | None = None,
+    option: str | None = None,
+) -> tuple[str, str | None]:
+    source_selector = split_source_selector_reference(value, sources)
+    if source_selector is not None:
+        return source_selector
+
+    if value == "workspace" or value in sources:
+        return (value, None)
+
+    matches = iter_skill_name_matches(value, sources, workspace_root)
+    if not matches:
+        unsynced = sorted(source.name for source in sources.values() if source.remote is not None and not source.path.exists())
+        if unsynced:
+            names = " ".join(unsynced)
+            die(f"unknown source or skill: {value}; unsynced sources may contain it, run: hagency source sync {names}")
+        die(f"unknown source or skill: {value}")
+    if len(matches) > 1:
+        choices = format_reference_choices(
+            matches,
+            sources,
+            workspace_root,
+            command_prefix=command_prefix,
+            option=option,
+        )
+        die(f"skill name {value!r} is ambiguous. Choose one:\n{choices}")
+    source_name, _path = matches[0]
+    return (source_name, value)
+
+
+def dedupe_append(existing: list[str], additions: list[str]) -> list[str]:
+    values = list(existing)
+    seen = set(values)
+    for item in additions:
+        if item not in seen:
+            values.append(item)
+            seen.add(item)
+    return values
+
+
+def require_string_list(value: object, *, field: str, source_name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        die(f"profile skill {source_name} field {field} must be a string list")
+    return value
+
+
+def set_profile_skill(
+    profile: dict,
+    source_name: str,
+    *,
+    include: list[str] | None,
+    exclude: list[str] | None,
+    replace: bool,
+) -> None:
+    require_profile_schema(profile)
+    skills = profile.setdefault("skill", {})
+    existing = skills.get(source_name)
+
+    if replace or existing is None:
+        config: dict[str, list[str]] = {}
+        if include:
+            config["include"] = dedupe_append([], include)
+        if exclude:
+            config["exclude"] = dedupe_append([], exclude)
+        skills[source_name] = config
         return
 
-    if remote is None:
-        die(f"local source path does not exist: {source.path}")
-    run(["git", "clone", "--origin", remote.name, "--branch", remote.ref, remote.url, str(source.path)], dry_run=dry_run)
+    config = dict(existing or {})
+    if include:
+        current_include = config.get("include")
+        if current_include is not None:
+            include_values = require_string_list(current_include, field="include", source_name=source_name)
+            if "*" not in include_values:
+                config["include"] = dedupe_append(include_values, include)
+    if exclude:
+        current_exclude = config.get("exclude")
+        exclude_values = (
+            require_string_list(current_exclude, field="exclude", source_name=source_name)
+            if current_exclude is not None
+            else []
+        )
+        config["exclude"] = dedupe_append(exclude_values, exclude)
+    skills[source_name] = config
 
 
-def require_source_path(source: Source) -> None:
-    if not source.path.exists():
-        if source.remote is None:
-            die(f"local source path does not exist: {source.path}")
-        die(f"source path does not exist; run hagency skill --sync-external first: {source.path}")
-    if not source.path.is_dir():
-        die(f"source path is not a directory: {source.path}")
+def remove_profile_skill(profile: dict, source_name: str) -> None:
+    require_profile_schema(profile)
+    skills = profile.get("skill", {})
+    if source_name not in skills:
+        die(f"profile does not reference skill source: {source_name}")
+    del skills[source_name]
+    if not skills:
+        profile.pop("skill", None)
 
 
-def iter_links(entry: dict, source: Source) -> list[tuple[str, Path]]:
-    mode = entry.get("mode", "source")
-    root = source.skills_root
+def remove_profile_skill_selector(profile: dict, source_name: str, selector: str) -> None:
+    require_profile_schema(profile)
+    skills = profile.get("skill", {})
+    if source_name not in skills:
+        die(f"profile does not reference skill source: {source_name}")
 
-    if mode == "source":
-        return [(entry.get("name") or source.name, root)]
+    config = dict(skills.get(source_name) or {})
+    current_include = config.get("include")
+    if current_include is None:
+        current_exclude = config.get("exclude")
+        exclude_values = (
+            require_string_list(current_exclude, field="exclude", source_name=source_name)
+            if current_exclude is not None
+            else []
+        )
+        config["exclude"] = dedupe_append(exclude_values, [selector])
+        skills[source_name] = config
+        return
 
-    if mode == "expand":
+    include_values = require_string_list(current_include, field="include", source_name=source_name)
+    if "*" in include_values:
+        current_exclude = config.get("exclude")
+        exclude_values = (
+            require_string_list(current_exclude, field="exclude", source_name=source_name)
+            if current_exclude is not None
+            else []
+        )
+        config["exclude"] = dedupe_append(exclude_values, [selector])
+        skills[source_name] = config
+        return
+
+    remaining = [item for item in include_values if item != selector]
+    if len(remaining) == len(include_values):
+        die(f"profile skill source {source_name} does not include skill: {selector}")
+    if remaining:
+        config["include"] = remaining
+        skills[source_name] = config
+        return
+
+    del skills[source_name]
+    if not skills:
+        profile.pop("skill", None)
+
+
+def build_profile_config(
+    profile_name: str,
+    *,
+    description: str | None,
+    add_skill: str | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+    sources: dict[str, Source],
+) -> dict:
+    profile = {"name": profile_name}
+    if description is not None:
+        profile["description"] = description
+    if add_skill:
+        validate_profile_skill_source(add_skill, sources)
+        set_profile_skill(profile, add_skill, include=include, exclude=exclude, replace=True)
+    return profile
+
+
+def update_profile_config(
+    profile: dict,
+    *,
+    description: str | None,
+    add_skill: str | None,
+    remove_skill: str | None,
+    remove_skill_selector: tuple[str, str] | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+    replace: bool,
+    sources: dict[str, Source],
+) -> dict:
+    require_profile_schema(profile)
+    updated = dict(profile)
+    if "skill" in profile:
+        updated["skill"] = {name: dict(config or {}) for name, config in profile.get("skill", {}).items()}
+
+    changed = False
+    if description is not None:
+        updated["description"] = description
+        changed = True
+    if add_skill:
+        validate_profile_skill_source(add_skill, sources)
+        set_profile_skill(updated, add_skill, include=include, exclude=exclude, replace=replace)
+        changed = True
+    if remove_skill:
+        remove_profile_skill(updated, remove_skill)
+        changed = True
+    if remove_skill_selector:
+        remove_profile_skill_selector(updated, remove_skill_selector[0], remove_skill_selector[1])
+        changed = True
+    if not changed:
+        die("profile update requires at least one change")
+    return updated
+
+
+def remove_profile_directory(repo_root: Path, profile_name: str) -> Path:
+    profile_dir = profile_dir_path(repo_root, profile_name)
+    if not profile_dir.exists():
+        die(f"unknown profile: {profile_name}")
+    shutil.rmtree(profile_dir)
+    return profile_dir
+
+
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def discover_skill_dirs(root: Path, *, skip_roots: set[Path] | None = None) -> list[Path]:
+    matches: list[Path] = []
+    resolved_skips = {path.resolve() for path in (skip_roots or set())}
+    for current, dirnames, filenames in os.walk(root):
+        current_path = Path(current).resolve()
+        if any(is_relative_to(current_path, skip_root) for skip_root in resolved_skips):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [name for name in dirnames if name not in SKIP_DISCOVERY_DIRS]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not any(is_relative_to((Path(current) / name).resolve(), skip_root) for skip_root in resolved_skips)
+        ]
+        if "SKILL.md" not in filenames:
+            continue
+        matches.append(Path(current))
+    return sorted(matches, key=lambda path: str(path))
+
+
+def discover_skill_links(
+    source: Source,
+    *,
+    prefix: str | None = None,
+    skip_roots: set[Path] | None = None,
+) -> list[tuple[str, Path]]:
+    root = source.path
+    if prefix:
+        root = root / prefix
         if not root.exists():
-            die(f"skills root does not exist: {root}")
-        links = []
-        for child in sorted(root.iterdir(), key=lambda item: item.name):
-            if child.is_dir() and (child / "SKILL.md").exists():
-                links.append((child.name, child))
+            die(f"skill prefix for source {source.name} does not exist: {root}")
+        if (root / "SKILL.md").exists():
+            matches = [root]
+        else:
+            matches = discover_skill_dirs(root, skip_roots=skip_roots)
+    else:
+        matches = discover_skill_dirs(root, skip_roots=skip_roots)
+
+    if not matches:
+        prefix_text = f" under prefix {prefix!r}" if prefix else ""
+        die(f"no SKILL.md files found in source {source.name}{prefix_text}: {source.path}")
+
+    return [(target.name, target) for target in matches]
+
+
+def require_unique_link_names(links: list[tuple[str, Path]]) -> None:
+    seen: dict[str, Path] = {}
+    for name, target in links:
+        existing = seen.get(name)
+        if existing is not None:
+            die(
+                f"duplicate discovered skill name {name!r}: {existing} and {target}; "
+                "use include with a more specific path prefix"
+            )
+        seen[name] = target
+
+
+def format_selector_choices(source: Source, matches: list[tuple[str, Path]]) -> str:
+    return ", ".join(source_relative_selector(source, path) for _name, path in matches)
+
+
+def workspace_source(workspace_root: Path) -> Source:
+    return Source(name="workspace", path=workspace_root, remote=None)
+
+
+def resolve_selector(source: Source, selector: str, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+    if selector == "*":
+        links = discover_skill_links(source, skip_roots=skip_roots)
+        require_unique_link_names(links)
         return links
 
-    if mode == "skill":
-        child_path = entry.get("path")
-        if not child_path:
-            die(f"skill mode for source {source.name} requires path")
-        target = root / child_path
-        return [(entry.get("name") or Path(child_path).name, target)]
+    prefix_root = source.path / selector
+    if prefix_root.exists():
+        matches = discover_skill_links(source, prefix=selector, skip_roots=skip_roots)
+    else:
+        matches = [(name, path) for name, path in discover_skill_links(source, skip_roots=skip_roots) if name == selector]
+        if not matches:
+            die(f"skill selector {selector!r} for source {source.name} matched no candidates")
 
-    die(f"unsupported mode for source {source.name}: {mode}")
+    if len(matches) > 1:
+        die(
+            f"skill selector {selector!r} for source {source.name} matched multiple candidates. "
+            f"Use a more specific selector: {format_selector_choices(source, matches)}"
+        )
+    return matches
 
 
-def link_one(link_dir: Path, name: str, target: Path, *, dry_run: bool) -> None:
+def validate_profile_skill_selectors(
+    source_name: str,
+    sources: dict[str, Source],
+    workspace_root: Path,
+    *,
+    include: list[str] | None,
+    exclude: list[str] | None,
+) -> None:
+    selectors = [*(include or []), *(exclude or [])]
+    if not selectors:
+        return
+
+    workspace = workspace_source(workspace_root)
+    source = skill_source(source_name, sources, workspace)
+    if not source.path.exists() or not source.path.is_dir():
+        return
+
+    skip_roots = {source.path for source in sources.values()} if source_name == "workspace" else None
+    for selector in selectors:
+        resolve_selector(source, selector, skip_roots=skip_roots)
+
+
+def selected_links(config: dict, source: Source, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+    includes = config.get("include") or ["*"]
+    excludes = set(config.get("exclude") or [])
+
+    links: list[tuple[str, Path]] = []
+    for item in includes:
+        links.extend(resolve_selector(source, item, skip_roots=skip_roots))
+
+    excluded_paths: set[Path] = set()
+    for item in excludes:
+        for _name, target in resolve_selector(source, item, skip_roots=skip_roots):
+            excluded_paths.add(target.resolve())
+
+    filtered = [(name, target) for name, target in links if target.resolve() not in excluded_paths]
+    require_unique_link_names(filtered)
+    return filtered
+
+
+def is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+def symlink_failure_message(link: Path, target: Path, error: OSError) -> str:
+    message = f"could not create symlink {link} -> {target}: {error}"
+    if is_windows_platform():
+        message += "; on Windows, rerun PowerShell or Git Bash as Administrator, or use -cp"
+    return message
+
+
+def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dry_run: bool) -> None:
     if not target.exists() and not dry_run:
         die(f"link target does not exist: {target}")
     real_target = target.resolve() if target.exists() else target.absolute()
     link = link_dir / name
+
+    if link_mode == "copy":
+        if link.is_symlink() or link.exists():
+            die(f"refusing to overwrite existing skill destination: {link}")
+        print(f"copy {real_target} -> {link}")
+        if not dry_run:
+            if not real_target.is_dir():
+                die(f"copy target is not a directory: {real_target}")
+            link_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(real_target, link, symlinks=False)
+        return
+
+    if link_mode != "symlink":
+        die(f"unsupported profile init link mode: {link_mode}")
+
     if link.is_symlink():
         existing = link.resolve()
         if existing == real_target:
             print(f"ok {link} -> {real_target}")
             return
-        print(f"+ rm {link}")
+        print(f"remove {link}")
         if not dry_run:
             link.unlink()
     elif link.exists():
         die(f"refusing to overwrite non-symlink: {link}")
 
-    print(f"+ ln -s {real_target} {link}")
+    print(f"link {link} -> {real_target}")
     if not dry_run:
         link_dir.mkdir(parents=True, exist_ok=True)
-        os.symlink(real_target, link, target_is_directory=real_target.is_dir())
+        try:
+            os.symlink(real_target, link, target_is_directory=real_target.is_dir())
+        except OSError as exc:
+            die(symlink_failure_message(link, real_target, exc))
 
 
-def init_profile(profile: dict, sources: dict[str, Source], target_dir: Path, *, dry_run: bool) -> None:
+def skill_source(source_name: str, sources: dict[str, Source], workspace: Source) -> Source:
+    if source_name == "workspace":
+        return workspace
+    source = sources.get(source_name)
+    if source is None:
+        die(f"profile references unknown source: {source_name}")
+    return source
+
+
+def init_profile(
+    profile: dict,
+    sources: dict[str, Source],
+    workspace_root: Path,
+    target_dir: Path,
+    *,
+    link_mode: str,
+    dry_run: bool,
+) -> None:
     link_dir = target_dir / ".agents" / "skills"
-    for entry in profile.get("skills", []):
-        source_name = entry.get("source")
-        if not source_name:
-            die("profile skill entry is missing required field: source")
-        source = sources.get(source_name)
-        if source is None:
-            die(f"profile references unknown source: {source_name}")
+    workspace = workspace_source(workspace_root)
+    if "skills" in profile:
+        die("legacy [[skills]] profile config is no longer supported; use [skill.<source>]")
+
+    source_roots = {source.path for source in sources.values()}
+    links: list[tuple[str, Path]] = []
+    for source_name, config in profile.get("skill", {}).items():
+        source = skill_source(source_name, sources, workspace)
         require_source_path(source)
-        for link_name, target in iter_links(entry, source):
-            link_one(link_dir, link_name, target, dry_run=dry_run)
+        skip_roots = source_roots if source.name == "workspace" else None
+        links.extend(selected_links(config or {}, source, skip_roots=skip_roots))
+
+    require_unique_link_names(links)
+    for link_name, target in links:
+        install_skill(link_dir, link_name, target, link_mode=link_mode, dry_run=dry_run)

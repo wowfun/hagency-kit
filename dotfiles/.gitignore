@@ -1,0 +1,8 @@
+
+# py
+__pycache__/
+.venv/
+
+# dev
+.local
+.references/

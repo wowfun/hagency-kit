@@ -1,0 +1,4 @@
+name = "dev-plus"
+
+[skill."mattpocock/skills"]
+include = ["domain-modeling", "codebase-design", "tdd"]

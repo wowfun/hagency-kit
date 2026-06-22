@@ -1218,6 +1218,137 @@ class CliTests(unittest.TestCase):
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
         self.assertFalse((target / ".agents" / "skills" / "external-two").exists())
 
+    def test_skill_list_default_scans_workspace_and_sources(self) -> None:
+        stdout, stderr = self.run_cli("skill", "list")
+        lines = stdout.strip().splitlines()
+
+        self.assertEqual(lines[0], "source\tname\tselector\tpath")
+        self.assertIn(
+            f"workspace\tlocal-one\tskills/local-one\t{(self.root / 'skills' / 'local-one').resolve()}",
+            lines,
+        )
+        self.assertIn(
+            f"local-source\texternal-one\tnested/external-one\t{(self.root / 'local-source' / 'nested' / 'external-one').resolve()}",
+            lines,
+        )
+        self.assertEqual(stderr, "")
+
+        stdout, _stderr = self.run_cli("skill", "ls")
+        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
+
+    def test_skill_list_source_filters(self) -> None:
+        stdout, _stderr = self.run_cli("skill", "list", "--source", "workspace")
+
+        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
+        self.assertNotIn("local-source\texternal-one", stdout)
+
+        stdout, _stderr = self.run_cli("skill", "list", "-s", "local-source")
+
+        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertNotIn("workspace\tlocal-one", stdout)
+
+    def test_skill_list_multiple_source_filters_preserve_order_and_dedupe(self) -> None:
+        stdout, _stderr = self.run_cli(
+            "skill",
+            "list",
+            "-s",
+            "local-source",
+            "-s",
+            "workspace",
+            "-s",
+            "local-source",
+        )
+        lines = stdout.strip().splitlines()
+
+        self.assertEqual(lines[0], "source\tname\tselector\tpath")
+        self.assertEqual([line.split("\t")[0] for line in lines[1:]], ["local-source", "workspace"])
+
+    def test_skill_list_profile_applies_include_and_exclude(self) -> None:
+        self.write_skill(self.root / "local-source" / "nested" / "external-two")
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.workspace]
+                include = ["skills/local-one"]
+
+                [skill.local-source]
+                include = ["*"]
+                exclude = ["external-two"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        stdout, _stderr = self.run_cli("skill", "list", "--profile", "content")
+
+        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
+        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertNotIn("external-two", stdout)
+
+    def test_skill_list_profile_and_source_filter_intersect(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.workspace]
+                include = ["skills/local-one"]
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        stdout, _stderr = self.run_cli("skill", "list", "-p", "content", "-s", "local-source")
+
+        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertNotIn("workspace\tlocal-one", stdout)
+
+    def test_skill_list_profile_can_show_duplicate_star_matches(self) -> None:
+        self.write_skill(self.root / "local-source" / "other" / "external-one")
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        stdout, _stderr = self.run_cli("skill", "list", "-p", "content")
+
+        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertIn("local-source\texternal-one\tother/external-one", stdout)
+
+    def test_skill_list_default_skips_missing_sources_with_warning(self) -> None:
+        self.append_remote_source("remote-source")
+
+        stdout, stderr = self.run_cli("skill", "list")
+
+        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
+        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertIn("Warning: skipping missing source remote-source:", stderr)
+
+    def test_skill_list_rejects_unknown_missing_source_and_unknown_profile(self) -> None:
+        _stdout, stderr = self.run_cli("skill", "list", "-s", "missing", expected=1)
+        self.assertIn("unknown source: missing", stderr)
+
+        self.append_remote_source("remote-source")
+        _stdout, stderr = self.run_cli("skill", "list", "-s", "remote-source", expected=1)
+        self.assertIn("source path does not exist; run hagency source sync first", stderr)
+
+        _stdout, stderr = self.run_cli("skill", "list", "-p", "missing", expected=1)
+        self.assertIn("missing config:", stderr)
+
     def test_legacy_sources_schema_is_rejected(self) -> None:
         self.config_path.write_text(
             textwrap.dedent(
@@ -1249,10 +1380,6 @@ class CliTests(unittest.TestCase):
 
         _stdout, stderr = self.run_cli("profile", "init", "-p", str(self.root / "target"), "content", expected=1)
         self.assertIn("legacy [[skills]]", stderr)
-
-    def test_skill_command_is_not_registered(self) -> None:
-        _stdout, stderr = self.run_cli("skill", expected=2)
-        self.assertIn("invalid choice", stderr)
 
     def test_profile_skill_subcommand_is_not_registered(self) -> None:
         _stdout, stderr = self.run_cli("profile", "skill", expected=2)

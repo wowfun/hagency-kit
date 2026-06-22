@@ -8,6 +8,8 @@ from pathlib import Path
 from .common import die, expand_path, read_toml, render_toml, write_toml
 from .profiles import (
     build_profile_config,
+    discover_skill_dirs,
+    discover_skill_links,
     init_profile,
     list_profile_configs,
     profile_config_path,
@@ -16,10 +18,14 @@ from .profiles import (
     profile_source_names,
     read_profile_config,
     remove_profile_directory,
+    resolve_selector,
     resolve_profile_skill_reference,
+    skill_source,
+    source_relative_selector,
     update_profile_config,
     validate_profile_skill_selectors,
     validate_profile_name,
+    workspace_source,
     write_profile_config,
 )
 from .sources import (
@@ -30,6 +36,7 @@ from .sources import (
     is_git_url,
     raw_source_by_name,
     remove_source_entry,
+    require_source_path,
     resolve_sources,
     resolve_source_add_args,
     select_sources,
@@ -125,6 +132,17 @@ def add_profile_skill_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--exclude", "-e", nargs="+", action="append", help="Skill selectors to exclude")
 
 
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    deduped = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        deduped.append(value)
+        seen.add(value)
+    return deduped
+
+
 def workspace_root_arg(value: str | None) -> Path:
     return resolve_workspace_root(value, Path.cwd())
 
@@ -195,6 +213,110 @@ def init_profile_command(args: argparse.Namespace) -> None:
     profile = read_profile_config(root, args.name)
     target = expand_path(args.path, Path.cwd())
     init_profile(profile, sources, root, target, link_mode=profile_init_link_mode(args), dry_run=args.dry_run)
+
+
+def skill_skip_roots(source_name: str, sources: dict) -> set[Path] | None:
+    if source_name == "workspace":
+        return {source.path for source in sources.values()}
+    return None
+
+
+def format_skill_row(source_name: str, source, name: str, target: Path) -> str:
+    selector = source_relative_selector(source, target)
+    return "\t".join([source_name, name, selector, str(target.resolve())])
+
+
+def list_all_skill_rows(root: Path, sources: dict) -> list[str]:
+    rows = []
+    candidates = [("workspace", workspace_source(root)), *sources.items()]
+    for source_name, source in candidates:
+        if not source.path.exists():
+            print(f"Warning: skipping missing source {source_name}: {source.path}", file=sys.stderr)
+            continue
+        if not source.path.is_dir():
+            print(f"Warning: skipping non-directory source {source_name}: {source.path}", file=sys.stderr)
+            continue
+        skip_roots = skill_skip_roots(source_name, sources)
+        for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
+            rows.append(format_skill_row(source_name, source, target.name, target))
+    return rows
+
+
+def validate_skill_source_filters(source_filters: list[str], sources: dict, root: Path) -> list[str]:
+    selected = dedupe_preserve_order(source_filters)
+    available = {"workspace": workspace_source(root), **sources}
+    for source_name in selected:
+        source = available.get(source_name)
+        if source is None:
+            die(f"unknown source: {source_name}")
+        require_source_path(source)
+    return selected
+
+
+def list_filtered_skill_rows(root: Path, sources: dict, source_filters: list[str]) -> list[str]:
+    rows = []
+    available = {"workspace": workspace_source(root), **sources}
+    for source_name in validate_skill_source_filters(source_filters, sources, root):
+        source = available[source_name]
+        skip_roots = skill_skip_roots(source_name, sources)
+        for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
+            rows.append(format_skill_row(source_name, source, target.name, target))
+    return rows
+
+
+def list_selector_links(source, selector: str, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+    if selector == "*":
+        return discover_skill_links(source, skip_roots=skip_roots)
+    return resolve_selector(source, selector, skip_roots=skip_roots)
+
+
+def list_profile_selected_links(config: dict, source, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+    includes = config.get("include") or ["*"]
+    excludes = config.get("exclude") or []
+
+    links = []
+    for item in includes:
+        links.extend(list_selector_links(source, item, skip_roots=skip_roots))
+
+    excluded_paths = set()
+    for item in excludes:
+        for _name, target in list_selector_links(source, item, skip_roots=skip_roots):
+            excluded_paths.add(target.resolve())
+
+    return [(name, target) for name, target in links if target.resolve() not in excluded_paths]
+
+
+def list_profile_skill_rows(root: Path, sources: dict, profile: dict, source_filters: list[str] | None) -> list[str]:
+    selected_sources = set(validate_skill_source_filters(source_filters, sources, root)) if source_filters else None
+    rows = []
+    workspace = workspace_source(root)
+    for source_name, config in profile.get("skill", {}).items():
+        if selected_sources is not None and source_name not in selected_sources:
+            continue
+        source = skill_source(source_name, sources, workspace)
+        require_source_path(source)
+        skip_roots = skill_skip_roots(source_name, sources)
+        for name, target in list_profile_selected_links(config or {}, source, skip_roots=skip_roots):
+            rows.append(format_skill_row(source_name, source, name, target))
+    return rows
+
+
+def skill_list_command(args: argparse.Namespace) -> None:
+    root = workspace_root_arg(args.root)
+    sources = load_sources(args, root)
+    source_filters = args.sources or []
+
+    if args.profile:
+        profile = read_profile_config(root, args.profile)
+        rows = list_profile_skill_rows(root, sources, profile, source_filters)
+    elif source_filters:
+        rows = list_filtered_skill_rows(root, sources, source_filters)
+    else:
+        rows = list_all_skill_rows(root, sources)
+
+    print("source\tname\tselector\tpath")
+    for row in rows:
+        print(row)
 
 
 def profile_list_command(args: argparse.Namespace) -> None:
@@ -505,6 +627,15 @@ def build_parser() -> argparse.ArgumentParser:
     add_source_resolution_options(sync_parser)
     add_dry_run_option(sync_parser)
     sync_parser.set_defaults(func=sync_selected_sources)
+
+    skill_parser = subcommands.add_parser("skill", help="List workspace and source skills.")
+    skill_subcommands = skill_parser.add_subparsers(dest="skill_command", required=True)
+
+    skill_list_parser = skill_subcommands.add_parser("list", aliases=["ls"], help="List discovered skills.")
+    skill_list_parser.add_argument("--source", "-s", dest="sources", action="append", help="Limit to a source name or workspace")
+    skill_list_parser.add_argument("--profile", "-p", help="Limit to skills selected by a profile")
+    add_source_resolution_options(skill_list_parser)
+    skill_list_parser.set_defaults(func=skill_list_command)
 
     profile_parser = subcommands.add_parser("profile", aliases=["p"], help="Manage profiles.")
     profile_subcommands = profile_parser.add_subparsers(dest="profile_command", required=True)

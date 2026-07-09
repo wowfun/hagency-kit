@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 from .common import die, read_toml, write_toml
@@ -496,11 +497,40 @@ def is_windows_platform() -> bool:
     return os.name == "nt"
 
 
+def default_profile_link_mode() -> str:
+    return "junction" if is_windows_platform() else "symlink"
+
+
+def is_junction(path: Path) -> bool:
+    return hasattr(path, "is_junction") and path.is_junction()
+
+
 def symlink_failure_message(link: Path, target: Path, error: OSError) -> str:
     message = f"could not create symlink {link} -> {target}: {error}"
     if is_windows_platform():
-        message += "; on Windows, rerun PowerShell or Git Bash as Administrator, or use -cp"
+        message += "; on Windows, rerun PowerShell or Git Bash as Administrator, use --link-mode junction, or use -cp"
     return message
+
+
+def junction_failure_message(link: Path, target: Path, error: BaseException) -> str:
+    return f"could not create junction {link} -> {target}: {error}"
+
+
+def create_windows_junction(link: Path, target: Path) -> None:
+    command = "New-Item -ItemType Junction -Path $args[0] -Target $args[1] | Out-Null"
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+            str(link),
+            str(target),
+        ],
+        check=True,
+        text=True,
+    )
 
 
 def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dry_run: bool) -> None:
@@ -518,6 +548,35 @@ def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dr
                 die(f"copy target is not a directory: {real_target}")
             link_dir.mkdir(parents=True, exist_ok=True)
             shutil.copytree(real_target, link, symlinks=False)
+        return
+
+    if link_mode == "junction":
+        if not is_windows_platform():
+            die("profile init link mode junction is only supported on Windows")
+        if not dry_run and not real_target.is_dir():
+            die(f"junction target is not a directory: {real_target}")
+        if is_junction(link):
+            existing = link.resolve()
+            if existing == real_target:
+                print(f"ok {link} -> {real_target}")
+                return
+            print(f"remove {link}")
+            if not dry_run:
+                link.rmdir()
+        elif link.is_symlink():
+            print(f"remove {link}")
+            if not dry_run:
+                link.unlink()
+        elif link.exists():
+            die(f"refusing to overwrite non-junction: {link}")
+
+        print(f"junction {link} -> {real_target}")
+        if not dry_run:
+            link_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                create_windows_junction(link, real_target)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                die(junction_failure_message(link, real_target, exc))
         return
 
     if link_mode != "symlink":

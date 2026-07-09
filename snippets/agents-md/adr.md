@@ -1,0 +1,1 @@
+- Specs and ADRs (docs/adr/) are self-contained; ADRs focus on the long-term ideal state at a high architectural level.

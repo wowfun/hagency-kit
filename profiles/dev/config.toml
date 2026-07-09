@@ -10,7 +10,7 @@ include = ["systematic-debugging"]
 include = ["frontend-design"]
 
 [skill.Waza]
-include = ["skills/write", "skills/design"]
+include = ["skills/write"]
 
 [skill."mattpocock/skills"]
-include = ["prototype"]
+include = ["prototype", "tdd", "codebase-design", "diagnosing-bugs"]

@@ -16,7 +16,7 @@ hagency skill ls
 hagency p init -p <target> <profile>
 ```
 
-`[defaults].depth` sets the default sync depth; transient Git clone/fetch/pull failures are retried automatically. Use `hagency source sync -s <slice>` to resume a selected source range after a failure. When a Git URL's inferred repo name already exists, `source add` falls back to `owner/repo`; pass `--name` to choose a custom source name.
+`[defaults].depth` sets the default sync depth; transient Git network failures are retried automatically. Use `hagency source sync -s <slice>` to resume a selected source range after a failure. When a Git URL's inferred repo name already exists, `source add` falls back to `owner/repo`; pass `--name` to choose a custom source name.
 
 ## Skills
 

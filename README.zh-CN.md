@@ -16,7 +16,7 @@ hagency skill ls
 hagency p init -p <target> <profile>
 ```
 
-`[defaults].depth` 设置默认 sync 深度；临时性的 Git clone/fetch/pull 失败会自动重试。失败后可用 `hagency source sync -s <slice>` 继续同步指定 source 范围。Git URL 推断出的 repo 名已存在时，`source add` 会 fallback 到 `owner/repo`；也可以传 `--name` 自定义 source 名。
+`[defaults].depth` 设置默认 sync 深度；临时性的 Git 网络失败会自动重试。失败后可用 `hagency source sync -s <slice>` 继续同步指定 source 范围。Git URL 推断出的 repo 名已存在时，`source add` 会 fallback 到 `owner/repo`；也可以传 `--name` 自定义 source 名。
 
 ## Skills
 

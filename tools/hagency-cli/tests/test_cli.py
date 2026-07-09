@@ -124,6 +124,53 @@ class CliTests(unittest.TestCase):
             )
         (self.root / name).mkdir()
 
+    def run_git(self, cwd: Path | None, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout.strip()
+
+    def commit_file(self, repo: Path, content: str, message: str) -> str:
+        (repo / "file.txt").write_text(content, encoding="utf-8")
+        self.run_git(repo, "add", "file.txt")
+        self.run_git(repo, "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", message)
+        return self.run_git(repo, "rev-parse", "HEAD")
+
+    def write_remote_source_config(self, name: str, origin: Path, *, depth: int | None = 1) -> None:
+        depth_line = f"depth = {depth}\n" if depth is not None else ""
+        self.config_path.write_text(
+            textwrap.dedent(
+                f"""
+                [defaults]
+                checkout_dir = "checkouts"
+                {depth_line}
+                [source.{name}.remote]
+                url = "{origin.as_uri()}"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+    def create_remote_source_checkout(self, name: str = "remote-source", *, shallow: bool = True) -> tuple[Path, Path]:
+        origin = self.root / f"{name}-origin"
+        self.run_git(None, "init", "-b", "main", str(origin))
+        self.commit_file(origin, "one", "one")
+
+        checkout = self.root / "checkouts" / name
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        clone_args = ["clone", "--branch", "main"]
+        if shallow:
+            clone_args.extend(["--depth", "1"])
+        clone_args.extend([origin.as_uri(), str(checkout)])
+        self.run_git(None, *clone_args)
+        self.write_remote_source_config(name, origin, depth=1 if shallow else None)
+        return origin, checkout
+
     def test_init_creates_config_and_refuses_existing_without_force(self) -> None:
         new_root = self.root / "new-workspace"
         stdout, _stderr = self.run_cli("init", "--root", str(new_root), cwd=self.root)
@@ -428,6 +475,41 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli("source", "sync", "--dry-run", expected=1)
 
         self.assertIn("defaults.depth must be a positive integer", stderr)
+
+    def test_source_sync_existing_shallow_checkout_fast_forwards_after_remote_advances(self) -> None:
+        origin, checkout = self.create_remote_source_checkout()
+        latest = self.commit_file(origin, "two", "two")
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source")
+
+        self.assertIn("sync source [1/1] remote-source", stdout)
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), latest)
+        self.assertNotIn("reset", stdout)
+
+    def test_source_sync_recovers_depth_one_remote_tracking_divergence(self) -> None:
+        origin, checkout = self.create_remote_source_checkout()
+        latest = self.commit_file(origin, "two", "two")
+        self.run_git(checkout, "fetch", "--depth", "1", "origin")
+
+        self.assertIn("[ahead 1, behind 1]", self.run_git(checkout, "status", "--short", "--branch"))
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source")
+
+        self.assertIn("sync source [1/1] remote-source", stdout)
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), latest)
+        self.assertNotIn("reset", stdout)
+
+    def test_source_sync_real_divergence_fails_without_resetting_local_commit(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        local = self.commit_file(checkout, "local", "local")
+        self.commit_file(origin, "remote", "remote")
+
+        stdout, stderr = self.run_cli("source", "sync", "remote-source", expected=1)
+
+        self.assertIn("sync source [1/1] remote-source", stdout)
+        self.assertIn("cannot fast-forward", stderr)
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
+        self.assertNotIn("reset", stdout)
 
     def test_source_slice_parsing_valid_values(self) -> None:
         self.assertEqual(cli.parse_source_slice("4:", 5), [4, 5])
@@ -1082,6 +1164,93 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("ln -s", stdout)
         self.assertFalse((target / ".agents" / "skills" / "external-one").exists())
 
+    def test_profile_init_windows_default_uses_junction(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        target = self.root / "target"
+
+        with (
+            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
+            mock.patch.object(
+                profile_module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["powershell"], 0),
+            ) as run,
+        ):
+            stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content")
+
+        self.assertIn("junction", stdout)
+        run.assert_called_once()
+        command = run.call_args[0][0]
+        self.assertEqual(command[0], "powershell")
+        self.assertEqual(command[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
+        self.assertIn("New-Item -ItemType Junction", command[4])
+        self.assertEqual(Path(command[5]), target / ".agents" / "skills" / "external-one")
+        self.assertEqual(Path(command[6]), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_profile_init_windows_junction_dry_run_does_not_call_powershell(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        target = self.root / "target"
+
+        with (
+            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
+            mock.patch.object(profile_module.subprocess, "run") as run,
+        ):
+            stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content", "--dry-run")
+
+        self.assertIn("junction", stdout)
+        run.assert_not_called()
+        self.assertFalse((target / ".agents" / "skills" / "external-one").exists())
+
+    def test_profile_init_explicit_junction_is_windows_only(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(profile_module, "is_windows_platform", return_value=False):
+            _stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-p",
+                str(self.root / "target"),
+                "content",
+                "--link-mode",
+                "junction",
+                expected=1,
+            )
+
+        self.assertIn("profile init link mode junction is only supported on Windows", stderr)
+
     def test_profile_init_copy_refuses_existing_destination(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
@@ -1106,20 +1275,22 @@ class CliTests(unittest.TestCase):
         self.assertIn("refusing to overwrite existing skill destination", stderr)
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
 
-    def test_profile_init_copy_conflicts_with_explicit_symlink_mode(self) -> None:
-        _stdout, stderr = self.run_cli(
-            "profile",
-            "init",
-            "-p",
-            str(self.root / "target"),
-            "content",
-            "-cp",
-            "--link-mode",
-            "symlink",
-            expected=1,
-        )
+    def test_profile_init_copy_conflicts_with_explicit_link_modes(self) -> None:
+        for link_mode in ("symlink", "junction"):
+            with self.subTest(link_mode=link_mode):
+                _stdout, stderr = self.run_cli(
+                    "profile",
+                    "init",
+                    "-p",
+                    str(self.root / "target"),
+                    "content",
+                    "-cp",
+                    "--link-mode",
+                    link_mode,
+                    expected=1,
+                )
 
-        self.assertIn("-cp cannot be combined with --link-mode symlink", stderr)
+            self.assertIn(f"-cp cannot be combined with --link-mode {link_mode}", stderr)
 
     def test_profile_init_copy_long_option_is_not_registered(self) -> None:
         _stdout, stderr = self.run_cli(
@@ -1152,10 +1323,20 @@ class CliTests(unittest.TestCase):
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(profile_module.os, "symlink", side_effect=OSError("permission denied")),
         ):
-            _stdout, stderr = self.run_cli("profile", "init", "-p", str(self.root / "target"), "content", expected=1)
+            _stdout, stderr = self.run_cli(
+                "profile",
+                "init",
+                "-p",
+                str(self.root / "target"),
+                "content",
+                "--link-mode",
+                "symlink",
+                expected=1,
+            )
 
         self.assertIn("could not create symlink", stderr)
         self.assertIn("PowerShell or Git Bash as Administrator", stderr)
+        self.assertIn("--link-mode junction", stderr)
         self.assertIn("-cp", stderr)
 
     def test_duplicate_discovered_skill_names_fail_with_prefix_guidance(self) -> None:

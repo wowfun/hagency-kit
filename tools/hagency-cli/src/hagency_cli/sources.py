@@ -11,6 +11,11 @@ from .common import die, expand_path, git_ok, read_toml, run
 
 GIT_NETWORK_RETRIES = 3
 GIT_NETWORK_RETRY_DELAY_SECONDS = 0.25
+GIT_SHALLOW_DEEPEN_STEPS = (50, 200, 1000)
+
+
+class SourceSyncError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -194,9 +199,23 @@ def depth_args(depth: int | None) -> list[str]:
     return ["--depth", str(depth)]
 
 
+def deepen_args(depth: int) -> list[str]:
+    return ["--deepen", str(depth)]
+
+
+def remote_tracking_ref(remote: Remote) -> str:
+    return f"refs/remotes/{remote.name}/{remote.ref}"
+
+
+def remote_tracking_name(remote: Remote) -> str:
+    return f"{remote.name}/{remote.ref}"
+
+
+def remote_tracking_refspec(remote: Remote) -> str:
+    return f"+{remote.ref}:{remote_tracking_ref(remote)}"
+
+
 def git_network_label(cmd: list[str]) -> str:
-    if cmd[:3] == ["git", "pull", "--ff-only"]:
-        return "git pull --ff-only"
     if len(cmd) >= 2 and cmd[0] == "git":
         return f"git {cmd[1]}"
     return cmd[0]
@@ -213,6 +232,68 @@ def run_git_network(cmd: list[str], *, cwd: Path | None = None, dry_run: bool = 
             retry = attempt + 1
             print(f"retry {retry}/{GIT_NETWORK_RETRIES} after {git_network_label(cmd)} failed")
             time.sleep(GIT_NETWORK_RETRY_DELAY_SECONDS * (2 ** attempt))
+
+
+def is_shallow_repository(cwd: Path) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def is_ancestor(cwd: Path, ancestor: str, descendant: str) -> bool:
+    return git_ok(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=cwd)
+
+
+def has_merge_base(cwd: Path, left: str, right: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", left, right],
+        cwd=cwd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def fetch_remote_branch(source: Source, remote: Remote, *, dry_run: bool, depth: int | None) -> None:
+    run_git_network(
+        ["git", "fetch", *depth_args(depth), remote.name, remote_tracking_refspec(remote)],
+        cwd=source.path,
+        dry_run=dry_run,
+    )
+
+
+def deepen_remote_branch(source: Source, remote: Remote, depth: int) -> None:
+    run_git_network(
+        ["git", "fetch", *deepen_args(depth), remote.name, remote_tracking_refspec(remote)],
+        cwd=source.path,
+        dry_run=False,
+    )
+
+
+def ensure_fast_forwardable(source: Source, remote: Remote) -> None:
+    upstream = remote_tracking_ref(remote)
+    upstream_name = remote_tracking_name(remote)
+    if is_ancestor(source.path, "HEAD", upstream):
+        return
+
+    if is_shallow_repository(source.path):
+        for deepen_step in GIT_SHALLOW_DEEPEN_STEPS:
+            deepen_remote_branch(source, remote, deepen_step)
+            if is_ancestor(source.path, "HEAD", upstream):
+                return
+
+    if has_merge_base(source.path, "HEAD", upstream):
+        raise SourceSyncError(f"cannot fast-forward {remote.ref}: local checkout has commits not in {upstream_name}")
+    if is_shallow_repository(source.path):
+        raise SourceSyncError(
+            f"cannot fast-forward {remote.ref}: shallow checkout still lacks common history with {upstream_name}"
+        )
+    raise SourceSyncError(f"cannot fast-forward {remote.ref}: no common history with {upstream_name}")
 
 
 def sync_source(source: Source, *, dry_run: bool, depth: int | None = None) -> None:
@@ -235,17 +316,14 @@ def sync_source(source: Source, *, dry_run: bool, depth: int | None = None) -> N
             run(["git", "remote", "add", remote.name, remote.url], cwd=source.path, dry_run=dry_run)
         elif current_url.stdout.strip() != remote.url:
             run(["git", "remote", "set-url", remote.name, remote.url], cwd=source.path, dry_run=dry_run)
-        run_git_network(["git", "fetch", *depth_args(depth), remote.name], cwd=source.path, dry_run=dry_run)
+        fetch_remote_branch(source, remote, dry_run=dry_run, depth=depth)
         if not dry_run:
-            remote_branch = f"refs/remotes/{remote.name}/{remote.ref}"
+            remote_branch = remote_tracking_ref(remote)
             local_branch = f"refs/heads/{remote.ref}"
             if git_ok(["git", "rev-parse", "--verify", local_branch], cwd=source.path):
                 run(["git", "checkout", remote.ref], cwd=source.path, dry_run=False)
-                run_git_network(
-                    ["git", "pull", "--ff-only", *depth_args(depth), remote.name, remote.ref],
-                    cwd=source.path,
-                    dry_run=False,
-                )
+                ensure_fast_forwardable(source, remote)
+                run(["git", "merge", "--ff-only", remote_tracking_name(remote)], cwd=source.path, dry_run=False)
             elif git_ok(["git", "rev-parse", "--verify", remote_branch], cwd=source.path):
                 run(
                     ["git", "checkout", "-b", remote.ref, "--track", f"{remote.name}/{remote.ref}"],

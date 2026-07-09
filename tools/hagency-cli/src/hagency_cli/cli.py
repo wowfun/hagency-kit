@@ -8,6 +8,7 @@ from pathlib import Path
 from .common import die, expand_path, read_toml, render_toml, write_toml
 from .profiles import (
     build_profile_config,
+    default_profile_link_mode,
     discover_skill_dirs,
     discover_skill_links,
     init_profile,
@@ -40,6 +41,7 @@ from .sources import (
     resolve_sources,
     resolve_source_add_args,
     select_sources,
+    SourceSyncError,
     sync_source,
 )
 from .workspace import init_workspace, resolve_workspace_root, workspace_config_path
@@ -175,6 +177,9 @@ def sync_sources_with_progress(entries: list[tuple[int, object]], *, total: int,
         print(f"sync source [{index}/{total}] {source.name}")
         try:
             sync_source(source, dry_run=dry_run, depth=depth)
+        except SourceSyncError as exc:
+            failures.append(source.name)
+            print(f"Error: source {source.name} failed: {exc}", file=sys.stderr)
         except subprocess.CalledProcessError as exc:
             failures.append(source.name)
             print(f"Error: source {source.name} failed: {format_called_process_error(exc)}", file=sys.stderr)
@@ -200,11 +205,11 @@ def sync_selected_sources(args: argparse.Namespace) -> None:
 
 
 def profile_init_link_mode(args: argparse.Namespace) -> str:
-    if args.copy and args.link_mode == "symlink":
-        die("-cp cannot be combined with --link-mode symlink")
+    if args.copy and args.link_mode in {"symlink", "junction"}:
+        die(f"-cp cannot be combined with --link-mode {args.link_mode}")
     if args.copy:
         return "copy"
-    return args.link_mode or "symlink"
+    return args.link_mode or default_profile_link_mode()
 
 
 def init_profile_command(args: argparse.Namespace) -> None:
@@ -691,8 +696,12 @@ def build_parser() -> argparse.ArgumentParser:
     profile_init_parser = profile_subcommands.add_parser("init", help="Initialize a profile into a target directory.")
     profile_init_parser.add_argument("--path", "-p", required=True, help="Target workspace directory")
     profile_init_parser.add_argument("name", help="Profile name under profiles/")
-    profile_init_parser.add_argument("-cp", dest="copy", action="store_true", help="Copy skill directories instead of symlinking")
-    profile_init_parser.add_argument("--link-mode", choices=["symlink", "copy"], help="How to materialize profile skills")
+    profile_init_parser.add_argument("-cp", dest="copy", action="store_true", help="Copy skill directories instead of linking")
+    profile_init_parser.add_argument(
+        "--link-mode",
+        choices=["symlink", "copy", "junction"],
+        help="How to materialize profile skills; defaults to junction on Windows and symlink elsewhere",
+    )
     add_source_resolution_options(profile_init_parser)
     add_dry_run_option(profile_init_parser)
     profile_init_parser.set_defaults(func=init_profile_command)

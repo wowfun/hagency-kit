@@ -142,21 +142,32 @@ class CliTests(unittest.TestCase):
         return self.run_git(repo, "rev-parse", "HEAD")
 
     def write_remote_source_config(self, name: str, origin: Path, *, depth: int | None = 1) -> None:
+        self.write_remote_sources_config({name: origin}, depth=depth)
+
+    def write_remote_sources_config(self, origins: dict[str, Path], *, depth: int | None = 1) -> None:
         depth_line = f"depth = {depth}\n" if depth is not None else ""
+        source_lines = "\n".join(
+            textwrap.dedent(
+                f"""
+                [source.{name}.remote]
+                url = "{origin.as_uri()}"
+                """
+            ).strip()
+            for name, origin in origins.items()
+        )
         self.config_path.write_text(
             textwrap.dedent(
                 f"""
                 [defaults]
                 checkout_dir = "checkouts"
                 {depth_line}
-                [source.{name}.remote]
-                url = "{origin.as_uri()}"
+                {source_lines}
                 """
             ).lstrip(),
             encoding="utf-8",
         )
 
-    def create_remote_source_checkout(self, name: str = "remote-source", *, shallow: bool = True) -> tuple[Path, Path]:
+    def create_remote_source_pair(self, name: str, *, shallow: bool) -> tuple[Path, Path]:
         origin = self.root / f"{name}-origin"
         self.run_git(None, "init", "-b", "main", str(origin))
         self.commit_file(origin, "one", "one")
@@ -168,8 +179,19 @@ class CliTests(unittest.TestCase):
             clone_args.extend(["--depth", "1"])
         clone_args.extend([origin.as_uri(), str(checkout)])
         self.run_git(None, *clone_args)
+        return origin, checkout
+
+    def create_remote_source_checkout(self, name: str = "remote-source", *, shallow: bool = True) -> tuple[Path, Path]:
+        origin, checkout = self.create_remote_source_pair(name, shallow=shallow)
         self.write_remote_source_config(name, origin, depth=1 if shallow else None)
         return origin, checkout
+
+    def test_package_exposes_hagency_and_hgc_console_scripts(self) -> None:
+        with (ROOT / "pyproject.toml").open("rb") as handle:
+            scripts = tomllib.load(handle)["project"]["scripts"]
+
+        self.assertEqual(scripts["hagency"], "hagency_cli.cli:main")
+        self.assertEqual(scripts["hgc"], "hagency_cli.cli:main")
 
     def test_init_creates_config_and_refuses_existing_without_force(self) -> None:
         new_root = self.root / "new-workspace"
@@ -508,8 +530,230 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("sync source [1/1] remote-source", stdout)
         self.assertIn("cannot fast-forward", stderr)
+        self.assertIn(
+            "Tip: if these checkouts are disposable and local-only commits may be discarded, run:\n"
+            "  hagency source sync remote-source --reanchor",
+            stderr,
+        )
         self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
         self.assertNotIn("reset", stdout)
+
+    def test_source_sync_reanchor_replaces_clean_divergent_branch_without_persistent_state(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        local = self.commit_file(checkout, "local", "local")
+        remote = self.commit_file(origin, "remote", "remote")
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--reanchor")
+
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), remote)
+        self.assertEqual(self.run_git(checkout, "status", "--porcelain"), "")
+        self.assertIn(
+            f"reanchor source remote-source: main {local} -> origin/main {remote}",
+            stdout,
+        )
+        self.assertEqual(self.run_git(checkout, "for-each-ref", "--format=%(refname)", "refs/hagency"), "")
+        self.assertFalse((checkout / ".git" / "hagency").exists())
+
+    def test_source_sync_reanchor_rejects_staged_unstaged_and_untracked_changes(self) -> None:
+        for dirty_kind in ("staged", "unstaged", "untracked"):
+            with self.subTest(dirty_kind=dirty_kind):
+                name = f"{dirty_kind}-source"
+                origin, checkout = self.create_remote_source_pair(name, shallow=False)
+                local = self.commit_file(checkout, "local", "local")
+                self.commit_file(origin, "remote", "remote")
+                self.write_remote_source_config(name, origin, depth=None)
+
+                if dirty_kind == "staged":
+                    (checkout / "file.txt").write_text("staged", encoding="utf-8")
+                    self.run_git(checkout, "add", "file.txt")
+                elif dirty_kind == "unstaged":
+                    (checkout / "file.txt").write_text("unstaged", encoding="utf-8")
+                else:
+                    (checkout / "untracked.txt").write_text("untracked", encoding="utf-8")
+
+                _stdout, stderr = self.run_cli("source", "sync", name, "--reanchor", expected=1)
+
+                self.assertIn(
+                    "cannot reanchor main: checkout has staged, tracked, or untracked changes",
+                    stderr,
+                )
+                self.assertNotIn("Tip:", stderr)
+                self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
+                self.assertNotEqual(self.run_git(checkout, "status", "--porcelain"), "")
+
+    def test_source_sync_reanchor_refuses_to_overwrite_ignored_file(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        local = self.commit_file(checkout, "local", "local")
+        (origin / "generated.txt").write_text("remote", encoding="utf-8")
+        self.run_git(origin, "add", "generated.txt")
+        self.run_git(
+            origin,
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "remote",
+        )
+        (checkout / ".git" / "info" / "exclude").write_text("generated.txt\n", encoding="utf-8")
+        (checkout / "generated.txt").write_text("keep", encoding="utf-8")
+        self.assertEqual(self.run_git(checkout, "status", "--porcelain"), "")
+
+        _stdout, stderr = self.run_cli("source", "sync", "remote-source", "--reanchor", expected=1)
+
+        self.assertIn("git checkout --no-overwrite-ignore -B main origin/main", stderr)
+        self.assertNotIn("Tip:", stderr)
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
+        self.assertEqual((checkout / "generated.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_source_sync_reanchor_handles_unrelated_upstream_history(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        old_head = self.run_git(checkout, "rev-parse", "HEAD")
+        self.run_git(origin, "checkout", "--orphan", "rewritten")
+        self.run_git(origin, "rm", "-rf", ".")
+        rewritten = self.commit_file(origin, "rewritten", "rewritten")
+        self.run_git(origin, "branch", "-M", "main")
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--reanchor")
+
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), rewritten)
+        self.assertIn(
+            f"reanchor source remote-source: main {old_head} -> origin/main {rewritten}",
+            stdout,
+        )
+
+    def test_source_sync_reanchor_batch_updates_eligible_sources_and_reports_dirty_source(self) -> None:
+        fast_origin, fast_checkout = self.create_remote_source_pair("fast-source", shallow=False)
+        fast_remote = self.commit_file(fast_origin, "fast remote", "fast remote")
+
+        rewrite_origin, rewrite_checkout = self.create_remote_source_pair("rewrite-source", shallow=False)
+        self.commit_file(rewrite_checkout, "rewrite local", "rewrite local")
+        rewrite_remote = self.commit_file(rewrite_origin, "rewrite remote", "rewrite remote")
+
+        dirty_origin, dirty_checkout = self.create_remote_source_pair("dirty-source", shallow=False)
+        dirty_local = self.commit_file(dirty_checkout, "dirty local", "dirty local")
+        self.commit_file(dirty_origin, "dirty remote", "dirty remote")
+        (dirty_checkout / "untracked.txt").write_text("keep", encoding="utf-8")
+
+        self.write_remote_sources_config(
+            {
+                "fast-source": fast_origin,
+                "rewrite-source": rewrite_origin,
+                "dirty-source": dirty_origin,
+            },
+            depth=None,
+        )
+
+        stdout, stderr = self.run_cli("source", "sync", "--reanchor", expected=1)
+
+        self.assertEqual(self.run_git(fast_checkout, "rev-parse", "HEAD"), fast_remote)
+        self.assertEqual(self.run_git(rewrite_checkout, "rev-parse", "HEAD"), rewrite_remote)
+        self.assertEqual(self.run_git(dirty_checkout, "rev-parse", "HEAD"), dirty_local)
+        self.assertIn("reanchor source rewrite-source:", stdout)
+        self.assertIn("source dirty-source failed: cannot reanchor main", stderr)
+        self.assertIn("source sync failed for: dirty-source", stderr)
+        self.assertNotIn("Tip:", stderr)
+
+    def test_source_sync_aggregates_reanchor_tip_for_all_divergent_sources(self) -> None:
+        first_origin, first_checkout = self.create_remote_source_pair("first-source", shallow=False)
+        first_local = self.commit_file(first_checkout, "first local", "first local")
+        self.commit_file(first_origin, "first remote", "first remote")
+
+        second_origin, second_checkout = self.create_remote_source_pair("second-source", shallow=False)
+        second_local = self.commit_file(second_checkout, "second local", "second local")
+        self.commit_file(second_origin, "second remote", "second remote")
+
+        self.write_remote_sources_config(
+            {
+                "first-source": first_origin,
+                "second-source": second_origin,
+            },
+            depth=None,
+        )
+
+        _stdout, stderr = self.run_cli("source", "sync", expected=1)
+
+        self.assertEqual(stderr.count("Tip:"), 1)
+        self.assertIn(
+            "  hagency source sync first-source second-source --reanchor",
+            stderr,
+        )
+        self.assertIn("source sync failed for: first-source, second-source", stderr)
+        self.assertEqual(self.run_git(first_checkout, "rev-parse", "HEAD"), first_local)
+        self.assertEqual(self.run_git(second_checkout, "rev-parse", "HEAD"), second_local)
+
+    def test_source_sync_reanchor_dry_run_only_describes_conditional_behavior(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        old_head = self.commit_file(checkout, "local", "local")
+        self.commit_file(origin, "remote", "remote")
+        old_remote = self.run_git(checkout, "rev-parse", "origin/main")
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--reanchor", "--dry-run")
+
+        self.assertIn("git fetch origin +main:refs/remotes/origin/main", stdout)
+        self.assertIn(
+            "Would reanchor source remote-source to origin/main "
+            "only if the fetched history cannot fast-forward and the checkout is clean",
+            stdout,
+        )
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), old_head)
+        self.assertEqual(self.run_git(checkout, "rev-parse", "origin/main"), old_remote)
+
+    def test_source_sync_reanchor_supports_profile_and_slice_selection(self) -> None:
+        origins: dict[str, Path] = {}
+        for name in ("first-source", "second-source", "third-source"):
+            origin, _checkout = self.create_remote_source_pair(name, shallow=False)
+            origins[name] = origin
+        self.write_remote_sources_config(origins, depth=None)
+        (self.root / "profiles" / "content" / "config.toml").write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.first-source]
+
+                [skill.second-source]
+
+                [skill.third-source]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        stdout, _stderr = self.run_cli(
+            "source",
+            "sync",
+            "--profile",
+            "content",
+            "-s",
+            "2:",
+            "--reanchor",
+            "--dry-run",
+        )
+
+        self.assertNotIn("sync source [1/3] first-source", stdout)
+        self.assertIn("sync source [2/3] second-source", stdout)
+        self.assertIn("Would reanchor source second-source to origin/main", stdout)
+        self.assertIn("sync source [3/3] third-source", stdout)
+        self.assertIn("Would reanchor source third-source to origin/main", stdout)
+
+    def test_source_sync_reanchor_keeps_fast_forward_and_clone_paths(self) -> None:
+        origin, checkout = self.create_remote_source_checkout(shallow=False)
+        latest = self.commit_file(origin, "remote", "remote")
+
+        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--reanchor")
+
+        self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), latest)
+        self.assertNotIn("reanchor source", stdout)
+
+        clone_checkout = self.root / "checkouts" / "clone-source"
+        self.write_remote_source_config("clone-source", origin, depth=None)
+
+        stdout, _stderr = self.run_cli("source", "sync", "clone-source", "--reanchor")
+
+        self.assertEqual(self.run_git(clone_checkout, "rev-parse", "HEAD"), latest)
+        self.assertNotIn("reanchor source", stdout)
 
     def test_source_slice_parsing_valid_values(self) -> None:
         self.assertEqual(cli.parse_source_slice("4:", 5), [4, 5])
@@ -582,7 +826,7 @@ class CliTests(unittest.TestCase):
         self.append_local_source("second-source")
         self.append_local_source("third-source")
 
-        def fake_sync(source, *, dry_run: bool, depth: int | None = None) -> None:
+        def fake_sync(source, *, dry_run: bool, depth: int | None = None, reanchor: bool = False) -> None:
             if source.name == "second-source":
                 raise subprocess.CalledProcessError(128, ["git", "fetch", "origin"])
 
@@ -594,6 +838,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("sync source [3/3] third-source", stdout)
         self.assertIn("source second-source failed", stderr)
         self.assertIn("source sync failed for: second-source", stderr)
+        self.assertNotIn("Tip:", stderr)
         self.assertNotIn("Traceback", stderr)
 
     def test_git_fetch_uses_hardcoded_retries(self) -> None:
@@ -1194,9 +1439,46 @@ class CliTests(unittest.TestCase):
         command = run.call_args[0][0]
         self.assertEqual(command[0], "powershell")
         self.assertEqual(command[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
+        self.assertEqual(len(command), 5)
         self.assertIn("New-Item -ItemType Junction", command[4])
-        self.assertEqual(Path(command[5]), target / ".agents" / "skills" / "external-one")
-        self.assertEqual(Path(command[6]), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_LINK", command[4])
+        self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_TARGET", command[4])
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]), target / ".agents" / "skills" / "external-one")
+        self.assertEqual(
+            Path(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"]),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
+
+    def test_windows_junction_paths_are_not_parsed_as_powershell_code(self) -> None:
+        link = Path(r"C:\Users\测试 User\work & tools\link's [x]")
+        target = Path(r"D:\Source Trees\pack;name\$literal's")
+
+        with (
+            mock.patch.dict(profile_module.os.environ, {"HAGENCY_TEST_SENTINEL": "kept"}, clear=True),
+            mock.patch.object(
+                profile_module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["powershell"], 0),
+            ) as run,
+        ):
+            profile_module.create_windows_junction(link, target)
+
+            self.assertNotIn("HAGENCY_PROFILE_JUNCTION_LINK", profile_module.os.environ)
+            self.assertNotIn("HAGENCY_PROFILE_JUNCTION_TARGET", profile_module.os.environ)
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertEqual(len(command), 5)
+        self.assertNotIn(str(link), command[4])
+        self.assertNotIn(str(target), command[4])
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["HAGENCY_TEST_SENTINEL"], "kept")
+        self.assertEqual(child_env["HAGENCY_PROFILE_JUNCTION_LINK"], str(link))
+        self.assertEqual(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"], str(target))
+        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertTrue(run.call_args.kwargs["text"])
 
     def test_profile_init_windows_junction_dry_run_does_not_call_powershell(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -1398,6 +1680,133 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("external-two", stdout)
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
         self.assertFalse((target / ".agents" / "skills" / "external-two").exists())
+
+    def test_skill_add_installs_unique_name_under_invocation_cwd(self) -> None:
+        invocation_cwd = self.root / "projects" / "example"
+        invocation_cwd.mkdir(parents=True)
+
+        stdout, stderr = self.run_cli("skill", "add", "external-one", cwd=invocation_cwd)
+
+        destination = invocation_cwd / ".agents" / "skills" / "external-one"
+        self.assertEqual(stderr, "")
+        self.assertIn(f"link {destination} ->", stdout)
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_skill_add_accepts_exact_source_selector_and_explicit_workspace_root(self) -> None:
+        invocation_cwd = self.root.parent / f"{self.root.name}-consumer"
+        invocation_cwd.mkdir()
+
+        self.run_cli(
+            "skill",
+            "add",
+            "local-source:nested/external-one",
+            "--root",
+            str(self.root),
+            cwd=invocation_cwd,
+        )
+
+        destination = invocation_cwd / ".agents" / "skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_skill_add_global_installs_under_user_home(self) -> None:
+        home = self.root / "user-home"
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        with mock.patch.object(cli.Path, "home", return_value=home):
+            self.run_cli("skill", "add", "local-one", "--global", cwd=invocation_cwd)
+
+        destination = home / ".agents" / "skills" / "local-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "skills" / "local-one").resolve())
+        self.assertFalse((invocation_cwd / ".agents").exists())
+
+    def test_skill_add_dry_run_does_not_create_destination(self) -> None:
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        stdout, _stderr = self.run_cli("skill", "add", "external-one", "--dry-run", cwd=invocation_cwd)
+
+        destination = invocation_cwd / ".agents" / "skills" / "external-one"
+        self.assertIn(f"link {destination} ->", stdout)
+        self.assertFalse((invocation_cwd / ".agents").exists())
+
+    def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(self) -> None:
+        _stdout, stderr = self.run_cli("skill", "add", "local-source", expected=1)
+        self.assertIn("skill add requires one skill, not source: local-source", stderr)
+
+        self.write_skill(self.root / "local-source" / "other" / "external-two")
+        _stdout, stderr = self.run_cli("skill", "add", "local-source:*", expected=1)
+        self.assertIn("skill reference 'local-source:*' matched 2 skills; choose one exact SOURCE:selector", stderr)
+
+        self.write_skill(self.root / "skills" / "external-one")
+        _stdout, stderr = self.run_cli("skill", "add", "external-one", expected=1)
+        self.assertIn("skill name 'external-one' is ambiguous. Choose one:", stderr)
+        self.assertIn("hagency skill add workspace:skills/external-one", stderr)
+        self.assertIn("hagency skill add local-source:nested/external-one", stderr)
+
+    def test_skill_add_reports_unknown_and_unsynced_references(self) -> None:
+        _stdout, stderr = self.run_cli("skill", "add", "missing", expected=1)
+        self.assertIn("unknown source or skill: missing", stderr)
+
+        self.append_remote_source("remote-source")
+        _stdout, stderr = self.run_cli("skill", "add", "remote-source:missing", expected=1)
+        self.assertIn("source path does not exist; run hagency source sync first", stderr)
+
+    def test_skill_add_is_idempotent_retargets_links_and_refuses_real_destinations(self) -> None:
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        self.run_cli("skill", "add", "local-source:nested/external-one", cwd=invocation_cwd)
+        stdout, _stderr = self.run_cli(
+            "skill",
+            "add",
+            "local-source:nested/external-one",
+            cwd=invocation_cwd,
+        )
+        destination = invocation_cwd / ".agents" / "skills" / "external-one"
+        self.assertIn(f"ok {destination} ->", stdout)
+
+        workspace_skill = self.root / "skills" / "external-one"
+        self.write_skill(workspace_skill)
+        stdout, _stderr = self.run_cli(
+            "skill",
+            "add",
+            "workspace:skills/external-one",
+            cwd=invocation_cwd,
+        )
+        self.assertIn(f"remove {destination}", stdout)
+        self.assertEqual(destination.resolve(), workspace_skill.resolve())
+
+        destination.unlink()
+        destination.mkdir()
+        (destination / "keep.txt").write_text("keep", encoding="utf-8")
+        _stdout, stderr = self.run_cli(
+            "skill",
+            "add",
+            "local-source:nested/external-one",
+            cwd=invocation_cwd,
+            expected=1,
+        )
+        self.assertIn("refusing to overwrite non-symlink", stderr)
+        self.assertEqual((destination / "keep.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_skill_add_uses_windows_junction_materialization(self) -> None:
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        with (
+            mock.patch.object(profile_module, "is_windows_platform", return_value=True),
+            mock.patch.object(profile_module, "create_windows_junction") as create_junction,
+        ):
+            self.run_cli("skill", "add", "external-one", cwd=invocation_cwd)
+
+        create_junction.assert_called_once_with(
+            invocation_cwd / ".agents" / "skills" / "external-one",
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
 
     def test_skill_list_default_scans_workspace_and_sources(self) -> None:
         stdout, stderr = self.run_cli("skill", "list")

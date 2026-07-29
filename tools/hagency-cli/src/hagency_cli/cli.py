@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from .profiles import (
     discover_skill_dirs,
     discover_skill_links,
     init_profile,
+    install_skill,
     list_profile_configs,
     profile_config_path,
     profile_dir_path,
@@ -41,6 +43,7 @@ from .sources import (
     resolve_sources,
     resolve_source_add_args,
     select_sources,
+    SourceCannotFastForwardError,
     SourceSyncError,
     sync_source,
 )
@@ -171,12 +174,24 @@ def init_workspace_command(args: argparse.Namespace) -> None:
     init_workspace(args.root, Path.cwd(), force=args.force, dry_run=args.dry_run)
 
 
-def sync_sources_with_progress(entries: list[tuple[int, object]], *, total: int, dry_run: bool, depth: int | None) -> None:
+def sync_sources_with_progress(
+    entries: list[tuple[int, object]],
+    *,
+    total: int,
+    dry_run: bool,
+    depth: int | None,
+    reanchor: bool = False,
+) -> None:
     failures: list[str] = []
+    reanchor_candidates: list[str] = []
     for index, source in entries:
         print(f"sync source [{index}/{total}] {source.name}")
         try:
-            sync_source(source, dry_run=dry_run, depth=depth)
+            sync_source(source, dry_run=dry_run, depth=depth, reanchor=reanchor)
+        except SourceCannotFastForwardError as exc:
+            failures.append(source.name)
+            reanchor_candidates.append(source.name)
+            print(f"Error: source {source.name} failed: {exc}", file=sys.stderr)
         except SourceSyncError as exc:
             failures.append(source.name)
             print(f"Error: source {source.name} failed: {exc}", file=sys.stderr)
@@ -185,6 +200,13 @@ def sync_sources_with_progress(entries: list[tuple[int, object]], *, total: int,
             print(f"Error: source {source.name} failed: {format_called_process_error(exc)}", file=sys.stderr)
 
     if failures:
+        if reanchor_candidates:
+            command = shlex.join(["hagency", "source", "sync", *reanchor_candidates, "--reanchor"])
+            print(
+                "Tip: if these checkouts are disposable and local-only commits may be discarded, run:\n"
+                f"  {command}",
+                file=sys.stderr,
+            )
         die(f"source sync failed for: {', '.join(failures)}")
 
 
@@ -201,7 +223,13 @@ def sync_selected_sources(args: argparse.Namespace) -> None:
 
     selected = select_sources(sources, selected_names) if selected_names else list(sources.values())
     total = len(selected)
-    sync_sources_with_progress(source_slice_entries(selected, args.slice), total=total, dry_run=args.dry_run, depth=depth)
+    sync_sources_with_progress(
+        source_slice_entries(selected, args.slice),
+        total=total,
+        dry_run=args.dry_run,
+        depth=depth,
+        reanchor=args.reanchor,
+    )
 
 
 def profile_init_link_mode(args: argparse.Namespace) -> str:
@@ -322,6 +350,40 @@ def skill_list_command(args: argparse.Namespace) -> None:
     print("source\tname\tselector\tpath")
     for row in rows:
         print(row)
+
+
+def resolve_skill_add_link(reference: str, sources: dict, root: Path) -> tuple[str, Path]:
+    source_name, selector = resolve_profile_skill_reference(
+        reference,
+        sources,
+        root,
+        command_prefix="hagency skill",
+        option="add",
+    )
+    if selector is None:
+        die(f"skill add requires one skill, not source: {reference}")
+
+    source = skill_source(source_name, sources, workspace_source(root))
+    require_source_path(source)
+    links = resolve_selector(source, selector, skip_roots=skill_skip_roots(source_name, sources))
+    if len(links) != 1:
+        die(f"skill reference {reference!r} matched {len(links)} skills; choose one exact SOURCE:selector")
+    return links[0]
+
+
+def skill_add_command(args: argparse.Namespace) -> None:
+    invocation_cwd = Path.cwd()
+    root = workspace_root_arg(args.root)
+    sources = load_sources(args, root)
+    name, target = resolve_skill_add_link(args.skill, sources, root)
+    install_root = Path.home() if args.global_install else invocation_cwd
+    install_skill(
+        install_root / ".agents" / "skills",
+        name,
+        target,
+        link_mode=default_profile_link_mode(),
+        dry_run=args.dry_run,
+    )
 
 
 def profile_list_command(args: argparse.Namespace) -> None:
@@ -629,12 +691,29 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument("--profile", help="Sync only sources referenced by profiles/<name>/config.toml")
     sync_parser.add_argument("--depth", type=positive_int, help="Create or update shallow checkouts with this depth")
     sync_parser.add_argument("--slice", "-s", help="1-based source indexes or slices to sync, such as 4:, 2:4, :3, 4, or 1,3:")
+    sync_parser.add_argument(
+        "--reanchor",
+        action="store_true",
+        help="Replace clean local branches when fetched upstream history cannot fast-forward",
+    )
     add_source_resolution_options(sync_parser)
     add_dry_run_option(sync_parser)
     sync_parser.set_defaults(func=sync_selected_sources)
 
-    skill_parser = subcommands.add_parser("skill", help="List workspace and source skills.")
+    skill_parser = subcommands.add_parser("skill", help="Manage workspace and source skills.")
     skill_subcommands = skill_parser.add_subparsers(dest="skill_command", required=True)
+
+    skill_add_parser = skill_subcommands.add_parser("add", help="Install one discovered skill.")
+    skill_add_parser.add_argument("skill", help="Unique skill name or exact SOURCE:selector")
+    skill_add_parser.add_argument(
+        "--global",
+        dest="global_install",
+        action="store_true",
+        help="Install under ~/.agents/skills instead of the current directory",
+    )
+    add_source_resolution_options(skill_add_parser)
+    add_dry_run_option(skill_add_parser)
+    skill_add_parser.set_defaults(func=skill_add_command)
 
     skill_list_parser = skill_subcommands.add_parser("list", aliases=["ls"], help="List discovered skills.")
     skill_list_parser.add_argument("--source", "-s", dest="sources", action="append", help="Limit to a source name or workspace")

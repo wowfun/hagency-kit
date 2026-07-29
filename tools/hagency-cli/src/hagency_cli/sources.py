@@ -18,6 +18,10 @@ class SourceSyncError(RuntimeError):
     pass
 
 
+class SourceCannotFastForwardError(SourceSyncError):
+    pass
+
+
 @dataclass(frozen=True)
 class Remote:
     name: str
@@ -259,6 +263,17 @@ def has_merge_base(cwd: Path, left: str, right: str) -> bool:
     return result.returncode == 0
 
 
+def git_output(cmd: list[str], *, cwd: Path) -> str:
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def fetch_remote_branch(source: Source, remote: Remote, *, dry_run: bool, depth: int | None) -> None:
     run_git_network(
         ["git", "fetch", *depth_args(depth), remote.name, remote_tracking_refspec(remote)],
@@ -288,15 +303,43 @@ def ensure_fast_forwardable(source: Source, remote: Remote) -> None:
                 return
 
     if has_merge_base(source.path, "HEAD", upstream):
-        raise SourceSyncError(f"cannot fast-forward {remote.ref}: local checkout has commits not in {upstream_name}")
+        raise SourceCannotFastForwardError(
+            f"cannot fast-forward {remote.ref}: local checkout has commits not in {upstream_name}"
+        )
     if is_shallow_repository(source.path):
-        raise SourceSyncError(
+        raise SourceCannotFastForwardError(
             f"cannot fast-forward {remote.ref}: shallow checkout still lacks common history with {upstream_name}"
         )
-    raise SourceSyncError(f"cannot fast-forward {remote.ref}: no common history with {upstream_name}")
+    raise SourceCannotFastForwardError(f"cannot fast-forward {remote.ref}: no common history with {upstream_name}")
 
 
-def sync_source(source: Source, *, dry_run: bool, depth: int | None = None) -> None:
+def reanchor_source_branch(source: Source, remote: Remote) -> None:
+    status = git_output(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=source.path,
+    )
+    if status:
+        raise SourceSyncError(
+            f"cannot reanchor {remote.ref}: checkout has staged, tracked, or untracked changes"
+        )
+
+    upstream = remote_tracking_name(remote)
+    old_head = git_output(["git", "rev-parse", "HEAD"], cwd=source.path)
+    new_head = git_output(["git", "rev-parse", upstream], cwd=source.path)
+    run(
+        ["git", "checkout", "--no-overwrite-ignore", "-B", remote.ref, upstream],
+        cwd=source.path,
+        dry_run=False,
+    )
+    actual_head = git_output(["git", "rev-parse", "HEAD"], cwd=source.path)
+    if actual_head != new_head:
+        raise SourceSyncError(
+            f"reanchor {remote.ref} did not reach {upstream}: expected {new_head}, got {actual_head}"
+        )
+    print(f"reanchor source {source.name}: {remote.ref} {old_head} -> {upstream} {new_head}")
+
+
+def sync_source(source: Source, *, dry_run: bool, depth: int | None = None, reanchor: bool = False) -> None:
     remote = source.remote
     if source.path.exists():
         if remote is None:
@@ -322,8 +365,14 @@ def sync_source(source: Source, *, dry_run: bool, depth: int | None = None) -> N
             local_branch = f"refs/heads/{remote.ref}"
             if git_ok(["git", "rev-parse", "--verify", local_branch], cwd=source.path):
                 run(["git", "checkout", remote.ref], cwd=source.path, dry_run=False)
-                ensure_fast_forwardable(source, remote)
-                run(["git", "merge", "--ff-only", remote_tracking_name(remote)], cwd=source.path, dry_run=False)
+                try:
+                    ensure_fast_forwardable(source, remote)
+                except SourceCannotFastForwardError:
+                    if not reanchor:
+                        raise
+                    reanchor_source_branch(source, remote)
+                else:
+                    run(["git", "merge", "--ff-only", remote_tracking_name(remote)], cwd=source.path, dry_run=False)
             elif git_ok(["git", "rev-parse", "--verify", remote_branch], cwd=source.path):
                 run(
                     ["git", "checkout", "-b", remote.ref, "--track", f"{remote.name}/{remote.ref}"],
@@ -334,6 +383,11 @@ def sync_source(source: Source, *, dry_run: bool, depth: int | None = None) -> N
                 run(["git", "checkout", remote.ref], cwd=source.path, dry_run=False)
         else:
             run(["git", "checkout", remote.ref], cwd=source.path, dry_run=True)
+            if reanchor:
+                print(
+                    f"Would reanchor source {source.name} to {remote_tracking_name(remote)} "
+                    "only if the fetched history cannot fast-forward and the checkout is clean"
+                )
         return
 
     if remote is None:

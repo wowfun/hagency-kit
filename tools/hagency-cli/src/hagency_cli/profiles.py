@@ -517,7 +517,18 @@ def junction_failure_message(link: Path, target: Path, error: BaseException) -> 
 
 
 def create_windows_junction(link: Path, target: Path) -> None:
-    command = "New-Item -ItemType Junction -Path $args[0] -Target $args[1] | Out-Null"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HAGENCY_PROFILE_JUNCTION_LINK": str(link),
+            "HAGENCY_PROFILE_JUNCTION_TARGET": str(target),
+        }
+    )
+    command = (
+        "New-Item -ItemType Junction "
+        "-Path $env:HAGENCY_PROFILE_JUNCTION_LINK "
+        "-Target $env:HAGENCY_PROFILE_JUNCTION_TARGET | Out-Null"
+    )
     subprocess.run(
         [
             "powershell",
@@ -525,11 +536,10 @@ def create_windows_junction(link: Path, target: Path) -> None:
             "-NonInteractive",
             "-Command",
             command,
-            str(link),
-            str(target),
         ],
         check=True,
         text=True,
+        env=env,
     )
 
 

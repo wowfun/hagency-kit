@@ -1,11 +1,11 @@
 ---
 name: hagency-cli
-description: Use the Hagency Kit CLI for workspace, source, skill, and profile workflows. Trigger for `hagency source`, `hagency skill`, `hagency profile`, source syncs, profile skill edits, profile initialization, `hagency-config.toml`, `profiles/*/config.toml`, generated `.agents/skills` outputs, and updates to `skills/hagency-cli/SKILL.md`.
+description: Use the Hagency Kit CLI for workspace, source, skill, and profile workflows. Trigger for `hagency` or `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `profiles/*/config.toml`, generated `.agents/skills` outputs, and updates to `skills/hagency-cli/SKILL.md`.
 ---
 
 # Hagency CLI
 
-Use the repo-local `hagency` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, and generated profile skill links. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
+Use the repo-local `hagency` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, and generated profile skill links. `hgc` is the short alias for the same interface. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
 
 ## Workspace Context
 
@@ -39,6 +39,28 @@ hagency s sync --profile <profile> -s 4: -r <root>
 hagency s sync --profile <profile> -s 1,3: -r <root>
 ```
 
+Normal sync refuses non-fast-forward updates. When the error lists a `--reanchor` retry command, use it only if every selected checkout is disposable and may lose local-only commits.
+
+```sh
+hagency s sync <source> --reanchor -r <root>
+hagency s sync --profile <profile> -s 4: --reanchor -r <root>
+```
+
+Reanchoring requires no staged, unstaged, or untracked changes. It does not save sync state or create recovery refs. `--dry-run --reanchor` only describes what an actual sync may do after fetching.
+
+## Install One Skill
+
+Use `skill add` with a unique discovered skill name or an exact `SOURCE:selector`. The default destination is the invocation directory's `.agents/skills`; `--global` selects the current user's `~/.agents/skills`. `-r` and `--checkout-dir` change source discovery only, not the local destination.
+
+```sh
+hgc skill add <skill>
+hgc skill add <source>:<selector> -r <root>
+hgc skill add <skill> --global -r <root>
+hgc skill add <skill> --dry-run
+```
+
+The command installs exactly one skill. If a name is ambiguous, use one of the exact references shown in the error. Source-only and multi-match references are rejected. Installation uses symlinks except on Windows, where it uses junctions.
+
 ## Edit Profiles
 
 Use `p add` for new profile configs and `p u` for profile updates. `-AS` adds or merges a source, skill name, or `SOURCE:selector`; `-RS` removes one. Use `-i` and `-e` for include and exclude selectors. Use `--replace` only when the existing entry should be rewritten.
@@ -55,7 +77,7 @@ Skill-name inputs can resolve to a source when the name is unique. If the CLI re
 
 ## Initialize Profile Skills
 
-Use `p init` to materialize profile-selected skills into a target workspace. Symlinks are the default. Use `-cp` when the target should get independent copies that can evolve separately from the source.
+Use `p init` to materialize profile-selected skills into a target workspace. Symlinks are the default except on Windows, where junctions are the default. Use `-cp` when the target should get independent copies that can evolve separately from the source.
 
 ```sh
 hagency p init -p <target> <profile> -r <root>

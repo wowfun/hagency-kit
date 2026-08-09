@@ -199,7 +199,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("initialized hagency workspace:", stdout)
         self.assertTrue((new_root / "hagency-config.toml").exists())
         with (new_root / "hagency-config.toml").open("rb") as handle:
-            self.assertEqual(tomllib.load(handle)["defaults"]["depth"], 1)
+            defaults = tomllib.load(handle)["defaults"]
+        self.assertEqual(defaults["checkout_dir"], "~/Projects/references")
+        self.assertEqual(defaults["depth"], 1)
+        self.assertNotIn("checkout_dir_windows", defaults)
 
         _stdout, stderr = self.run_cli("init", "--root", str(new_root), expected=1)
         self.assertIn("workspace config already exists", stderr)
@@ -233,9 +236,87 @@ class CliTests(unittest.TestCase):
         with mock.patch.object(common_module.os, "name", "nt"):
             self.assertEqual(common_module.normalize_windows_shell_path("/c/Users/me/project"), "C:/Users/me/project")
             self.assertEqual(common_module.normalize_windows_shell_path("/d"), "D:/")
+            self.assertEqual(common_module.normalize_windows_shell_path("/d/Projects/references"), "D:/Projects/references")
             self.assertEqual(common_module.normalize_windows_shell_path(r"C:\Users\me\project"), r"C:\Users\me\project")
 
         self.assertEqual(common_module.normalize_windows_shell_path("/c/Users/me/project"), "/c/Users/me/project")
+
+    def test_checkout_directory_selection_uses_platform_specific_default(self) -> None:
+        defaults = {
+            "checkout_dir": "~/Projects/references",
+            "checkout_dir_windows": "/d/Projects/references",
+        }
+
+        self.assertEqual(
+            source_module.configured_checkout_dir(defaults, checkout_override=None, windows=True),
+            "/d/Projects/references",
+        )
+        self.assertEqual(
+            source_module.configured_checkout_dir(defaults, checkout_override=None, windows=False),
+            "~/Projects/references",
+        )
+
+    def test_checkout_directory_selection_falls_back_when_windows_default_is_missing_or_empty(self) -> None:
+        cases = (
+            {"checkout_dir": "~/Projects/references"},
+            {"checkout_dir": "~/Projects/references", "checkout_dir_windows": ""},
+        )
+
+        for defaults in cases:
+            with self.subTest(defaults=defaults):
+                self.assertEqual(
+                    source_module.configured_checkout_dir(defaults, checkout_override=None, windows=True),
+                    "~/Projects/references",
+                )
+
+    def test_checkout_dir_cli_override_wins_over_configured_defaults(self) -> None:
+        defaults = {
+            "checkout_dir": "~/Projects/references",
+            "checkout_dir_windows": "/d/Projects/references",
+        }
+        self.assertEqual(
+            source_module.configured_checkout_dir(
+                defaults,
+                checkout_override="cli-checkouts",
+                windows=True,
+            ),
+            "cli-checkouts",
+        )
+
+        self.append_remote_source()
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                'checkout_dir = "checkouts"',
+                'checkout_dir = "checkouts"\ncheckout_dir_windows = "/d/Projects/references"',
+            ),
+            encoding="utf-8",
+        )
+
+        stdout, _stderr = self.run_cli(
+            "source",
+            "show",
+            "remote-source",
+            "--checkout-dir",
+            "cli-checkouts",
+        )
+
+        self.assertIn(f"resolved_path: {self.root / 'cli-checkouts' / 'remote-source'}", stdout)
+
+    def test_remote_source_without_checkout_directory_uses_platform_neutral_error(self) -> None:
+        self.config_path.write_text(
+            textwrap.dedent(
+                """
+                [source.remote-source.remote]
+                url = "https://example.invalid/acme/ExamplePack.git"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        _stdout, stderr = self.run_cli("source", "show", "remote-source", expected=1)
+
+        self.assertIn("remote plus a configured checkout directory", stderr)
+        self.assertNotIn("defaults.checkout_dir", stderr)
 
     def test_dry_run_command_output_is_shell_neutral(self) -> None:
         stdout = io.StringIO()
@@ -278,6 +359,28 @@ class CliTests(unittest.TestCase):
         stdout, _stderr = self.run_cli("source", "rm", "example-pack")
         self.assertIn("removed source: example-pack", stdout)
         self.assertNotIn("example-pack", self.read_config()["source"])
+
+    def test_source_add_rewrite_preserves_windows_checkout_directory(self) -> None:
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                'checkout_dir = "checkouts"',
+                'checkout_dir = "checkouts"\ncheckout_dir_windows = "/d/Projects/references"',
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_cli(
+            "source",
+            "add",
+            "example-pack",
+            "--url",
+            "https://example.invalid/acme/ExamplePack.git",
+        )
+
+        self.assertEqual(
+            self.read_config()["defaults"]["checkout_dir_windows"],
+            "/d/Projects/references",
+        )
 
     def test_source_top_level_short_alias(self) -> None:
         stdout, _stderr = self.run_cli("s", "ls")
@@ -1318,7 +1421,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("removed profile: scratch", stdout)
         self.assertFalse((self.root / "profiles" / "scratch").exists())
 
-    def test_profile_init_discovers_workspace_and_source_skills(self) -> None:
+    def test_profile_init_dir_discovers_skills_under_workspace_layout(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -1334,11 +1437,165 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
         self.assertIn("local-one", stdout)
         self.assertIn("external-one", stdout)
         self.assertTrue((target / ".agents" / "skills" / "local-one").is_symlink())
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
+
+    def test_profile_init_path_is_exact_absolute_skills_directory(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        skills_dir = self.root / "custom" / "skills"
+
+        self.run_cli("profile", "init", "--path", str(skills_dir), "content")
+
+        destination = skills_dir / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertFalse((skills_dir / ".agents").exists())
+
+    def test_profile_init_relative_path_uses_invocation_cwd_with_explicit_root(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        self.run_cli(
+            "profile",
+            "init",
+            "--path",
+            "shared/skills",
+            "content",
+            "--root",
+            str(self.root),
+            cwd=invocation_cwd,
+        )
+
+        destination = invocation_cwd / "shared" / "skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse((self.root / "shared").exists())
+
+    def test_profile_init_relative_dir_uses_invocation_cwd_with_explicit_root(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        self.run_cli(
+            "profile",
+            "init",
+            "--dir",
+            "project",
+            "content",
+            "--root",
+            str(self.root),
+            cwd=invocation_cwd,
+        )
+
+        destination = invocation_cwd / "project" / ".agents" / "skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse((self.root / "project").exists())
+
+    def test_profile_init_requires_a_destination(self) -> None:
+        _stdout, stderr = self.run_cli("profile", "init", "content", expected=2)
+
+        self.assertIn("one of the arguments", stderr)
+        self.assertIn("--path", stderr)
+        self.assertIn("--dir", stderr)
+
+    def test_profile_init_rejects_path_and_dir_together(self) -> None:
+        _stdout, stderr = self.run_cli(
+            "profile",
+            "init",
+            "--path",
+            str(self.root / "skills"),
+            "--dir",
+            str(self.root / "project"),
+            "content",
+            expected=2,
+        )
+
+        self.assertIn("not allowed with argument", stderr)
+
+    def test_install_commands_reject_non_directory_skills_destination(self) -> None:
+        destination = self.root / "not-a-directory"
+        destination.write_text("keep\n", encoding="utf-8")
+        commands = (
+            ("profile", "init", "--path", str(destination), "content"),
+            ("skill", "add", "external-one", "--path", str(destination)),
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                _stdout, stderr = self.run_cli(*command, expected=1)
+                self.assertIn(f"skills destination is not a directory: {destination}", stderr)
+
+        self.assertEqual(destination.read_text(encoding="utf-8"), "keep\n")
+
+    def test_skill_add_dry_run_rejects_non_directory_destination_ancestor(self) -> None:
+        blocker = self.root / "blocker"
+        blocker.write_text("keep\n", encoding="utf-8")
+
+        _stdout, stderr = self.run_cli(
+            "skill",
+            "add",
+            "external-one",
+            "--path",
+            str(blocker / "skills"),
+            "--dry-run",
+            expected=1,
+        )
+
+        self.assertIn(f"skills destination is not a directory: {blocker}", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assertEqual(blocker.read_text(encoding="utf-8"), "keep\n")
+
+    def test_install_commands_reject_broken_skills_destination_symlink(self) -> None:
+        destination = self.root / "broken-skills"
+        destination.symlink_to(self.root / "missing-skills", target_is_directory=True)
+        commands = (
+            ("profile", "init", "--path", str(destination), "content"),
+            ("skill", "add", "external-one", "--path", str(destination)),
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                _stdout, stderr = self.run_cli(*command, expected=1)
+                self.assertIn(f"skills destination is a broken symlink: {destination}", stderr)
+
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse(destination.exists())
 
     def test_profile_init_copy_mode_creates_independent_skill_directory(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -1353,11 +1610,11 @@ class CliTests(unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
-        target = self.root / "target"
+        skills_dir = self.root / "target" / "skills"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content", "-cp")
+        stdout, _stderr = self.run_cli("profile", "init", "-p", str(skills_dir), "content", "-cp")
 
-        copied = target / ".agents" / "skills" / "external-one"
+        copied = skills_dir / "external-one"
         source = self.root / "local-source" / "nested" / "external-one"
         self.assertIn("copy", stdout)
         self.assertTrue(copied.is_dir())
@@ -1382,7 +1639,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content", "--dry-run")
+        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--dry-run")
 
         self.assertIn("link", stdout)
         self.assertNotIn("ln -s", stdout)
@@ -1403,7 +1660,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content", "--link-mode", "copy", "--dry-run")
+        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--link-mode", "copy", "--dry-run")
 
         self.assertIn("copy", stdout)
         self.assertNotIn("ln -s", stdout)
@@ -1422,7 +1679,7 @@ class CliTests(unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
-        target = self.root / "target"
+        skills_dir = self.root / "target" / "skills"
 
         with (
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
@@ -1432,7 +1689,7 @@ class CliTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(["powershell"], 0),
             ) as run,
         ):
-            stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content")
+            stdout, _stderr = self.run_cli("profile", "init", "-p", str(skills_dir), "content")
 
         self.assertIn("junction", stdout)
         run.assert_called_once()
@@ -1444,7 +1701,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_LINK", command[4])
         self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_TARGET", command[4])
         child_env = run.call_args.kwargs["env"]
-        self.assertEqual(Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]), target / ".agents" / "skills" / "external-one")
+        self.assertEqual(Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]), skills_dir / "external-one")
         self.assertEqual(
             Path(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"]),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -1499,7 +1756,7 @@ class CliTests(unittest.TestCase):
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(profile_module.subprocess, "run") as run,
         ):
-            stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content", "--dry-run")
+            stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--dry-run")
 
         self.assertIn("junction", stdout)
         run.assert_not_called()
@@ -1523,7 +1780,7 @@ class CliTests(unittest.TestCase):
             _stdout, stderr = self.run_cli(
                 "profile",
                 "init",
-                "-p",
+                "-d",
                 str(self.root / "target"),
                 "content",
                 "--link-mode",
@@ -1547,12 +1804,12 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
         target = self.root / "target"
-        self.run_cli("profile", "init", "-p", str(target), "content", "-cp")
+        self.run_cli("profile", "init", "-d", str(target), "content", "-cp")
         copied = target / ".agents" / "skills" / "external-one"
         marker = copied / "local-note.md"
         marker.write_text("keep\n", encoding="utf-8")
 
-        _stdout, stderr = self.run_cli("profile", "init", "-p", str(target), "content", "-cp", expected=1)
+        _stdout, stderr = self.run_cli("profile", "init", "-d", str(target), "content", "-cp", expected=1)
 
         self.assertIn("refusing to overwrite existing skill destination", stderr)
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
@@ -1563,7 +1820,7 @@ class CliTests(unittest.TestCase):
                 _stdout, stderr = self.run_cli(
                     "profile",
                     "init",
-                    "-p",
+                    "-d",
                     str(self.root / "target"),
                     "content",
                     "-cp",
@@ -1578,7 +1835,7 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli(
             "profile",
             "init",
-            "-p",
+            "-d",
             str(self.root / "target"),
             "content",
             "--copy",
@@ -1608,7 +1865,7 @@ class CliTests(unittest.TestCase):
             _stdout, stderr = self.run_cli(
                 "profile",
                 "init",
-                "-p",
+                "-d",
                 str(self.root / "target"),
                 "content",
                 "--link-mode",
@@ -1635,7 +1892,7 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        _stdout, stderr = self.run_cli("profile", "init", "-p", str(self.root / "target"), "content", expected=1)
+        _stdout, stderr = self.run_cli("profile", "init", "-d", str(self.root / "target"), "content", expected=1)
         self.assertIn("duplicate discovered skill name", stderr)
         self.assertIn("more specific path prefix", stderr)
 
@@ -1654,7 +1911,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
 
@@ -1675,7 +1932,7 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(target), "content")
+        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
         self.assertNotIn("external-two", stdout)
         self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
@@ -1693,8 +1950,8 @@ class CliTests(unittest.TestCase):
         self.assertTrue(destination.is_symlink())
         self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
 
-    def test_skill_add_accepts_exact_source_selector_and_explicit_workspace_root(self) -> None:
-        invocation_cwd = self.root.parent / f"{self.root.name}-consumer"
+    def test_skill_add_root_only_affects_discovery_and_default_destination(self) -> None:
+        invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
         self.run_cli(
@@ -1709,6 +1966,57 @@ class CliTests(unittest.TestCase):
         destination = invocation_cwd / ".agents" / "skills" / "external-one"
         self.assertTrue(destination.is_symlink())
         self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_skill_add_path_is_exact_absolute_skills_directory(self) -> None:
+        skills_dir = self.root / "custom" / "skills"
+
+        self.run_cli("skill", "add", "external-one", "-p", str(skills_dir))
+
+        destination = skills_dir / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertFalse((skills_dir / ".agents").exists())
+
+    def test_skill_add_relative_path_uses_invocation_cwd(self) -> None:
+        invocation_cwd = self.root / "consumer"
+        invocation_cwd.mkdir()
+
+        self.run_cli("skill", "add", "external-one", "--path", "shared/skills", cwd=invocation_cwd)
+
+        destination = invocation_cwd / "shared" / "skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertFalse((self.root / "shared").exists())
+
+    def test_skill_add_path_expands_user_home(self) -> None:
+        home = self.root / "user-home"
+
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            self.run_cli("skill", "add", "external-one", "--path", "~/shared-skills")
+
+        destination = home / "shared-skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_skill_add_dir_installs_under_workspace_layout(self) -> None:
+        target_workspace = self.root / "consumer-project"
+
+        self.run_cli("skill", "add", "external-one", "-d", str(target_workspace))
+
+        destination = target_workspace / ".agents" / "skills" / "external-one"
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+
+    def test_skill_add_destination_options_are_mutually_exclusive(self) -> None:
+        conflicts = (
+            ("--path", str(self.root / "skills"), "--dir", str(self.root / "project")),
+            ("--path", str(self.root / "skills"), "--global"),
+            ("--dir", str(self.root / "project"), "--global"),
+        )
+
+        for options in conflicts:
+            with self.subTest(options=options):
+                _stdout, stderr = self.run_cli("skill", "add", "external-one", *options, expected=2)
+                self.assertIn("not allowed with argument", stderr)
 
     def test_skill_add_global_installs_under_user_home(self) -> None:
         home = self.root / "user-home"
@@ -1727,11 +2035,19 @@ class CliTests(unittest.TestCase):
         invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
-        stdout, _stderr = self.run_cli("skill", "add", "external-one", "--dry-run", cwd=invocation_cwd)
+        stdout, _stderr = self.run_cli(
+            "skill",
+            "add",
+            "external-one",
+            "--path",
+            "planned/skills",
+            "--dry-run",
+            cwd=invocation_cwd,
+        )
 
-        destination = invocation_cwd / ".agents" / "skills" / "external-one"
+        destination = invocation_cwd / "planned" / "skills" / "external-one"
         self.assertIn(f"link {destination} ->", stdout)
-        self.assertFalse((invocation_cwd / ".agents").exists())
+        self.assertFalse((invocation_cwd / "planned").exists())
 
     def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(self) -> None:
         _stdout, stderr = self.run_cli("skill", "add", "local-source", expected=1)
@@ -1968,7 +2284,7 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        _stdout, stderr = self.run_cli("profile", "init", "-p", str(self.root / "target"), "content", expected=1)
+        _stdout, stderr = self.run_cli("profile", "init", "-d", str(self.root / "target"), "content", expected=1)
         self.assertIn("legacy [[skills]]", stderr)
 
     def test_profile_skill_subcommand_is_not_registered(self) -> None:

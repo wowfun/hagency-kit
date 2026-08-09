@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -36,11 +37,28 @@ class Source:
     remote: Remote | None
 
 
+def configured_checkout_dir(
+    defaults: dict,
+    *,
+    checkout_override: str | None,
+    windows: bool,
+) -> str | None:
+    if checkout_override:
+        return checkout_override
+    if windows:
+        return defaults.get("checkout_dir_windows") or defaults.get("checkout_dir")
+    return defaults.get("checkout_dir")
+
+
 def resolve_sources(registry: dict, *, repo_root: Path, checkout_override: str | None) -> dict[str, Source]:
     if "sources" in registry:
         die("legacy [[sources]] config is no longer supported; use [source.<name>]")
     defaults = registry.get("defaults", {})
-    checkout_dir_value = checkout_override or defaults.get("checkout_dir")
+    checkout_dir_value = configured_checkout_dir(
+        defaults,
+        checkout_override=checkout_override,
+        windows=os.name == "nt",
+    )
     checkout_dir = expand_path(checkout_dir_value, repo_root) if checkout_dir_value else None
     default_remote_name = defaults.get("remote_name", "origin")
     default_remote_ref = defaults.get("remote_ref", "main")
@@ -68,7 +86,7 @@ def resolve_sources(registry: dict, *, repo_root: Path, checkout_override: str |
         elif remote and checkout_dir:
             path = checkout_dir / name
         else:
-            die(f"source {name} needs path, or remote plus defaults.checkout_dir")
+            die(f"source {name} needs path, or remote plus a configured checkout directory")
 
         sources[name] = Source(
             name=name,

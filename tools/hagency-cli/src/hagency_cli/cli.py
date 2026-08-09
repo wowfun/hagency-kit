@@ -50,17 +50,71 @@ from .sources import (
 from .workspace import init_workspace, resolve_workspace_root, workspace_config_path
 
 
+DEFAULT_SKILLS_DIRECTORY = Path(".agents") / "skills"
+
+
 def add_root_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", "-r", help="Hagency workspace root")
 
 
 def add_source_resolution_options(parser: argparse.ArgumentParser) -> None:
     add_root_option(parser)
-    parser.add_argument("--checkout-dir", help="Override defaults.checkout_dir")
+    parser.add_argument("--checkout-dir", help="Override the configured checkout directory")
 
 
 def add_dry_run_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print planned actions without changing files")
+
+
+def add_skill_destination_options(
+    parser: argparse.ArgumentParser,
+    *,
+    required: bool,
+    include_global: bool,
+) -> None:
+    destinations = parser.add_mutually_exclusive_group(required=required)
+    destinations.add_argument(
+        "--path",
+        "-p",
+        dest="skills_path",
+        metavar="PATH",
+        help="Exact skills directory; no .agents/skills suffix is added",
+    )
+    destinations.add_argument(
+        "--dir",
+        "-d",
+        dest="skills_root",
+        metavar="DIR",
+        help="Target workspace directory; install under DIR/.agents/skills",
+    )
+    if include_global:
+        destinations.add_argument(
+            "--global",
+            dest="global_install",
+            action="store_true",
+            help="Install under ~/.agents/skills",
+        )
+
+
+def resolve_skill_install_dir(
+    args: argparse.Namespace,
+    cwd: Path,
+    *,
+    default_root: Path | None,
+) -> Path:
+    if args.skills_path is not None:
+        return expand_path(args.skills_path, cwd)
+
+    if args.skills_root is not None:
+        install_root = expand_path(args.skills_root, cwd)
+    elif getattr(args, "global_install", False):
+        install_root = Path.home()
+    elif default_root is not None:
+        install_root = default_root
+    else:
+        die("skill destination requires --path or --dir")
+
+    return install_root / DEFAULT_SKILLS_DIRECTORY
 
 
 def positive_int(value: str) -> int:
@@ -241,11 +295,19 @@ def profile_init_link_mode(args: argparse.Namespace) -> str:
 
 
 def init_profile_command(args: argparse.Namespace) -> None:
+    invocation_cwd = Path.cwd()
     root = workspace_root_arg(args.root)
     sources = load_sources(args, root)
     profile = read_profile_config(root, args.name)
-    target = expand_path(args.path, Path.cwd())
-    init_profile(profile, sources, root, target, link_mode=profile_init_link_mode(args), dry_run=args.dry_run)
+    skills_dir = resolve_skill_install_dir(args, invocation_cwd, default_root=None)
+    init_profile(
+        profile,
+        sources,
+        root,
+        skills_dir,
+        link_mode=profile_init_link_mode(args),
+        dry_run=args.dry_run,
+    )
 
 
 def skill_skip_roots(source_name: str, sources: dict) -> set[Path] | None:
@@ -376,9 +438,9 @@ def skill_add_command(args: argparse.Namespace) -> None:
     root = workspace_root_arg(args.root)
     sources = load_sources(args, root)
     name, target = resolve_skill_add_link(args.skill, sources, root)
-    install_root = Path.home() if args.global_install else invocation_cwd
+    skills_dir = resolve_skill_install_dir(args, invocation_cwd, default_root=invocation_cwd)
     install_skill(
-        install_root / ".agents" / "skills",
+        skills_dir,
         name,
         target,
         link_mode=default_profile_link_mode(),
@@ -705,12 +767,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     skill_add_parser = skill_subcommands.add_parser("add", help="Install one discovered skill.")
     skill_add_parser.add_argument("skill", help="Unique skill name or exact SOURCE:selector")
-    skill_add_parser.add_argument(
-        "--global",
-        dest="global_install",
-        action="store_true",
-        help="Install under ~/.agents/skills instead of the current directory",
-    )
+    add_skill_destination_options(skill_add_parser, required=False, include_global=True)
     add_source_resolution_options(skill_add_parser)
     add_dry_run_option(skill_add_parser)
     skill_add_parser.set_defaults(func=skill_add_command)
@@ -772,8 +829,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_root_option(profile_show_parser)
     profile_show_parser.set_defaults(func=profile_show_command)
 
-    profile_init_parser = profile_subcommands.add_parser("init", help="Initialize a profile into a target directory.")
-    profile_init_parser.add_argument("--path", "-p", required=True, help="Target workspace directory")
+    profile_init_parser = profile_subcommands.add_parser(
+        "init",
+        help="Initialize profile skills into a target directory.",
+        description="Initialize profile skills into an exact skills directory or a workspace's .agents/skills directory.",
+        epilog="Migration: replace previous -p WORKSPACE usage with -d WORKSPACE.",
+    )
+    add_skill_destination_options(profile_init_parser, required=True, include_global=False)
     profile_init_parser.add_argument("name", help="Profile name under profiles/")
     profile_init_parser.add_argument("-cp", dest="copy", action="store_true", help="Copy skill directories instead of linking")
     profile_init_parser.add_argument(

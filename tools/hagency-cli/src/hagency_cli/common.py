@@ -104,7 +104,11 @@ def render_toml(data: dict) -> str:
         if lines:
             lines.append("")
         lines.append("[defaults]")
-        append_scalar_lines(lines, defaults, ["checkout_dir", "depth", "remote_name", "remote_ref"])
+        append_scalar_lines(
+            lines,
+            defaults,
+            ["checkout_dir", "checkout_dir_windows", "depth", "remote_name", "remote_ref"],
+        )
 
     for name, raw_source in data.get("source", {}).items():
         if lines:

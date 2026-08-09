@@ -543,11 +543,29 @@ def create_windows_junction(link: Path, target: Path) -> None:
     )
 
 
-def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dry_run: bool) -> None:
+def _validate_skills_dir(skills_dir: Path) -> None:
+    for candidate in (skills_dir, *skills_dir.parents):
+        if candidate.is_symlink() and not candidate.exists():
+            die(f"skills destination is a broken symlink: {candidate}")
+        if candidate.exists():
+            if not candidate.is_dir():
+                die(f"skills destination is not a directory: {candidate}")
+            return
+
+
+def _create_skills_dir(skills_dir: Path) -> None:
+    try:
+        skills_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        die(f"could not create skills destination {skills_dir}: {exc}")
+
+
+def install_skill(skills_dir: Path, name: str, target: Path, *, link_mode: str, dry_run: bool) -> None:
+    _validate_skills_dir(skills_dir)
     if not target.exists() and not dry_run:
         die(f"link target does not exist: {target}")
     real_target = target.resolve() if target.exists() else target.absolute()
-    link = link_dir / name
+    link = skills_dir / name
 
     if link_mode == "copy":
         if link.is_symlink() or link.exists():
@@ -556,7 +574,7 @@ def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dr
         if not dry_run:
             if not real_target.is_dir():
                 die(f"copy target is not a directory: {real_target}")
-            link_dir.mkdir(parents=True, exist_ok=True)
+            _create_skills_dir(skills_dir)
             shutil.copytree(real_target, link, symlinks=False)
         return
 
@@ -582,7 +600,7 @@ def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dr
 
         print(f"junction {link} -> {real_target}")
         if not dry_run:
-            link_dir.mkdir(parents=True, exist_ok=True)
+            _create_skills_dir(skills_dir)
             try:
                 create_windows_junction(link, real_target)
             except (OSError, subprocess.CalledProcessError) as exc:
@@ -605,7 +623,7 @@ def install_skill(link_dir: Path, name: str, target: Path, *, link_mode: str, dr
 
     print(f"link {link} -> {real_target}")
     if not dry_run:
-        link_dir.mkdir(parents=True, exist_ok=True)
+        _create_skills_dir(skills_dir)
         try:
             os.symlink(real_target, link, target_is_directory=real_target.is_dir())
         except OSError as exc:
@@ -625,12 +643,12 @@ def init_profile(
     profile: dict,
     sources: dict[str, Source],
     workspace_root: Path,
-    target_dir: Path,
+    skills_dir: Path,
     *,
     link_mode: str,
     dry_run: bool,
 ) -> None:
-    link_dir = target_dir / ".agents" / "skills"
+    _validate_skills_dir(skills_dir)
     workspace = workspace_source(workspace_root)
     if "skills" in profile:
         die("legacy [[skills]] profile config is no longer supported; use [skill.<source>]")
@@ -645,4 +663,4 @@ def init_profile(
 
     require_unique_link_names(links)
     for link_name, target in links:
-        install_skill(link_dir, link_name, target, link_mode=link_mode, dry_run=dry_run)
+        install_skill(skills_dir, link_name, target, link_mode=link_mode, dry_run=dry_run)

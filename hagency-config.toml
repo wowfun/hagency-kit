@@ -1,5 +1,6 @@
 [defaults]
 checkout_dir = "~/Projects/references"
+checkout_dir_windows = "/d/Projects/references"
 depth = 1
 
 [source.baoyu-skills]

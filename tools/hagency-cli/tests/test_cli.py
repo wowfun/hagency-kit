@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import tomllib
+from typer.testing import CliRunner
 
 from hagency_cli import cli
 from hagency_cli import common as common_module
@@ -71,23 +72,63 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def run_cli(self, *args: str, cwd: Path | None = None, expected: int = 0) -> tuple[str, str]:
+    def run_cli(
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        expected: int = 0,
+        color: bool = False,
+    ) -> tuple[str, str]:
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(cwd or self.root)
+            result = CliRunner().invoke(
+                cli.app,
+                cli.normalize_legacy_multi_value_options(args),
+                prog_name="hgc",
+                color=color,
+                catch_exceptions=False,
+            )
+        finally:
+            os.chdir(old_cwd)
+        self.assertEqual(result.exit_code, expected, result.stderr)
+        return result.stdout, result.stderr
+
+    def complete_bash(self, words: str, cword: int, *, cwd: Path | None = None) -> tuple[list[str], str]:
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(cwd or self.root)
+            result = CliRunner().invoke(
+                cli.app,
+                [],
+                prog_name="hgc",
+                color=False,
+                catch_exceptions=False,
+                env={
+                    "_HGC_COMPLETE": "complete_bash",
+                    "COMP_WORDS": words,
+                    "COMP_CWORD": str(cword),
+                },
+            )
+        finally:
+            os.chdir(old_cwd)
+        self.assertEqual(result.exit_code, 0, result.stderr)
+        return [line for line in result.stdout.splitlines() if line], result.stderr
+
+    def run_main(self, *args: str, cwd: Path | None = None, expected: int = 0) -> tuple[str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
-        old_argv = sys.argv
         old_cwd = Path.cwd()
-        sys.argv = ["hagency", *args]
         code = 0
         try:
             os.chdir(cwd or self.root)
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 try:
-                    cli.main()
+                    cli.main(args)
                 except SystemExit as exc:
                     code = exc.code if isinstance(exc.code, int) else 1
         finally:
             os.chdir(old_cwd)
-            sys.argv = old_argv
         self.assertEqual(code, expected, stderr.getvalue())
         return stdout.getvalue(), stderr.getvalue()
 
@@ -186,12 +227,179 @@ class CliTests(unittest.TestCase):
         self.write_remote_source_config(name, origin, depth=1 if shallow else None)
         return origin, checkout
 
-    def test_package_exposes_hagency_and_hgc_console_scripts(self) -> None:
+    def test_package_exposes_only_hgc_console_script(self) -> None:
         with (ROOT / "pyproject.toml").open("rb") as handle:
             scripts = tomllib.load(handle)["project"]["scripts"]
 
-        self.assertEqual(scripts["hagency"], "hagency_cli.cli:main")
-        self.assertEqual(scripts["hgc"], "hagency_cli.cli:main")
+        self.assertEqual(scripts, {"hgc": "hagency_cli.cli:main"})
+
+    def test_help_and_usage_errors_are_plain_text_with_completion_enabled(self) -> None:
+        stdout, stderr = self.run_cli("--help", color=True)
+
+        self.assertEqual(stderr, "")
+        self.assertIn("--install-completion", stdout)
+        self.assertIn("--show-completion", stdout)
+        self.assertIn("Alias for source.", stdout)
+        self.assertIn("Alias for profile.", stdout)
+
+        _stdout, stderr = self.run_cli(expected=2, color=True)
+        self.assertIn("Missing command", stderr)
+        for output in (stdout, stderr):
+            self.assertNotIn("\x1b[", output)
+            self.assertNotIn("╭", output)
+            self.assertNotIn("│", output)
+            self.assertNotIn("╰", output)
+
+    def test_short_help_option_is_available_at_every_command_level(self) -> None:
+        for args in (("-h",), ("source", "-h"), ("source", "show", "-h"), ("p", "init", "-h")):
+            with self.subTest(args=args):
+                stdout, stderr = self.run_cli(*args)
+                self.assertEqual(stderr, "")
+                self.assertIn("Usage:", stdout)
+                self.assertIn("-h, --help", stdout)
+
+    def test_bash_completion_includes_commands_aliases_and_options(self) -> None:
+        values, stderr = self.complete_bash("hgc ", 1)
+        self.assertEqual(stderr, "")
+        self.assertEqual(values, ["init", "source", "s", "skill", "profile", "p"])
+
+        values, _stderr = self.complete_bash("hgc source ", 2)
+        self.assertEqual(values, ["list", "ls", "show", "add", "remove", "rm", "sync"])
+
+        values, _stderr = self.complete_bash("hgc source sync --", 3)
+        self.assertIn("--profile", values)
+        self.assertIn("--reanchor", values)
+        self.assertIn("--checkout-dir", values)
+
+    def test_bash_completion_includes_workspace_catalog_values(self) -> None:
+        values, _stderr = self.complete_bash("hgc source show ", 3)
+        self.assertEqual(values, ["local-source"])
+
+        values, _stderr = self.complete_bash("hgc profile show ", 3)
+        self.assertEqual(values, ["content"])
+
+        values, _stderr = self.complete_bash("hgc skill add ", 3)
+        self.assertIn("local-one", values)
+        self.assertIn("external-one", values)
+        self.assertIn("workspace:skills/local-one", values)
+        self.assertIn("local-source:nested/external-one", values)
+
+        self.write_skill(self.root / "skills" / "external-one")
+        values, _stderr = self.complete_bash("hgc skill add ", 3)
+        self.assertNotIn("external-one", values)
+        self.assertIn("workspace:skills/external-one", values)
+        self.assertIn("local-source:nested/external-one", values)
+
+    def test_bash_completion_filters_selectors_and_used_values(self) -> None:
+        values, _stderr = self.complete_bash("hgc source sync local-source ", 4)
+        self.assertNotIn("local-source", values)
+
+        values, _stderr = self.complete_bash("hgc profile add research -AS local-source -i ", 7)
+        self.assertIn("*", values)
+        self.assertIn("nested/external-one", values)
+
+        values, _stderr = self.complete_bash(
+            "hgc profile add research -AS local-source -i nested/external-one -i ",
+            9,
+        )
+        self.assertNotIn("nested/external-one", values)
+
+        (self.root / "profiles" / "content" / "config.toml").write_text(
+            textwrap.dedent(
+                """
+                name = "content"
+
+                [skill.local-source]
+                include = ["nested/external-one"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        values, _stderr = self.complete_bash("hgc profile update content -RS ", 5)
+        self.assertIn("local-source", values)
+        self.assertIn("external-one", values)
+        self.assertIn("local-source:nested/external-one", values)
+        self.assertNotIn("workspace", values)
+
+    def test_bash_completion_respects_root_checkout_and_directory_context(self) -> None:
+        outside = self.root / "outside"
+        outside.mkdir()
+        words = f"hgc source show --root {self.root} "
+        values, _stderr = self.complete_bash(words, 5, cwd=outside)
+        self.assertEqual(values, ["local-source"])
+
+        checkout_override = self.root / "other-checkouts"
+        self.write_skill(checkout_override / "remote-source" / "skills" / "remote-one")
+        self.append_remote_source()
+        words = f"hgc skill add --root {self.root} --checkout-dir {checkout_override} remote"
+        values, _stderr = self.complete_bash(words, 7, cwd=outside)
+        self.assertIn("remote-one", values)
+        self.assertIn("remote-source:skills/remote-one", values)
+
+        directory = outside / "consumer"
+        directory.mkdir()
+        values, _stderr = self.complete_bash("hgc init --root con", 3, cwd=outside)
+        self.assertEqual(values, ["consumer/"])
+
+    def test_bash_directory_completion_lists_children_for_empty_value(self) -> None:
+        values, stderr = self.complete_bash("hgc init --root ", 3)
+
+        self.assertEqual(stderr, "")
+        self.assertEqual(values, ["local-source/", "profiles/", "skills/"])
+
+    def test_bash_completion_catalog_failures_are_silent(self) -> None:
+        missing = self.root / "missing"
+        missing.mkdir()
+        words = f"hgc source show --root {missing} "
+        values, stderr = self.complete_bash(words, 5)
+        self.assertEqual(values, [])
+        self.assertEqual(stderr, "")
+
+        broken = self.root / "broken"
+        broken.mkdir()
+        (broken / "hagency-config.toml").write_text("[source\n", encoding="utf-8")
+        words = f"hgc source show --root {broken} "
+        values, stderr = self.complete_bash(words, 5)
+        self.assertEqual(values, [])
+        self.assertEqual(stderr, "")
+
+        malformed = self.root / "malformed"
+        malformed.mkdir()
+        (malformed / "hagency-config.toml").write_text('source = "not-a-table"\n', encoding="utf-8")
+        words = f"hgc source show --root {malformed} "
+        values, stderr = self.complete_bash(words, 5)
+        self.assertEqual(values, [])
+        self.assertEqual(stderr, "")
+
+        self.append_remote_source()
+        values, stderr = self.complete_bash("hgc skill add remote-source:", 3)
+        self.assertEqual(values, [])
+        self.assertEqual(stderr, "")
+
+    def test_completion_script_and_isolated_install_bind_only_hgc(self) -> None:
+        stdout, stderr = self.run_main("--show-completion", "bash")
+        self.assertEqual(stderr, "")
+        self.assertIn("_HGC_COMPLETE=complete_bash", stdout)
+        self.assertIn("complete -o default -F _hgc_completion hgc", stdout)
+        self.assertNotIn(" hagency", stdout)
+
+        home = self.root / "isolated-home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            stdout, stderr = self.run_main("--install-completion", "bash")
+        self.assertEqual(stderr, "")
+        self.assertIn("bash completion installed", stdout)
+        completion = home / ".bash_completions" / "hgc.sh"
+        self.assertTrue(completion.is_file())
+        self.assertIn("complete -o default -F _hgc_completion hgc", completion.read_text(encoding="utf-8"))
+        self.assertFalse((home / ".bash_completions" / "hagency.sh").exists())
+
+    def test_show_completion_rejects_an_unknown_explicit_shell(self) -> None:
+        stdout, stderr = self.run_main("--show-completion", "junk", expected=2)
+
+        self.assertEqual(stdout, "")
+        self.assertIn("Invalid value for '--show-completion'", stderr)
+        self.assertIn("junk", stderr)
 
     def test_init_creates_config_and_refuses_existing_without_force(self) -> None:
         new_root = self.root / "new-workspace"
@@ -586,7 +794,8 @@ class CliTests(unittest.TestCase):
 
     def test_source_sync_depth_rejects_non_positive_values(self) -> None:
         _stdout, stderr = self.run_cli("source", "sync", "--depth", "0", "--dry-run", expected=2)
-        self.assertIn("must be a positive integer", stderr)
+        self.assertIn("Invalid value for '--depth'", stderr)
+        self.assertIn("x>=1", stderr)
 
     def test_source_sync_default_depth_config_rejects_non_positive_values(self) -> None:
         self.config_path.write_text(
@@ -635,7 +844,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("cannot fast-forward", stderr)
         self.assertIn(
             "Tip: if these checkouts are disposable and local-only commits may be discarded, run:\n"
-            "  hagency source sync remote-source --reanchor",
+            "  hgc source sync remote-source --reanchor",
             stderr,
         )
         self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
@@ -779,7 +988,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(stderr.count("Tip:"), 1)
         self.assertIn(
-            "  hagency source sync first-source second-source --reanchor",
+            "  hgc source sync first-source second-source --reanchor",
             stderr,
         )
         self.assertIn("source sync failed for: first-source, second-source", stderr)
@@ -1101,6 +1310,22 @@ class CliTests(unittest.TestCase):
         self.assertIn("added profile: example-pack", stdout)
         self.assertEqual(self.read_profile("example-pack")["skill"]["local-source"], {})
 
+    def test_profile_add_accepts_legacy_values_after_inline_include(self) -> None:
+        self.run_main(
+            "profile",
+            "add",
+            "research",
+            "-AS",
+            "local-source",
+            "--include=nested",
+            "external-one",
+        )
+
+        self.assertEqual(
+            self.read_profile("research")["skill"]["local-source"]["include"],
+            ["nested", "external-one"],
+        )
+
     def test_profile_add_skill_name_infers_source_and_include(self) -> None:
         stdout, _stderr = self.run_cli(
             "profile",
@@ -1130,8 +1355,8 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli("profile", "add", "example-pack", "-AS", "external-one", expected=1)
 
         self.assertIn("skill name 'external-one' is ambiguous. Choose one:", stderr)
-        self.assertIn("hagency profile add example-pack -AS local-source:nested/external-one", stderr)
-        self.assertIn("hagency profile add example-pack -AS other-source:nested/external-one", stderr)
+        self.assertIn("hgc profile add example-pack -AS local-source:nested/external-one", stderr)
+        self.assertIn("hgc profile add example-pack -AS other-source:nested/external-one", stderr)
 
     def test_profile_update_add_skill_merges_and_dedupes(self) -> None:
         self.write_skill(self.root / "local-source" / "other")
@@ -1169,6 +1394,31 @@ class CliTests(unittest.TestCase):
         skill = self.read_profile()["skill"]["local-source"]
         self.assertEqual(skill["include"], ["nested", "other"])
         self.assertEqual(skill["exclude"], ["old", "draft"])
+
+    def test_profile_update_repeated_include_exclude_options(self) -> None:
+        self.write_skill(self.root / "local-source" / "draft")
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text('name = "content"\n', encoding="utf-8")
+
+        self.run_cli(
+            "profile",
+            "update",
+            "content",
+            "-AS",
+            "local-source",
+            "-i",
+            "nested",
+            "-i",
+            "draft",
+            "-e",
+            "draft",
+            "-e",
+            "nested",
+        )
+
+        skill = self.read_profile()["skill"]["local-source"]
+        self.assertEqual(skill["include"], ["nested", "draft"])
+        self.assertEqual(skill["exclude"], ["draft", "nested"])
 
     def test_profile_update_add_skill_name_infers_source_and_include(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -1217,8 +1467,8 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli("profile", "update", "content", "-AS", "write", expected=1)
 
         self.assertIn("skill name 'write' is ambiguous. Choose one:", stderr)
-        self.assertIn("hagency profile update content -AS local-source:plugins/waza/skills/write", stderr)
-        self.assertIn("hagency profile update content -AS local-source:skills/write", stderr)
+        self.assertIn("hgc profile update content -AS local-source:plugins/waza/skills/write", stderr)
+        self.assertIn("hgc profile update content -AS local-source:skills/write", stderr)
         self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
 
     def test_profile_update_include_ambiguous_selector_fails_before_write(self) -> None:
@@ -1398,7 +1648,7 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli("profile", "update", "content", "-AS", "frontend-design", expected=1)
 
         self.assertIn("unknown source or skill: frontend-design", stderr)
-        self.assertIn("hagency source sync remote-pack", stderr)
+        self.assertIn("hgc source sync remote-pack", stderr)
 
     def test_profile_update_include_requires_add_skill(self) -> None:
         _stdout, stderr = self.run_cli("profile", "update", "content", "--include", "nested", expected=1)
@@ -1530,7 +1780,7 @@ class CliTests(unittest.TestCase):
     def test_profile_init_requires_a_destination(self) -> None:
         _stdout, stderr = self.run_cli("profile", "init", "content", expected=2)
 
-        self.assertIn("one of the arguments", stderr)
+        self.assertIn("one of the options is required", stderr)
         self.assertIn("--path", stderr)
         self.assertIn("--dir", stderr)
 
@@ -1546,7 +1796,7 @@ class CliTests(unittest.TestCase):
             expected=2,
         )
 
-        self.assertIn("not allowed with argument", stderr)
+        self.assertIn("options are mutually exclusive", stderr)
 
     def test_install_commands_reject_non_directory_skills_destination(self) -> None:
         destination = self.root / "not-a-directory"
@@ -1842,7 +2092,8 @@ class CliTests(unittest.TestCase):
             expected=2,
         )
 
-        self.assertIn("unrecognized arguments: --copy", stderr)
+        self.assertIn("No such option: --copy", stderr)
+        self.assertIn("-cp", stderr)
 
     def test_profile_init_windows_symlink_error_mentions_administrator_mode(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -2016,7 +2267,7 @@ class CliTests(unittest.TestCase):
         for options in conflicts:
             with self.subTest(options=options):
                 _stdout, stderr = self.run_cli("skill", "add", "external-one", *options, expected=2)
-                self.assertIn("not allowed with argument", stderr)
+                self.assertIn("options are mutually exclusive", stderr)
 
     def test_skill_add_global_installs_under_user_home(self) -> None:
         home = self.root / "user-home"
@@ -2060,8 +2311,8 @@ class CliTests(unittest.TestCase):
         self.write_skill(self.root / "skills" / "external-one")
         _stdout, stderr = self.run_cli("skill", "add", "external-one", expected=1)
         self.assertIn("skill name 'external-one' is ambiguous. Choose one:", stderr)
-        self.assertIn("hagency skill add workspace:skills/external-one", stderr)
-        self.assertIn("hagency skill add local-source:nested/external-one", stderr)
+        self.assertIn("hgc skill add workspace:skills/external-one", stderr)
+        self.assertIn("hgc skill add local-source:nested/external-one", stderr)
 
     def test_skill_add_reports_unknown_and_unsynced_references(self) -> None:
         _stdout, stderr = self.run_cli("skill", "add", "missing", expected=1)
@@ -2069,7 +2320,7 @@ class CliTests(unittest.TestCase):
 
         self.append_remote_source("remote-source")
         _stdout, stderr = self.run_cli("skill", "add", "remote-source:missing", expected=1)
-        self.assertIn("source path does not exist; run hagency source sync first", stderr)
+        self.assertIn("source path does not exist; run hgc source sync first", stderr)
 
     def test_skill_add_is_idempotent_retargets_links_and_refuses_real_destinations(self) -> None:
         invocation_cwd = self.root / "consumer"
@@ -2250,7 +2501,7 @@ class CliTests(unittest.TestCase):
 
         self.append_remote_source("remote-source")
         _stdout, stderr = self.run_cli("skill", "list", "-s", "remote-source", expected=1)
-        self.assertIn("source path does not exist; run hagency source sync first", stderr)
+        self.assertIn("source path does not exist; run hgc source sync first", stderr)
 
         _stdout, stderr = self.run_cli("skill", "list", "-p", "missing", expected=1)
         self.assertIn("missing config:", stderr)
@@ -2289,7 +2540,7 @@ class CliTests(unittest.TestCase):
 
     def test_profile_skill_subcommand_is_not_registered(self) -> None:
         _stdout, stderr = self.run_cli("profile", "skill", expected=2)
-        self.assertIn("invalid choice", stderr)
+        self.assertIn("No such command 'skill'", stderr)
 
 
 if __name__ == "__main__":

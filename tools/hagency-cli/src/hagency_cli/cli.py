@@ -1,12 +1,25 @@
 from __future__ import annotations
 
-import argparse
+import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+from typing import Annotated, Literal, Sequence
+
+import typer
 
 from .common import die, expand_path, read_toml, render_toml, write_toml
+from .completion import (
+    complete_directory,
+    complete_profile,
+    complete_profile_remove_reference,
+    complete_selector,
+    complete_skill_add,
+    complete_skill_reference,
+    complete_source,
+    complete_source_or_workspace,
+)
 from .profiles import (
     build_profile_config,
     default_profile_link_mode,
@@ -51,63 +64,23 @@ from .workspace import init_workspace, resolve_workspace_root, workspace_config_
 
 
 DEFAULT_SKILLS_DIRECTORY = Path(".agents") / "skills"
-
-
-def add_root_option(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--root", "-r", help="Hagency workspace root")
-
-
-def add_source_resolution_options(parser: argparse.ArgumentParser) -> None:
-    add_root_option(parser)
-    parser.add_argument("--checkout-dir", help="Override the configured checkout directory")
-
-
-def add_dry_run_option(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--dry-run", action="store_true", help="Print planned actions without changing files")
-
-
-def add_skill_destination_options(
-    parser: argparse.ArgumentParser,
-    *,
-    required: bool,
-    include_global: bool,
-) -> None:
-    destinations = parser.add_mutually_exclusive_group(required=required)
-    destinations.add_argument(
-        "--path",
-        "-p",
-        dest="skills_path",
-        metavar="PATH",
-        help="Exact skills directory; no .agents/skills suffix is added",
-    )
-    destinations.add_argument(
-        "--dir",
-        "-d",
-        dest="skills_root",
-        metavar="DIR",
-        help="Target workspace directory; install under DIR/.agents/skills",
-    )
-    if include_global:
-        destinations.add_argument(
-            "--global",
-            dest="global_install",
-            action="store_true",
-            help="Install under ~/.agents/skills",
-        )
+LinkMode = Literal["symlink", "copy", "junction"]
 
 
 def resolve_skill_install_dir(
-    args: argparse.Namespace,
+    skills_path: str | None,
+    skills_root: str | None,
+    global_install: bool,
     cwd: Path,
     *,
     default_root: Path | None,
 ) -> Path:
-    if args.skills_path is not None:
-        return expand_path(args.skills_path, cwd)
+    if skills_path is not None:
+        return expand_path(skills_path, cwd)
 
-    if args.skills_root is not None:
-        install_root = expand_path(args.skills_root, cwd)
-    elif getattr(args, "global_install", False):
+    if skills_root is not None:
+        install_root = expand_path(skills_root, cwd)
+    elif global_install:
         install_root = Path.home()
     elif default_root is not None:
         install_root = default_root
@@ -117,14 +90,16 @@ def resolve_skill_install_dir(
     return install_root / DEFAULT_SKILLS_DIRECTORY
 
 
-def positive_int(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be a positive integer") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return parsed
+def require_at_most_one(options: dict[str, object]) -> None:
+    selected = [name for name, value in options.items() if value not in (None, False)]
+    if len(selected) > 1:
+        raise typer.BadParameter(f"options are mutually exclusive: {', '.join(selected)}")
+
+
+def require_exactly_one(options: dict[str, object]) -> None:
+    require_at_most_one(options)
+    if not any(value not in (None, False) for value in options.values()):
+        raise typer.BadParameter(f"one of the options is required: {', '.join(options)}")
 
 
 def parse_source_slice(value: str, total: int) -> list[int]:
@@ -180,17 +155,6 @@ def format_called_process_error(error: subprocess.CalledProcessError) -> str:
     return f"command failed with exit {error.returncode}: {rendered_cmd}"
 
 
-def flatten_option_values(values: list[list[str]] | None) -> list[str] | None:
-    if not values:
-        return None
-    return [item for group in values for item in group]
-
-
-def add_profile_skill_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--include", "-i", nargs="+", action="append", help="Skill selectors to include")
-    parser.add_argument("--exclude", "-e", nargs="+", action="append", help="Skill selectors to exclude")
-
-
 def dedupe_preserve_order(values: list[str]) -> list[str]:
     deduped = []
     seen = set()
@@ -206,13 +170,13 @@ def workspace_root_arg(value: str | None) -> Path:
     return resolve_workspace_root(value, Path.cwd())
 
 
-def load_registry(args: argparse.Namespace, root: Path) -> dict:
+def load_registry(root: Path) -> dict:
     return read_toml(workspace_config_path(root))
 
 
-def load_sources(args: argparse.Namespace, root: Path) -> dict:
-    registry = load_registry(args, root)
-    return resolve_sources(registry, repo_root=root, checkout_override=getattr(args, "checkout_dir", None))
+def load_sources(root: Path, checkout_dir: str | None) -> dict:
+    registry = load_registry(root)
+    return resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
 
 
 def default_sync_depth(registry: dict) -> int | None:
@@ -224,8 +188,8 @@ def default_sync_depth(registry: dict) -> int | None:
     return depth
 
 
-def init_workspace_command(args: argparse.Namespace) -> None:
-    init_workspace(args.root, Path.cwd(), force=args.force, dry_run=args.dry_run)
+def init_workspace_command(*, root: str | None, force: bool, dry_run: bool) -> None:
+    init_workspace(root, Path.cwd(), force=force, dry_run=dry_run)
 
 
 def sync_sources_with_progress(
@@ -255,7 +219,7 @@ def sync_sources_with_progress(
 
     if failures:
         if reanchor_candidates:
-            command = shlex.join(["hagency", "source", "sync", *reanchor_candidates, "--reanchor"])
+            command = shlex.join(["hgc", "source", "sync", *reanchor_candidates, "--reanchor"])
             print(
                 "Tip: if these checkouts are disposable and local-only commits may be discarded, run:\n"
                 f"  {command}",
@@ -264,49 +228,75 @@ def sync_sources_with_progress(
         die(f"source sync failed for: {', '.join(failures)}")
 
 
-def sync_selected_sources(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    registry = load_registry(args, root)
-    sources = resolve_sources(registry, repo_root=root, checkout_override=getattr(args, "checkout_dir", None))
-    depth = args.depth if args.depth is not None else default_sync_depth(registry)
+def sync_selected_sources(
+    *,
+    names: list[str],
+    profile_name: str | None,
+    depth: int | None,
+    source_slice: str | None,
+    reanchor: bool,
+    root_value: str | None,
+    checkout_dir: str | None,
+    dry_run: bool,
+) -> None:
+    root = workspace_root_arg(root_value)
+    registry = load_registry(root)
+    sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
+    sync_depth = depth if depth is not None else default_sync_depth(registry)
 
-    selected_names = list(args.names)
-    if args.profile:
-        profile = read_profile_config(root, args.profile)
+    selected_names = list(names)
+    if profile_name:
+        profile = read_profile_config(root, profile_name)
         selected_names.extend(profile_source_names(profile))
 
     selected = select_sources(sources, selected_names) if selected_names else list(sources.values())
     total = len(selected)
     sync_sources_with_progress(
-        source_slice_entries(selected, args.slice),
+        source_slice_entries(selected, source_slice),
         total=total,
-        dry_run=args.dry_run,
-        depth=depth,
-        reanchor=args.reanchor,
+        dry_run=dry_run,
+        depth=sync_depth,
+        reanchor=reanchor,
     )
 
 
-def profile_init_link_mode(args: argparse.Namespace) -> str:
-    if args.copy and args.link_mode in {"symlink", "junction"}:
-        die(f"-cp cannot be combined with --link-mode {args.link_mode}")
-    if args.copy:
+def profile_init_link_mode(copy: bool, link_mode: LinkMode | None) -> str:
+    if copy and link_mode in {"symlink", "junction"}:
+        die(f"-cp cannot be combined with --link-mode {link_mode}")
+    if copy:
         return "copy"
-    return args.link_mode or default_profile_link_mode()
+    return link_mode or default_profile_link_mode()
 
 
-def init_profile_command(args: argparse.Namespace) -> None:
+def init_profile_command(
+    *,
+    name: str,
+    skills_path: str | None,
+    skills_root: str | None,
+    copy: bool,
+    link_mode: LinkMode | None,
+    root_value: str | None,
+    checkout_dir: str | None,
+    dry_run: bool,
+) -> None:
     invocation_cwd = Path.cwd()
-    root = workspace_root_arg(args.root)
-    sources = load_sources(args, root)
-    profile = read_profile_config(root, args.name)
-    skills_dir = resolve_skill_install_dir(args, invocation_cwd, default_root=None)
+    root = workspace_root_arg(root_value)
+    sources = load_sources(root, checkout_dir)
+    profile = read_profile_config(root, name)
+    skills_dir = resolve_skill_install_dir(
+        skills_path,
+        skills_root,
+        False,
+        invocation_cwd,
+        default_root=None,
+    )
     init_profile(
         profile,
         sources,
         root,
         skills_dir,
-        link_mode=profile_init_link_mode(args),
-        dry_run=args.dry_run,
+        link_mode=profile_init_link_mode(copy, link_mode),
+        dry_run=dry_run,
     )
 
 
@@ -396,13 +386,18 @@ def list_profile_skill_rows(root: Path, sources: dict, profile: dict, source_fil
     return rows
 
 
-def skill_list_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    sources = load_sources(args, root)
-    source_filters = args.sources or []
+def skill_list_command(
+    *,
+    source_filters: list[str],
+    profile_name: str | None,
+    root_value: str | None,
+    checkout_dir: str | None,
+) -> None:
+    root = workspace_root_arg(root_value)
+    sources = load_sources(root, checkout_dir)
 
-    if args.profile:
-        profile = read_profile_config(root, args.profile)
+    if profile_name:
+        profile = read_profile_config(root, profile_name)
         rows = list_profile_skill_rows(root, sources, profile, source_filters)
     elif source_filters:
         rows = list_filtered_skill_rows(root, sources, source_filters)
@@ -419,7 +414,7 @@ def resolve_skill_add_link(reference: str, sources: dict, root: Path) -> tuple[s
         reference,
         sources,
         root,
-        command_prefix="hagency skill",
+        command_prefix="hgc skill",
         option="add",
     )
     if selector is None:
@@ -433,23 +428,38 @@ def resolve_skill_add_link(reference: str, sources: dict, root: Path) -> tuple[s
     return links[0]
 
 
-def skill_add_command(args: argparse.Namespace) -> None:
+def skill_add_command(
+    *,
+    skill: str,
+    skills_path: str | None,
+    skills_root: str | None,
+    global_install: bool,
+    root_value: str | None,
+    checkout_dir: str | None,
+    dry_run: bool,
+) -> None:
     invocation_cwd = Path.cwd()
-    root = workspace_root_arg(args.root)
-    sources = load_sources(args, root)
-    name, target = resolve_skill_add_link(args.skill, sources, root)
-    skills_dir = resolve_skill_install_dir(args, invocation_cwd, default_root=invocation_cwd)
+    root = workspace_root_arg(root_value)
+    sources = load_sources(root, checkout_dir)
+    name, target = resolve_skill_add_link(skill, sources, root)
+    skills_dir = resolve_skill_install_dir(
+        skills_path,
+        skills_root,
+        global_install,
+        invocation_cwd,
+        default_root=invocation_cwd,
+    )
     install_skill(
         skills_dir,
         name,
         target,
         link_mode=default_profile_link_mode(),
-        dry_run=args.dry_run,
+        dry_run=dry_run,
     )
 
 
-def profile_list_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
+def profile_list_command(*, root_value: str | None) -> None:
+    root = workspace_root_arg(root_value)
     print("name\tdescription\tskills")
     for name, profile in list_profile_configs(root):
         description = profile.get("description") or "-"
@@ -457,16 +467,18 @@ def profile_list_command(args: argparse.Namespace) -> None:
         print(f"{name}\t{description}\t{skills}")
 
 
-def profile_show_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    profile = read_profile_config(root, args.name)
+def profile_show_command(*, name: str, root_value: str | None) -> None:
+    root = workspace_root_arg(root_value)
+    profile = read_profile_config(root, name)
     print(render_toml(profile).rstrip())
 
 
-def validate_profile_skill_args(args: argparse.Namespace) -> tuple[list[str] | None, list[str] | None]:
-    include = flatten_option_values(args.include)
-    exclude = flatten_option_values(args.exclude)
-    if (include or exclude) and not getattr(args, "add_skill", None):
+def validate_profile_skill_args(
+    include: list[str] | None,
+    exclude: list[str] | None,
+    add_skill: str | None,
+) -> tuple[list[str] | None, list[str] | None]:
+    if (include or exclude) and not add_skill:
         die("--include and --exclude require --add-skill")
     return include, exclude
 
@@ -481,69 +493,88 @@ def with_inferred_include(include: list[str] | None, selector: str | None) -> li
     return values
 
 
-def profile_add_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    validate_profile_name(args.name)
-    profile_dir = profile_dir_path(root, args.name)
+def profile_add_command(
+    *,
+    name: str,
+    description: str | None,
+    add_skill: str | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+    root_value: str | None,
+    checkout_dir: str | None,
+    dry_run: bool,
+) -> None:
+    root = workspace_root_arg(root_value)
+    validate_profile_name(name)
+    profile_dir = profile_dir_path(root, name)
     if profile_dir.exists():
-        die(f"profile already exists: {args.name}")
-    include, exclude = validate_profile_skill_args(args)
-    sources = load_sources(args, root) if args.add_skill else {}
-    add_skill = args.add_skill
+        die(f"profile already exists: {name}")
+    include, exclude = validate_profile_skill_args(include, exclude, add_skill)
+    sources = load_sources(root, checkout_dir) if add_skill else {}
     if add_skill:
         add_skill, inferred_include = resolve_profile_skill_reference(
             add_skill,
             sources,
             root,
-            command_prefix=f"hagency profile add {args.name}",
+            command_prefix=f"hgc profile add {name}",
             option="-AS",
         )
         include = with_inferred_include(include, inferred_include)
         validate_profile_skill_selectors(add_skill, sources, root, include=include, exclude=exclude)
     profile = build_profile_config(
-        args.name,
-        description=args.description,
+        name,
+        description=description,
         add_skill=add_skill,
         include=include,
         exclude=exclude,
         sources=sources,
     )
 
-    if args.dry_run:
-        print(f"Would create profile: {profile_config_path(root, args.name)}")
+    if dry_run:
+        print(f"Would create profile: {profile_config_path(root, name)}")
         print(render_toml(profile).rstrip())
         return
 
-    write_profile_config(root, args.name, profile)
-    print(f"added profile: {args.name}")
+    write_profile_config(root, name, profile)
+    print(f"added profile: {name}")
 
 
-def profile_update_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    include, exclude = validate_profile_skill_args(args)
-    if args.replace and not args.add_skill:
+def profile_update_command(
+    *,
+    name: str,
+    description: str | None,
+    add_skill: str | None,
+    remove_skill: str | None,
+    include: list[str] | None,
+    exclude: list[str] | None,
+    replace: bool,
+    root_value: str | None,
+    checkout_dir: str | None,
+    dry_run: bool,
+) -> None:
+    root = workspace_root_arg(root_value)
+    include, exclude = validate_profile_skill_args(include, exclude, add_skill)
+    if replace and not add_skill:
         die("--replace requires --add-skill")
-    profile = read_profile_config(root, args.name)
-    sources = load_sources(args, root) if args.add_skill or args.remove_skill else {}
-    add_skill = args.add_skill
+    profile = read_profile_config(root, name)
+    sources = load_sources(root, checkout_dir) if add_skill or remove_skill else {}
     if add_skill:
         add_skill, inferred_include = resolve_profile_skill_reference(
             add_skill,
             sources,
             root,
-            command_prefix=f"hagency profile update {args.name}",
+            command_prefix=f"hgc profile update {name}",
             option="-AS",
         )
         include = with_inferred_include(include, inferred_include)
         validate_profile_skill_selectors(add_skill, sources, root, include=include, exclude=exclude)
-    remove_skill = args.remove_skill
     remove_skill_selector = None
     if remove_skill:
         remove_skill, inferred_remove = resolve_profile_skill_reference(
             remove_skill,
             sources,
             root,
-            command_prefix=f"hagency profile update {args.name}",
+            command_prefix=f"hgc profile update {name}",
             option="-RS",
         )
         if inferred_remove is not None:
@@ -552,46 +583,46 @@ def profile_update_command(args: argparse.Namespace) -> None:
             remove_skill = None
     updated = update_profile_config(
         profile,
-        description=args.description,
+        description=description,
         add_skill=add_skill,
         remove_skill=remove_skill,
         remove_skill_selector=remove_skill_selector,
         include=include,
         exclude=exclude,
-        replace=args.replace,
+        replace=replace,
         sources=sources,
     )
 
-    if args.dry_run:
-        print(f"Would update profile: {profile_config_path(root, args.name)}")
+    if dry_run:
+        print(f"Would update profile: {profile_config_path(root, name)}")
         print(render_toml(updated).rstrip())
         return
 
-    write_profile_config(root, args.name, updated)
-    print(f"updated profile: {args.name}")
+    write_profile_config(root, name, updated)
+    print(f"updated profile: {name}")
 
 
-def profile_remove_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    profile_dir = profile_dir_path(root, args.name)
+def profile_remove_command(*, name: str, root_value: str | None, dry_run: bool) -> None:
+    root = workspace_root_arg(root_value)
+    profile_dir = profile_dir_path(root, name)
     if not profile_dir.exists():
-        die(f"unknown profile: {args.name}")
+        die(f"unknown profile: {name}")
 
-    if args.dry_run:
+    if dry_run:
         print(f"Would remove profile directory: {profile_dir}")
         return
 
-    remove_profile_directory(root, args.name)
-    print(f"removed profile: {args.name}")
+    remove_profile_directory(root, name)
+    print(f"removed profile: {name}")
 
 
 def source_kind(source) -> str:
     return "remote" if source.remote else "local"
 
 
-def source_list_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    sources = load_sources(args, root)
+def source_list_command(*, root_value: str | None, checkout_dir: str | None) -> None:
+    root = workspace_root_arg(root_value)
+    sources = load_sources(root, checkout_dir)
     print("name\ttype\tpath\turl\tref")
     for name, source in sources.items():
         remote = source.remote
@@ -608,14 +639,14 @@ def source_list_command(args: argparse.Namespace) -> None:
         )
 
 
-def source_show_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
-    registry = load_registry(args, root)
-    sources = resolve_sources(registry, repo_root=root, checkout_override=args.checkout_dir)
-    source = sources.get(args.name)
+def source_show_command(*, name: str, root_value: str | None, checkout_dir: str | None) -> None:
+    root = workspace_root_arg(root_value)
+    registry = load_registry(root)
+    sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
+    source = sources.get(name)
     if source is None:
-        die(f"unknown source: {args.name}")
-    raw_source = raw_source_by_name(registry, args.name) or {}
+        die(f"unknown source: {name}")
+    raw_source = raw_source_by_name(registry, name) or {}
     remote = source.remote
     raw_remote = raw_source.get("remote") or {}
 
@@ -630,19 +661,30 @@ def source_show_command(args: argparse.Namespace) -> None:
         print(f"remote.ref: {raw_remote.get('ref', remote.ref)}")
 
 
-def source_add_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
+def source_add_command(
+    *,
+    source_value: str,
+    name_value: str | None,
+    url_value: str | None,
+    path_value: str | None,
+    ref_value: str | None,
+    remote_name: str | None,
+    sync: bool,
+    root_value: str | None,
+    dry_run: bool,
+) -> None:
+    root = workspace_root_arg(root_value)
     config_path = workspace_config_path(root)
-    registry = load_registry(args, root)
+    registry = load_registry(root)
     resolve_sources(registry, repo_root=root, checkout_override=None)
-    name, url = resolve_source_add_args(args.source, name=args.name, url=args.url)
+    name, url = resolve_source_add_args(source_value, name=name_value, url=url_value)
     if (
-        is_git_url(args.source)
-        and args.name is None
-        and args.url is None
+        is_git_url(source_value)
+        and name_value is None
+        and url_value is None
         and raw_source_by_name(registry, name) is not None
     ):
-        owner_name = infer_owner_source_name_from_url(args.source)
+        owner_name = infer_owner_source_name_from_url(source_value)
         if not owner_name or owner_name == name:
             die(
                 f"source already exists: {name}; could not infer owner/repo name from URL; "
@@ -657,21 +699,21 @@ def source_add_command(args: argparse.Namespace) -> None:
     source_name, entry = build_source_entry(
         name=name,
         url=url,
-        path=args.path,
-        ref=args.ref,
-        remote_name=args.remote_name,
+        path=path_value,
+        ref=ref_value,
+        remote_name=remote_name,
     )
     add_source_entry(registry, source_name, entry)
     sync_source_entry = None
     sync_depth = None
-    if args.sync:
+    if sync:
         sync_depth = default_sync_depth(registry)
         sync_source_entry = select_sources(
             resolve_sources(registry, repo_root=root, checkout_override=None),
             [source_name],
         )[0]
 
-    if args.dry_run:
+    if dry_run:
         print("Would add source:")
         print(render_toml({"source": {source_name: entry}}).rstrip())
         if sync_source_entry is not None:
@@ -684,173 +726,542 @@ def source_add_command(args: argparse.Namespace) -> None:
         sync_sources_with_progress([(1, sync_source_entry)], total=1, dry_run=False, depth=sync_depth)
 
 
-def source_remove_command(args: argparse.Namespace) -> None:
-    root = workspace_root_arg(args.root)
+def source_remove_command(*, name: str, force: bool, root_value: str | None, dry_run: bool) -> None:
+    root = workspace_root_arg(root_value)
     config_path = workspace_config_path(root)
-    registry = load_registry(args, root)
+    registry = load_registry(root)
     resolve_sources(registry, repo_root=root, checkout_override=None)
 
-    references = find_profile_source_references(root, args.name)
-    if references and not args.force:
+    references = find_profile_source_references(root, name)
+    if references and not force:
         refs = ", ".join(str(path.relative_to(root)) for path in references)
-        die(f"source {args.name} is referenced by {refs}; pass --force to remove only the config entry")
+        die(f"source {name} is referenced by {refs}; pass --force to remove only the config entry")
 
-    remove_source_entry(registry, args.name)
-    if args.dry_run:
-        print(f"Would remove source: {args.name}")
+    remove_source_entry(registry, name)
+    if dry_run:
+        print(f"Would remove source: {name}")
         return
 
     write_toml(config_path, registry)
-    print(f"removed source: {args.name}")
+    print(f"removed source: {name}")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hagency", description="Manage Hagency workspaces, profiles, and sources.")
-    subcommands = parser.add_subparsers(dest="command", required=True)
-
-    init_parser = subcommands.add_parser("init", help="Initialize a Hagency workspace.")
-    add_root_option(init_parser)
-    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing workspace config")
-    add_dry_run_option(init_parser)
-    init_parser.set_defaults(func=init_workspace_command)
-
-    source_parser = subcommands.add_parser("source", aliases=["s"], help="Manage workspace sources.")
-    source_subcommands = source_parser.add_subparsers(dest="source_command", required=True)
-
-    list_parser = source_subcommands.add_parser("list", aliases=["ls"], help="List configured sources.")
-    add_source_resolution_options(list_parser)
-    list_parser.set_defaults(func=source_list_command)
-
-    show_parser = source_subcommands.add_parser("show", help="Show one configured source.")
-    show_parser.add_argument("name", help="Source name")
-    add_source_resolution_options(show_parser)
-    show_parser.set_defaults(func=source_show_command)
-
-    add_parser = source_subcommands.add_parser(
-        "add",
-        help="Add a source to the workspace config. Pass a Git URL directly to infer the source name.",
+def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
+    return typer.Typer(
+        help=help_text,
+        add_completion=add_completion,
+        context_settings={"help_option_names": ["-h", "--help"]},
+        rich_markup_mode=None,
+        pretty_exceptions_enable=False,
+        no_args_is_help=False,
     )
-    add_parser.add_argument("source", help="Source name, or Git URL to infer the name from")
-    add_parser.add_argument("--name", help="Override inferred source name when source is a Git URL")
-    add_parser.add_argument("--url", help="Git remote URL")
-    add_parser.add_argument("--path", help="Explicit local or checkout path")
-    add_parser.add_argument("--ref", help="Git branch, tag, or ref")
-    add_parser.add_argument("--remote-name", help="Git remote name")
-    add_parser.add_argument("--sync", action="store_true", help="Sync the added source after writing the config")
-    add_root_option(add_parser)
-    add_dry_run_option(add_parser)
-    add_parser.set_defaults(func=source_add_command)
 
-    remove_parser = source_subcommands.add_parser("remove", aliases=["rm"], help="Remove a source from the workspace config.")
-    remove_parser.add_argument("name", help="Source name")
-    remove_parser.add_argument("--force", action="store_true", help="Remove even if profiles reference the source")
-    add_root_option(remove_parser)
-    add_dry_run_option(remove_parser)
-    remove_parser.set_defaults(func=source_remove_command)
 
-    sync_parser = source_subcommands.add_parser("sync", help="Sync external sources.")
-    sync_parser.add_argument("names", nargs="*", help="Optional source names to sync")
-    sync_parser.add_argument("--profile", help="Sync only sources referenced by profiles/<name>/config.toml")
-    sync_parser.add_argument("--depth", type=positive_int, help="Create or update shallow checkouts with this depth")
-    sync_parser.add_argument("--slice", "-s", help="1-based source indexes or slices to sync, such as 4:, 2:4, :3, 4, or 1,3:")
-    sync_parser.add_argument(
-        "--reanchor",
-        action="store_true",
-        help="Replace clean local branches when fetched upstream history cannot fast-forward",
+app = make_app(help_text="Manage Hagency workspaces, profiles, and sources.", add_completion=True)
+source_app = make_app(help_text="Manage workspace sources.", add_completion=False)
+skill_app = make_app(help_text="Manage workspace and source skills.", add_completion=False)
+profile_app = make_app(help_text="Manage profiles.", add_completion=False)
+
+app.add_typer(source_app, name="source")
+app.add_typer(source_app, name="s", help="Alias for source.")
+app.add_typer(skill_app, name="skill")
+app.add_typer(profile_app, name="profile")
+app.add_typer(profile_app, name="p", help="Alias for profile.")
+
+
+@app.command("init", help="Initialize a Hagency workspace.")
+def init_cli(
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing workspace config")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    init_workspace_command(root=root, force=force, dry_run=dry_run)
+
+
+@source_app.command("ls", help="Alias for list.")
+@source_app.command("list", help="List configured sources.")
+def source_list_cli(
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+) -> None:
+    source_list_command(root_value=root, checkout_dir=checkout_dir)
+
+
+@source_app.command("show", help="Show one configured source.")
+def source_show_cli(
+    name: Annotated[str, typer.Argument(help="Source name", autocompletion=complete_source)],
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+) -> None:
+    source_show_command(name=name, root_value=root, checkout_dir=checkout_dir)
+
+
+@source_app.command(
+    "add",
+    help="Add a source to the workspace config. Pass a Git URL directly to infer the source name.",
+)
+def source_add_cli(
+    source: Annotated[str, typer.Argument(help="Source name, or Git URL to infer the name from")],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Override inferred source name when source is a Git URL"),
+    ] = None,
+    url: Annotated[str | None, typer.Option("--url", help="Git remote URL")] = None,
+    path: Annotated[
+        str | None,
+        typer.Option("--path", help="Explicit local or checkout path", autocompletion=complete_directory),
+    ] = None,
+    ref: Annotated[str | None, typer.Option("--ref", help="Git branch, tag, or ref")] = None,
+    remote_name: Annotated[str | None, typer.Option("--remote-name", help="Git remote name")] = None,
+    sync: Annotated[
+        bool,
+        typer.Option("--sync", help="Sync the added source after writing the config"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    source_add_command(
+        source_value=source,
+        name_value=name,
+        url_value=url,
+        path_value=path,
+        ref_value=ref,
+        remote_name=remote_name,
+        sync=sync,
+        root_value=root,
+        dry_run=dry_run,
     )
-    add_source_resolution_options(sync_parser)
-    add_dry_run_option(sync_parser)
-    sync_parser.set_defaults(func=sync_selected_sources)
 
-    skill_parser = subcommands.add_parser("skill", help="Manage workspace and source skills.")
-    skill_subcommands = skill_parser.add_subparsers(dest="skill_command", required=True)
 
-    skill_add_parser = skill_subcommands.add_parser("add", help="Install one discovered skill.")
-    skill_add_parser.add_argument("skill", help="Unique skill name or exact SOURCE:selector")
-    add_skill_destination_options(skill_add_parser, required=False, include_global=True)
-    add_source_resolution_options(skill_add_parser)
-    add_dry_run_option(skill_add_parser)
-    skill_add_parser.set_defaults(func=skill_add_command)
+@source_app.command("rm", help="Alias for remove.")
+@source_app.command("remove", help="Remove a source from the workspace config.")
+def source_remove_cli(
+    name: Annotated[str, typer.Argument(help="Source name", autocompletion=complete_source)],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Remove even if profiles reference the source"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    source_remove_command(name=name, force=force, root_value=root, dry_run=dry_run)
 
-    skill_list_parser = skill_subcommands.add_parser("list", aliases=["ls"], help="List discovered skills.")
-    skill_list_parser.add_argument("--source", "-s", dest="sources", action="append", help="Limit to a source name or workspace")
-    skill_list_parser.add_argument("--profile", "-p", help="Limit to skills selected by a profile")
-    add_source_resolution_options(skill_list_parser)
-    skill_list_parser.set_defaults(func=skill_list_command)
 
-    profile_parser = subcommands.add_parser("profile", aliases=["p"], help="Manage profiles.")
-    profile_subcommands = profile_parser.add_subparsers(dest="profile_command", required=True)
-
-    profile_list_parser = profile_subcommands.add_parser("list", aliases=["ls"], help="List profiles.")
-    add_root_option(profile_list_parser)
-    profile_list_parser.set_defaults(func=profile_list_command)
-
-    profile_add_parser = profile_subcommands.add_parser("add", help="Add a profile.")
-    profile_add_parser.add_argument("name", help="Profile name under profiles/")
-    profile_add_parser.add_argument("--description", help="Profile description")
-    profile_add_parser.add_argument(
-        "-AS",
-        "--add-skill",
-        help="Source, skill name, or SOURCE:selector to add to this profile",
+@source_app.command("sync", help="Sync external sources.")
+def source_sync_cli(
+    names: Annotated[
+        list[str] | None,
+        typer.Argument(help="Optional source names to sync", autocompletion=complete_source),
+    ] = None,
+    profile: Annotated[
+        str | None,
+        typer.Option(
+            "--profile",
+            help="Sync only sources referenced by profiles/<name>/config.toml",
+            autocompletion=complete_profile,
+        ),
+    ] = None,
+    depth: Annotated[
+        int | None,
+        typer.Option("--depth", min=1, help="Create or update shallow checkouts with this depth"),
+    ] = None,
+    source_slice: Annotated[
+        str | None,
+        typer.Option(
+            "--slice",
+            "-s",
+            help="1-based source indexes or slices to sync, such as 4:, 2:4, :3, 4, or 1,3:",
+        ),
+    ] = None,
+    reanchor: Annotated[
+        bool,
+        typer.Option("--reanchor", help="Replace clean local branches when fetched upstream history cannot fast-forward"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    sync_selected_sources(
+        names=list(names or []),
+        profile_name=profile,
+        depth=depth,
+        source_slice=source_slice,
+        reanchor=reanchor,
+        root_value=root,
+        checkout_dir=checkout_dir,
+        dry_run=dry_run,
     )
-    add_profile_skill_options(profile_add_parser)
-    add_root_option(profile_add_parser)
-    add_dry_run_option(profile_add_parser)
-    profile_add_parser.set_defaults(func=profile_add_command)
 
-    profile_update_parser = profile_subcommands.add_parser("update", aliases=["u"], help="Update a profile.")
-    profile_update_parser.add_argument("name", help="Profile name under profiles/")
-    profile_update_parser.add_argument("--description", help="Profile description")
-    skill_update_group = profile_update_parser.add_mutually_exclusive_group()
-    skill_update_group.add_argument(
-        "-AS",
-        "--add-skill",
-        help="Source, skill name, or SOURCE:selector to add or merge",
+
+@skill_app.command("add", help="Install one discovered skill.")
+def skill_add_cli(
+    skill: Annotated[
+        str,
+        typer.Argument(help="Unique skill name or exact SOURCE:selector", autocompletion=complete_skill_add),
+    ],
+    skills_path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            "-p",
+            metavar="PATH",
+            help="Exact skills directory; no .agents/skills suffix is added",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    skills_root: Annotated[
+        str | None,
+        typer.Option(
+            "--dir",
+            "-d",
+            metavar="DIR",
+            help="Target workspace directory; install under DIR/.agents/skills",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    global_install: Annotated[
+        bool,
+        typer.Option("--global", help="Install under ~/.agents/skills"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    require_at_most_one({"--path": skills_path, "--dir": skills_root, "--global": global_install})
+    skill_add_command(
+        skill=skill,
+        skills_path=skills_path,
+        skills_root=skills_root,
+        global_install=global_install,
+        root_value=root,
+        checkout_dir=checkout_dir,
+        dry_run=dry_run,
     )
-    skill_update_group.add_argument(
-        "-RS",
-        "--remove-skill",
-        help="Source, skill name, or SOURCE:selector to remove",
+
+
+@skill_app.command("ls", help="Alias for list.")
+@skill_app.command("list", help="List discovered skills.")
+def skill_list_cli(
+    sources: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--source",
+            "-s",
+            help="Limit to a source name or workspace",
+            autocompletion=complete_source_or_workspace,
+        ),
+    ] = None,
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", "-p", help="Limit to skills selected by a profile", autocompletion=complete_profile),
+    ] = None,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+) -> None:
+    skill_list_command(
+        source_filters=list(sources or []),
+        profile_name=profile,
+        root_value=root,
+        checkout_dir=checkout_dir,
     )
-    add_profile_skill_options(profile_update_parser)
-    profile_update_parser.add_argument("--replace", action="store_true", help="Replace one profile skill entry")
-    add_root_option(profile_update_parser)
-    add_dry_run_option(profile_update_parser)
-    profile_update_parser.set_defaults(func=profile_update_command)
 
-    profile_remove_parser = profile_subcommands.add_parser("remove", aliases=["rm"], help="Remove a profile.")
-    profile_remove_parser.add_argument("name", help="Profile name under profiles/")
-    add_root_option(profile_remove_parser)
-    add_dry_run_option(profile_remove_parser)
-    profile_remove_parser.set_defaults(func=profile_remove_command)
 
-    profile_show_parser = profile_subcommands.add_parser("show", help="Show one profile config.")
-    profile_show_parser.add_argument("name", help="Profile name under profiles/")
-    add_root_option(profile_show_parser)
-    profile_show_parser.set_defaults(func=profile_show_command)
+@profile_app.command("ls", help="Alias for list.")
+@profile_app.command("list", help="List profiles.")
+def profile_list_cli(
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+) -> None:
+    profile_list_command(root_value=root)
 
-    profile_init_parser = profile_subcommands.add_parser(
-        "init",
-        help="Initialize profile skills into a target directory.",
-        description="Initialize profile skills into an exact skills directory or a workspace's .agents/skills directory.",
-        epilog="Migration: replace previous -p WORKSPACE usage with -d WORKSPACE.",
+
+@profile_app.command("add", help="Add a profile.")
+def profile_add_cli(
+    name: Annotated[str, typer.Argument(help="Profile name under profiles/")],
+    description: Annotated[str | None, typer.Option("--description", help="Profile description")] = None,
+    add_skill: Annotated[
+        str | None,
+        typer.Option(
+            "-AS",
+            "--add-skill",
+            help="Source, skill name, or SOURCE:selector to add to this profile",
+            autocompletion=complete_skill_reference,
+        ),
+    ] = None,
+    include: Annotated[
+        list[str] | None,
+        typer.Option("--include", "-i", help="Skill selectors to include", autocompletion=complete_selector),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-e", help="Skill selectors to exclude", autocompletion=complete_selector),
+    ] = None,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    profile_add_command(
+        name=name,
+        description=description,
+        add_skill=add_skill,
+        include=include,
+        exclude=exclude,
+        root_value=root,
+        checkout_dir=None,
+        dry_run=dry_run,
     )
-    add_skill_destination_options(profile_init_parser, required=True, include_global=False)
-    profile_init_parser.add_argument("name", help="Profile name under profiles/")
-    profile_init_parser.add_argument("-cp", dest="copy", action="store_true", help="Copy skill directories instead of linking")
-    profile_init_parser.add_argument(
-        "--link-mode",
-        choices=["symlink", "copy", "junction"],
-        help="How to materialize profile skills; defaults to junction on Windows and symlink elsewhere",
+
+
+@profile_app.command("u", help="Alias for update.")
+@profile_app.command("update", help="Update a profile.")
+def profile_update_cli(
+    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    description: Annotated[str | None, typer.Option("--description", help="Profile description")] = None,
+    add_skill: Annotated[
+        str | None,
+        typer.Option(
+            "-AS",
+            "--add-skill",
+            help="Source, skill name, or SOURCE:selector to add or merge",
+            autocompletion=complete_skill_reference,
+        ),
+    ] = None,
+    remove_skill: Annotated[
+        str | None,
+        typer.Option(
+            "-RS",
+            "--remove-skill",
+            help="Source, skill name, or SOURCE:selector to remove",
+            autocompletion=complete_profile_remove_reference,
+        ),
+    ] = None,
+    include: Annotated[
+        list[str] | None,
+        typer.Option("--include", "-i", help="Skill selectors to include", autocompletion=complete_selector),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", "-e", help="Skill selectors to exclude", autocompletion=complete_selector),
+    ] = None,
+    replace: Annotated[bool, typer.Option("--replace", help="Replace one profile skill entry")] = False,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    require_at_most_one({"--add-skill": add_skill, "--remove-skill": remove_skill})
+    profile_update_command(
+        name=name,
+        description=description,
+        add_skill=add_skill,
+        remove_skill=remove_skill,
+        include=include,
+        exclude=exclude,
+        replace=replace,
+        root_value=root,
+        checkout_dir=None,
+        dry_run=dry_run,
     )
-    add_source_resolution_options(profile_init_parser)
-    add_dry_run_option(profile_init_parser)
-    profile_init_parser.set_defaults(func=init_profile_command)
-
-    return parser
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    args.func(args)
+@profile_app.command("rm", help="Alias for remove.")
+@profile_app.command("remove", help="Remove a profile.")
+def profile_remove_cli(
+    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    profile_remove_command(name=name, root_value=root, dry_run=dry_run)
+
+
+@profile_app.command("show", help="Show one profile config.")
+def profile_show_cli(
+    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+) -> None:
+    profile_show_command(name=name, root_value=root)
+
+
+@profile_app.command(
+    "init",
+    help="Initialize profile skills into a target directory.",
+    epilog="Migration: replace previous -p WORKSPACE usage with -d WORKSPACE.",
+)
+def profile_init_cli(
+    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    skills_path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            "-p",
+            metavar="PATH",
+            help="Exact skills directory; no .agents/skills suffix is added",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    skills_root: Annotated[
+        str | None,
+        typer.Option(
+            "--dir",
+            "-d",
+            metavar="DIR",
+            help="Target workspace directory; install under DIR/.agents/skills",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    copy: Annotated[bool, typer.Option("-cp", help="Copy skill directories instead of linking")] = False,
+    link_mode: Annotated[
+        LinkMode | None,
+        typer.Option(
+            "--link-mode",
+            help="How to materialize profile skills; defaults to junction on Windows and symlink elsewhere",
+        ),
+    ] = None,
+    root: Annotated[
+        str | None,
+        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+    ] = None,
+    checkout_dir: Annotated[
+        str | None,
+        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Print planned actions without changing files"),
+    ] = False,
+) -> None:
+    require_exactly_one({"--path": skills_path, "--dir": skills_root})
+    init_profile_command(
+        name=name,
+        skills_path=skills_path,
+        skills_root=skills_root,
+        copy=copy,
+        link_mode=link_mode,
+        root_value=root,
+        checkout_dir=checkout_dir,
+        dry_run=dry_run,
+    )
+
+
+def normalize_legacy_multi_value_options(args: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(args):
+        option_token = args[index]
+        normalized.append(option_token)
+        index += 1
+        option, separator, _inline_value = option_token.partition("=")
+        if option not in {"-i", "--include", "-e", "--exclude"}:
+            continue
+        has_value = bool(separator)
+        while index < len(args) and not args[index].startswith("-"):
+            if has_value:
+                normalized.append(option)
+            normalized.append(args[index])
+            index += 1
+            has_value = True
+    return normalized
+
+
+def explicit_completion_shell(args: Sequence[str]) -> str | None:
+    for index, arg in enumerate(args):
+        option, separator, inline_value = arg.partition("=")
+        if option not in {"--install-completion", "--show-completion"}:
+            continue
+        if separator:
+            return inline_value
+        if index + 1 < len(args) and not args[index + 1].startswith("-"):
+            return args[index + 1]
+    return None
+
+
+def main(args: Sequence[str] | None = None) -> None:
+    raw_args = list(sys.argv[1:] if args is None else args)
+    completion_shell = explicit_completion_shell(raw_args)
+    previous_detection = os.environ.get("_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION")
+    if completion_shell is not None:
+        # Typer 0.27 exposes shell-valued completion options when automatic
+        # shell detection is disabled, which supports --show-completion SHELL.
+        os.environ["_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION"] = "1"
+    try:
+        app(args=normalize_legacy_multi_value_options(raw_args), prog_name="hgc")
+    finally:
+        if completion_shell is not None:
+            if previous_detection is None:
+                os.environ.pop("_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION", None)
+            else:
+                os.environ["_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION"] = previous_detection

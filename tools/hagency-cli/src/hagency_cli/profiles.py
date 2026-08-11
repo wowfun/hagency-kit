@@ -172,7 +172,7 @@ def resolve_profile_skill_reference(
         unsynced = sorted(source.name for source in sources.values() if source.remote is not None and not source.path.exists())
         if unsynced:
             names = " ".join(unsynced)
-            die(f"unknown source or skill: {value}; unsynced sources may contain it, run: hagency source sync {names}")
+            die(f"unknown source or skill: {value}; unsynced sources may contain it, run: hgc source sync {names}")
         die(f"unknown source or skill: {value}")
     if len(matches) > 1:
         choices = format_reference_choices(

@@ -420,6 +420,6 @@ def require_source_path(source: Source) -> None:
     if not source.path.exists():
         if source.remote is None:
             die(f"local source path does not exist: {source.path}")
-        die(f"source path does not exist; run hagency source sync first: {source.path}")
+        die(f"source path does not exist; run hgc source sync first: {source.path}")
     if not source.path.is_dir():
         die(f"source path is not a directory: {source.path}")

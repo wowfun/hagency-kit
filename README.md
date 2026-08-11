@@ -6,7 +6,7 @@ Practical agent skills for reviewing, diagnosing, and operating AI-assisted engi
 
 ## Hagency CLI
 
-The `hagency` CLI manages Hagency workspaces, sources, skill discovery and installation, profiles, and generated profile skill outputs. `hgc` is its short alias. Source registry entries live in [`hagency-config.toml`](hagency-config.toml), and profile configs live under `profiles/<name>/config.toml`.
+The `hgc` CLI manages Hagency workspaces, sources, skill discovery and installation, profiles, and generated profile skill outputs. Source registry entries live in [`hagency-config.toml`](hagency-config.toml), and profile configs live under `profiles/<name>/config.toml`.
 
 ```sh
 uv tool install -e tools/hagency-cli
@@ -21,7 +21,16 @@ hgc p init -p <xxx>/skills <profile>
 hgc p init -d <workspace> <profile>
 ```
 
-`[defaults].depth` sets the default sync depth; transient Git network failures are retried automatically. Use `hagency source sync -s <slice>` to resume a selected source range after a failure. When a Git URL's inferred repo name already exists, `source add` falls back to `owner/repo`; pass `--name` to choose a custom source name.
+Install completion for the current shell, or print a shell-specific completion script:
+
+```sh
+hgc --install-completion
+hgc --show-completion bash
+```
+
+Completion covers commands, aliases, options, directories, and locally available source, profile, skill, and selector values. It respects the current directory, `--root`, and `--checkout-dir`; missing, invalid, unreadable, or unsynced workspace data is silently omitted.
+
+`[defaults].depth` sets the default sync depth; transient Git network failures are retried automatically. Use `hgc source sync -s <slice>` to resume a selected source range after a failure. When a Git URL's inferred repo name already exists, `source add` falls back to `owner/repo`; pass `--name` to choose a custom source name.
 
 Use an optional Windows checkout override when the same config is shared across platforms:
 
@@ -45,7 +54,7 @@ Normal sync refuses non-fast-forward updates. If an upstream source rewrites his
 | --- | --- | --- |
 | [`analyze-diff`](skills/analyze-diff/SKILL.md) | Explaining git diffs, commit ranges, branch comparisons, or pasted changesets | Turns raw change evidence into release-oriented summaries, feature change lists, risk notes, testing gaps, and draft release notes. |
 | [`diagnose-ai-workflow`](skills/diagnose-ai-workflow/SKILL.md) | Auditing prompts, agent workflows, toolchains, multi-agent systems, or production readiness | Scores workflow health across prompts, context, tools, architecture, safety, reliability, and system performance using available evidence. |
-| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skill discovery or installation, or profile initialization | Helps agents inspect and manage `hagency` workspace sources, direct skill installs, profile skill selectors, source syncs, and generated profile skill outputs. |
+| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skill discovery or installation, or profile initialization | Helps agents inspect and manage Hagency workspace sources, direct skill installs, profile skill selectors, source syncs, and generated profile skill outputs. |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | Investigating application, server, JSON, CI, or rotated gzip logs | Samples and analyzes logs to explain failures, error spikes, slow requests, traffic patterns, and incident signals while keeping evidence bounded and redacted. |
 
 ## Profiles

@@ -3,10 +3,9 @@ name = "hagency-cli"
 version = "0.1.0"
 description = "CLI helpers for Hagency Kit profiles and external skill sources."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["typer>=0.27.1,<0.28"]
 
 [project.scripts]
-hagency = "hagency_cli.cli:main"
 hgc = "hagency_cli.cli:main"
 
 [build-system]

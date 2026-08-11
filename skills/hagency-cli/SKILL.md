@@ -1,11 +1,11 @@
 ---
 name: hagency-cli
-description: Use the Hagency Kit CLI for workspace, source, skill, and profile workflows. Trigger for `hagency` or `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `profiles/*/config.toml`, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
+description: Use the Hagency Kit CLI for workspace, source, skill, and profile workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `profiles/*/config.toml`, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
 ---
 
 # Hagency CLI
 
-Use the repo-local `hagency` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, and generated profile skill links. `hgc` is the short alias for the same interface. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
+Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, and generated profile skill links. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
 
 ## Workspace Context
 
@@ -25,17 +25,17 @@ Native Windows normalizes Git Bash paths such as `/d/Projects/references` to `D:
 
 ## Inspect Sources, Skills, Profiles
 
-Use `s` and `p` for the top-level source and profile aliases. Use `ls` for list commands. Use `hagency skill ls` to scan `SKILL.md` directories before editing profile selectors.
+Use `s` and `p` for the top-level source and profile aliases. Use `ls` for list commands. Use `hgc skill ls` to scan `SKILL.md` directories before editing profile selectors.
 
 ```sh
-hagency s ls -r <root>
-hagency s show <source> -r <root>
-hagency skill ls -s workspace -r <root>
-hagency skill ls -s <source> -r <root>
-hagency skill ls -p <profile> -r <root>
-hagency skill ls --checkout-dir <checkout-dir> -r <root>
-hagency p ls -r <root>
-hagency p show <profile> -r <root>
+hgc s ls -r <root>
+hgc s show <source> -r <root>
+hgc skill ls -s workspace -r <root>
+hgc skill ls -s <source> -r <root>
+hgc skill ls -p <profile> -r <root>
+hgc skill ls --checkout-dir <checkout-dir> -r <root>
+hgc p ls -r <root>
+hgc p show <profile> -r <root>
 ```
 
 ## Sync Sources
@@ -43,17 +43,17 @@ hagency p show <profile> -r <root>
 Sync remote sources before relying on profile initialization or skill-name inference. For profile-scoped sync, keep the long `--profile` option because `source sync -s` is already the slice selector. Use `--depth` for shallow checkouts and `-s` with 1-based indexes to resume a failed subset.
 
 ```sh
-hagency s sync --profile <profile> --depth 1 -r <root>
-hagency s sync <source> --depth 1 -r <root>
-hagency s sync --profile <profile> -s 4: -r <root>
-hagency s sync --profile <profile> -s 1,3: -r <root>
+hgc s sync --profile <profile> --depth 1 -r <root>
+hgc s sync <source> --depth 1 -r <root>
+hgc s sync --profile <profile> -s 4: -r <root>
+hgc s sync --profile <profile> -s 1,3: -r <root>
 ```
 
 Normal sync refuses non-fast-forward updates. When the error lists a `--reanchor` retry command, use it only if every selected checkout is disposable and may lose local-only commits.
 
 ```sh
-hagency s sync <source> --reanchor -r <root>
-hagency s sync --profile <profile> -s 4: --reanchor -r <root>
+hgc s sync <source> --reanchor -r <root>
+hgc s sync --profile <profile> -s 4: --reanchor -r <root>
 ```
 
 Reanchoring requires no staged, unstaged, or untracked changes. It does not save sync state or create recovery refs. `--dry-run --reanchor` only describes what an actual sync may do after fetching.
@@ -77,11 +77,11 @@ The command installs exactly one skill. If a name is ambiguous, use one of the e
 Use `p add` for new profile configs and `p u` for profile updates. `-AS` adds or merges a source, skill name, or `SOURCE:selector`; `-RS` removes one. Use `-i` and `-e` for include and exclude selectors. Use `--replace` only when the existing entry should be rewritten.
 
 ```sh
-hagency p add <profile> --description "Profile description." -AS <source> -r <root>
-hagency p u <profile> -AS <source> -i <include-selector> -e <exclude-selector> -r <root>
-hagency p u <profile> -AS <source>:<selector> --replace -r <root>
-hagency p u <profile> -RS <source> -r <root>
-hagency p rm <profile> -r <root>
+hgc p add <profile> --description "Profile description." -AS <source> -r <root>
+hgc p u <profile> -AS <source> -i <include-selector> -e <exclude-selector> -r <root>
+hgc p u <profile> -AS <source>:<selector> --replace -r <root>
+hgc p u <profile> -RS <source> -r <root>
+hgc p rm <profile> -r <root>
 ```
 
 Skill-name inputs can resolve to a source when the name is unique. If the CLI reports ambiguity, rerun with the `SOURCE:selector` form shown in the error.
@@ -91,14 +91,18 @@ Skill-name inputs can resolve to a source when the name is unique. If the CLI re
 Use `p init` to materialize profile-selected skills. The command requires exactly one destination option: `-p/--path` names the final skills container and appends only each skill name, while `-d/--dir` names a workspace root and writes to `<workspace>/.agents/skills`. Relative destinations resolve against the invocation directory, and `~` expands to the current user's home. These rules are independent of `-r/--root` and `--checkout-dir`, which only control profile and source discovery. Symlinks are the default except on Windows, where junctions are the default. Use `-cp` when the target should get independent copies that can evolve separately from the source.
 
 ```sh
-hagency p init -p <xxx>/skills <profile> -r <root>
-hagency p init -d <workspace> <profile> -r <root>
-hagency p init -p <xxx>/skills <profile> -r <root> -cp
-hagency p init -d <windows-workspace> <profile> -r <windows-root>
-hagency p init -d <git-bash-workspace> <profile> -r <git-bash-root>
+hgc p init -p <xxx>/skills <profile> -r <root>
+hgc p init -d <workspace> <profile> -r <root>
+hgc p init -p <xxx>/skills <profile> -r <root> -cp
+hgc p init -d <windows-workspace> <profile> -r <windows-root>
+hgc p init -d <git-bash-workspace> <profile> -r <git-bash-root>
 ```
 
 This is a breaking change to `-p`: migrate `hgc p init -p <root> <profile>` to `hgc p init -d <root> <profile>`. The CLI does not append `.agents/skills` to a `--path` value; use `--dir` when the input is a workspace root.
+
+## Command Completion
+
+Use `hgc --install-completion` to install completion for the current shell, or `hgc --show-completion <shell>` to inspect the generated script. Completion includes command aliases and local source, profile, skill, selector, and directory values. It is read-only and silently returns no dynamic candidates when workspace data is missing, invalid, unreadable, or unsynced.
 
 ## Safety and Boundaries
 

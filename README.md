@@ -19,6 +19,7 @@ hgc skill add <source>:<selector> -d <workspace>
 hgc skill add <source>:<selector> --global
 hgc p init -p <xxx>/skills <profile>
 hgc p init -d <workspace> <profile>
+hgc serve start --model-proxy
 ```
 
 Install completion for the current shell, or print a shell-specific completion script:
@@ -29,6 +30,53 @@ hgc --show-completion bash
 ```
 
 Completion covers commands, aliases, options, directories, and locally available source, profile, skill, and selector values. It respects the current directory, `--root`, and `--checkout-dir`; missing, invalid, unreadable, or unsynced workspace data is silently omitted.
+
+### Local model proxy
+
+`hgc serve start --model-proxy` starts a background process that exposes both OpenAI Responses and Chat Completions interfaces for every configured provider. Provider selection comes from the URL, never from `model`; the model value is forwarded unchanged.
+
+Create `hagency-model-proxy.toml` beside `hagency-config.toml`:
+
+```toml
+version = 1
+default_provider = "openai"
+
+[providers.openai]
+adapter = "openai"
+api_key = { env = "OPENAI_API_KEY" }
+
+[providers.corp]
+adapter = "openai_compatible"
+base_url = "https://llm.corp.example/openai/v1"
+hook = "corp.py"
+
+[providers.corp.headers]
+"X-Tenant" = { env = "CORP_TENANT" }
+```
+
+Then point an OpenAI-compatible client at one of these base URLs:
+
+```text
+http://127.0.0.1:8765/v1
+http://127.0.0.1:8765/openai/v1
+http://127.0.0.1:8765/corp/v1
+```
+
+Manage the background process with the same workspace root or explicit config path:
+
+```sh
+hgc serve start --model-proxy -r <workspace>
+hgc serve stop --model-proxy -r <workspace>
+hgc serve restart --model-proxy -r <workspace>
+```
+
+Linux uses a detached session; Windows uses a detached, no-console process group. State and logs are stored below `XDG_STATE_HOME`/`~/.local/state` on Linux and `LOCALAPPDATA` on Windows. Set `HAGENCY_STATE_HOME` to an absolute path to override that root. `start` reports the exact log path; logs rotate at 10 MiB with three backups.
+
+The bare `/v1` routes use `default_provider`; `/<provider>/v1` selects one explicitly. `POST /responses` and `POST /chat/completions` are always available. A matching upstream protocol uses a raw entity path; the other interface is converted. Additional resource operations under the native protocol family are passed through without cross-protocol emulation.
+
+Downstream credential headers are stripped by default. Use `forward_credential_headers` for explicit per-provider forwarding, static/env headers for normal authentication, or a trusted Python hook under `<config-dir>/hooks/` for custom request, signing, and response handling. Hooks run in-process and take effect after a restart. Defining `process_response` buffers non-SSE responses before invoking the hook and enforces a 64 MiB response limit; omit that method when response inspection is unnecessary. The server only accepts loopback listen addresses.
+
+`adapter = "openai"` supplies the Responses protocol and OpenAI API root; `adapter = "openai_compatible"` defaults to Chat Completions and requires `base_url`. Override `protocol` at provider level when needed. To add a provider family, add one module under [`model_proxy/providers`](tools/hagency-cli/src/hagency_cli/model_proxy/providers/README.md) that exports `ADAPTER`; the filename becomes the adapter value and no central registry change is needed.
 
 `[defaults].depth` sets the default sync depth; transient Git network failures are retried automatically. Use `hgc source sync -s <slice>` to resume a selected source range after a failure. When a Git URL's inferred repo name already exists, `source add` falls back to `owner/repo`; pass `--name` to choose a custom source name.
 
@@ -54,7 +102,7 @@ Normal sync refuses non-fast-forward updates. If an upstream source rewrites his
 | --- | --- | --- |
 | [`analyze-diff`](skills/analyze-diff/SKILL.md) | Explaining git diffs, commit ranges, branch comparisons, or pasted changesets | Turns raw change evidence into release-oriented summaries, feature change lists, risk notes, testing gaps, and draft release notes. |
 | [`diagnose-ai-workflow`](skills/diagnose-ai-workflow/SKILL.md) | Auditing prompts, agent workflows, toolchains, multi-agent systems, or production readiness | Scores workflow health across prompts, context, tools, architecture, safety, reliability, and system performance using available evidence. |
-| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skill discovery or installation, or profile initialization | Helps agents inspect and manage Hagency workspace sources, direct skill installs, profile skill selectors, source syncs, and generated profile skill outputs. |
+| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skills, profile initialization, or the local model proxy | Helps agents manage Hagency workspace content and run provider-level Responses/Chat proxy endpoints. |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | Investigating application, server, JSON, CI, or rotated gzip logs | Samples and analyzes logs to explain failures, error spikes, slow requests, traffic patterns, and incident signals while keeping evidence bounded and redacted. |
 
 ## Profiles

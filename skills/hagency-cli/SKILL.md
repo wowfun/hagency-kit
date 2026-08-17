@@ -1,11 +1,11 @@
 ---
 name: hagency-cli
-description: Use the Hagency Kit CLI for workspace, source, skill, and profile workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `profiles/*/config.toml`, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
+description: Use the Hagency Kit CLI for workspace, source, skill, profile, and local model-proxy workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `hagency-model-proxy.toml`, provider-level OpenAI Responses or Chat Completions proxying, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
 ---
 
 # Hagency CLI
 
-Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, and generated profile skill links. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
+Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, generated profile skill links, and the loopback model proxy. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
 
 ## Workspace Context
 
@@ -104,7 +104,52 @@ This is a breaking change to `-p`: migrate `hgc p init -p <root> <profile>` to `
 
 Use `hgc --install-completion` to install completion for the current shell, or `hgc --show-completion <shell>` to inspect the generated script. Completion includes command aliases and local source, profile, skill, selector, and directory values. It is read-only and silently returns no dynamic candidates when workspace data is missing, invalid, unreadable, or unsynced.
 
+## Serve a Local Model Proxy
+
+Use `hgc serve start --model-proxy` when a local client needs both OpenAI Responses and Chat Completions interfaces backed by provider-level configuration. The default config path is `<workspace>/hagency-model-proxy.toml`; use `--config` instead of `--root` for an explicit file. Only loopback IP addresses are accepted.
+
+```sh
+hgc serve start --model-proxy -r <workspace>
+hgc serve stop --model-proxy -r <workspace>
+hgc serve restart --model-proxy --config <path> --host 127.0.0.1 --port 8765
+```
+
+`start` and `restart` return after the background worker has bound its port. Use the same resolved config path for `stop`; stopping an already stopped worker is successful and reports that it is not running. Linux uses a detached session, while Windows uses a detached no-console process group. Lifecycle state and logs use `XDG_STATE_HOME`/`~/.local/state` on Linux and `LOCALAPPDATA` on Windows; an absolute `HAGENCY_STATE_HOME` overrides the state root. Logs rotate at 10 MiB with three backups. Read the log path printed by `start` before diagnosing a startup or runtime failure.
+
+Configure each provider through a provider adapter. Each configured provider still has exactly one native protocol. Do not add model lists, aliases, provider prefixes inside `model`, or model-based routing rules.
+
+```toml
+version = 1
+default_provider = "openai"
+
+[providers.openai]
+adapter = "openai"
+api_key = { env = "OPENAI_API_KEY" }
+```
+
+The `openai` adapter supplies the Responses protocol and API root. Use `openai_compatible` with a `base_url` for compatible providers; it defaults to Chat Completions. Override `protocol` only at provider level. New built-in provider families belong in `tools/hagency-cli/src/hagency_cli/model_proxy/providers/<adapter>.py` and export one `ProviderAdapter` value named `ADAPTER`; the filename is discovered directly, so no registry edit is required. Keep deployment secrets and tenant-specific values in config, and keep model routing out of adapters.
+
+Use `http://127.0.0.1:8765/v1` for the default provider and `http://127.0.0.1:8765/<provider>/v1` for an explicit provider. Both base URLs expose `/responses` and `/chat/completions`. Matching protocol traffic keeps request/response entity bytes intact except where an explicitly configured body or SSE hook changes them; cross-protocol traffic uses the built-in bridge. Native resource subpaths are passed through only to a matching provider protocol.
+
+Credential-like downstream headers are removed unless named in `forward_credential_headers`. Prefer static or environment-backed provider headers. For custom provider authentication or wire-shape adjustments, set `hook = "name.py"` and place the file under `<config-dir>/hooks/`. It must export `Hook`, accept `HookInit`, and may define these async methods:
+
+```python
+from hagency_cli.model_proxy import AuthPatch, HeaderPatch
+
+
+class Hook:
+    def __init__(self, init):
+        self.options = init.options
+
+    async def authenticate(self, ctx, request):
+        token = await obtain_provider_token(self.options, request.body)
+        return AuthPatch(headers=HeaderPatch(set=(("Authorization", f"Bearer {token}"),)))
+```
+
+`prepare_request` and `process_response` see provider-native data; `authenticate` sees the final body and may return only header/query patches. Missing methods preserve the relevant raw path. Defining `process_response` buffers each non-SSE response before the hook runs and applies a 64 MiB response limit, so omit it for authentication-only Hooks. Hook loading and contract validation happen before listening, hook failures are fail-closed, and files are not hot-reloaded. Treat Hook files as trusted in-process code.
+
 ## Safety and Boundaries
 
 - Prefer `--dry-run` before commands that mutate checkouts, profile configs, source configs, files, symlinks, or copied skill directories.
+- Do not expose the model proxy through a separate port forward or public listener without adding an appropriate downstream authentication layer.
 - Do not create `agents/openai.yaml` for this repo-local skill unless the user explicitly asks for it.

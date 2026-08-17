@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import shlex
 import subprocess
@@ -19,6 +20,13 @@ from .completion import (
     complete_skill_reference,
     complete_source,
     complete_source_or_workspace,
+)
+from .model_proxy import ModelProxyConfigError
+from .model_proxy.daemon import (
+    ModelProxyServiceError,
+    restart_model_proxy,
+    start_model_proxy,
+    stop_model_proxy,
 )
 from .profiles import (
     build_profile_config,
@@ -93,13 +101,17 @@ def resolve_skill_install_dir(
 def require_at_most_one(options: dict[str, object]) -> None:
     selected = [name for name, value in options.items() if value not in (None, False)]
     if len(selected) > 1:
-        raise typer.BadParameter(f"options are mutually exclusive: {', '.join(selected)}")
+        raise typer.BadParameter(
+            f"options are mutually exclusive: {', '.join(selected)}"
+        )
 
 
 def require_exactly_one(options: dict[str, object]) -> None:
     require_at_most_one(options)
     if not any(value not in (None, False) for value in options.values()):
-        raise typer.BadParameter(f"one of the options is required: {', '.join(options)}")
+        raise typer.BadParameter(
+            f"one of the options is required: {', '.join(options)}"
+        )
 
 
 def parse_source_slice(value: str, total: int) -> list[int]:
@@ -140,7 +152,11 @@ def source_slice_entries(selected: list, value: str | None) -> list[tuple[int, o
         indexes = set(range(1, total + 1))
     else:
         indexes = set(parse_source_slice(value, total))
-    return [(index, source) for index, source in enumerate(selected, start=1) if index in indexes]
+    return [
+        (index, source)
+        for index, source in enumerate(selected, start=1)
+        if index in indexes
+    ]
 
 
 def format_called_process_error(error: subprocess.CalledProcessError) -> str:
@@ -192,6 +208,94 @@ def init_workspace_command(*, root: str | None, force: bool, dry_run: bool) -> N
     init_workspace(root, Path.cwd(), force=force, dry_run=dry_run)
 
 
+def model_proxy_config_path(
+    *, model_proxy: bool, root: str | None, config: str | None
+) -> Path:
+    if not model_proxy:
+        raise typer.BadParameter("--model-proxy is required")
+    require_at_most_one({"--root": root, "--config": config})
+    if config is not None:
+        return expand_path(config, Path.cwd())
+    return workspace_root_arg(root) / "hagency-model-proxy.toml"
+
+
+def validate_model_proxy_host(host: str) -> None:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            "host must be a loopback IP address", param_hint="--host"
+        ) from exc
+    if not address.is_loopback:
+        raise typer.BadParameter(
+            "host must be a loopback IP address", param_hint="--host"
+        )
+
+
+def model_proxy_url(host: str, port: int) -> str:
+    display_host = f"[{host}]" if ":" in host else host
+    return f"http://{display_host}:{port}"
+
+
+def start_model_proxy_command(
+    *,
+    model_proxy: bool,
+    root: str | None,
+    config: str | None,
+    host: str,
+    port: int,
+) -> None:
+    config_path = model_proxy_config_path(
+        model_proxy=model_proxy, root=root, config=config
+    )
+    validate_model_proxy_host(host)
+    try:
+        state, paths = start_model_proxy(config_path, host=host, port=port)
+    except (ModelProxyConfigError, ModelProxyServiceError) as exc:
+        die(str(exc))
+    print(
+        f"started model proxy: pid {state.pid}, "
+        f"{model_proxy_url(state.host, state.port)}"
+    )
+    print(f"log: {paths.log}")
+
+
+def stop_model_proxy_command(
+    *, model_proxy: bool, root: str | None, config: str | None
+) -> None:
+    config_path = model_proxy_config_path(
+        model_proxy=model_proxy, root=root, config=config
+    )
+    try:
+        stopped, _paths = stop_model_proxy(config_path)
+    except ModelProxyServiceError as exc:
+        die(str(exc))
+    print("stopped model proxy" if stopped else "model proxy is not running")
+
+
+def restart_model_proxy_command(
+    *,
+    model_proxy: bool,
+    root: str | None,
+    config: str | None,
+    host: str,
+    port: int,
+) -> None:
+    config_path = model_proxy_config_path(
+        model_proxy=model_proxy, root=root, config=config
+    )
+    validate_model_proxy_host(host)
+    try:
+        state, paths = restart_model_proxy(config_path, host=host, port=port)
+    except (ModelProxyConfigError, ModelProxyServiceError) as exc:
+        die(str(exc))
+    print(
+        f"restarted model proxy: pid {state.pid}, "
+        f"{model_proxy_url(state.host, state.port)}"
+    )
+    print(f"log: {paths.log}")
+
+
 def sync_sources_with_progress(
     entries: list[tuple[int, object]],
     *,
@@ -215,11 +319,16 @@ def sync_sources_with_progress(
             print(f"Error: source {source.name} failed: {exc}", file=sys.stderr)
         except subprocess.CalledProcessError as exc:
             failures.append(source.name)
-            print(f"Error: source {source.name} failed: {format_called_process_error(exc)}", file=sys.stderr)
+            print(
+                f"Error: source {source.name} failed: {format_called_process_error(exc)}",
+                file=sys.stderr,
+            )
 
     if failures:
         if reanchor_candidates:
-            command = shlex.join(["hgc", "source", "sync", *reanchor_candidates, "--reanchor"])
+            command = shlex.join(
+                ["hgc", "source", "sync", *reanchor_candidates, "--reanchor"]
+            )
             print(
                 "Tip: if these checkouts are disposable and local-only commits may be discarded, run:\n"
                 f"  {command}",
@@ -249,7 +358,11 @@ def sync_selected_sources(
         profile = read_profile_config(root, profile_name)
         selected_names.extend(profile_source_names(profile))
 
-    selected = select_sources(sources, selected_names) if selected_names else list(sources.values())
+    selected = (
+        select_sources(sources, selected_names)
+        if selected_names
+        else list(sources.values())
+    )
     total = len(selected)
     sync_sources_with_progress(
         source_slice_entries(selected, source_slice),
@@ -316,10 +429,16 @@ def list_all_skill_rows(root: Path, sources: dict) -> list[str]:
     candidates = [("workspace", workspace_source(root)), *sources.items()]
     for source_name, source in candidates:
         if not source.path.exists():
-            print(f"Warning: skipping missing source {source_name}: {source.path}", file=sys.stderr)
+            print(
+                f"Warning: skipping missing source {source_name}: {source.path}",
+                file=sys.stderr,
+            )
             continue
         if not source.path.is_dir():
-            print(f"Warning: skipping non-directory source {source_name}: {source.path}", file=sys.stderr)
+            print(
+                f"Warning: skipping non-directory source {source_name}: {source.path}",
+                file=sys.stderr,
+            )
             continue
         skip_roots = skill_skip_roots(source_name, sources)
         for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
@@ -327,7 +446,9 @@ def list_all_skill_rows(root: Path, sources: dict) -> list[str]:
     return rows
 
 
-def validate_skill_source_filters(source_filters: list[str], sources: dict, root: Path) -> list[str]:
+def validate_skill_source_filters(
+    source_filters: list[str], sources: dict, root: Path
+) -> list[str]:
     selected = dedupe_preserve_order(source_filters)
     available = {"workspace": workspace_source(root), **sources}
     for source_name in selected:
@@ -338,7 +459,9 @@ def validate_skill_source_filters(source_filters: list[str], sources: dict, root
     return selected
 
 
-def list_filtered_skill_rows(root: Path, sources: dict, source_filters: list[str]) -> list[str]:
+def list_filtered_skill_rows(
+    root: Path, sources: dict, source_filters: list[str]
+) -> list[str]:
     rows = []
     available = {"workspace": workspace_source(root), **sources}
     for source_name in validate_skill_source_filters(source_filters, sources, root):
@@ -349,13 +472,17 @@ def list_filtered_skill_rows(root: Path, sources: dict, source_filters: list[str
     return rows
 
 
-def list_selector_links(source, selector: str, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+def list_selector_links(
+    source, selector: str, *, skip_roots: set[Path] | None = None
+) -> list[tuple[str, Path]]:
     if selector == "*":
         return discover_skill_links(source, skip_roots=skip_roots)
     return resolve_selector(source, selector, skip_roots=skip_roots)
 
 
-def list_profile_selected_links(config: dict, source, *, skip_roots: set[Path] | None = None) -> list[tuple[str, Path]]:
+def list_profile_selected_links(
+    config: dict, source, *, skip_roots: set[Path] | None = None
+) -> list[tuple[str, Path]]:
     includes = config.get("include") or ["*"]
     excludes = config.get("exclude") or []
 
@@ -368,11 +495,21 @@ def list_profile_selected_links(config: dict, source, *, skip_roots: set[Path] |
         for _name, target in list_selector_links(source, item, skip_roots=skip_roots):
             excluded_paths.add(target.resolve())
 
-    return [(name, target) for name, target in links if target.resolve() not in excluded_paths]
+    return [
+        (name, target)
+        for name, target in links
+        if target.resolve() not in excluded_paths
+    ]
 
 
-def list_profile_skill_rows(root: Path, sources: dict, profile: dict, source_filters: list[str] | None) -> list[str]:
-    selected_sources = set(validate_skill_source_filters(source_filters, sources, root)) if source_filters else None
+def list_profile_skill_rows(
+    root: Path, sources: dict, profile: dict, source_filters: list[str] | None
+) -> list[str]:
+    selected_sources = (
+        set(validate_skill_source_filters(source_filters, sources, root))
+        if source_filters
+        else None
+    )
     rows = []
     workspace = workspace_source(root)
     for source_name, config in profile.get("skill", {}).items():
@@ -381,7 +518,9 @@ def list_profile_skill_rows(root: Path, sources: dict, profile: dict, source_fil
         source = skill_source(source_name, sources, workspace)
         require_source_path(source)
         skip_roots = skill_skip_roots(source_name, sources)
-        for name, target in list_profile_selected_links(config or {}, source, skip_roots=skip_roots):
+        for name, target in list_profile_selected_links(
+            config or {}, source, skip_roots=skip_roots
+        ):
             rows.append(format_skill_row(source_name, source, name, target))
     return rows
 
@@ -409,7 +548,9 @@ def skill_list_command(
         print(row)
 
 
-def resolve_skill_add_link(reference: str, sources: dict, root: Path) -> tuple[str, Path]:
+def resolve_skill_add_link(
+    reference: str, sources: dict, root: Path
+) -> tuple[str, Path]:
     source_name, selector = resolve_profile_skill_reference(
         reference,
         sources,
@@ -422,9 +563,13 @@ def resolve_skill_add_link(reference: str, sources: dict, root: Path) -> tuple[s
 
     source = skill_source(source_name, sources, workspace_source(root))
     require_source_path(source)
-    links = resolve_selector(source, selector, skip_roots=skill_skip_roots(source_name, sources))
+    links = resolve_selector(
+        source, selector, skip_roots=skill_skip_roots(source_name, sources)
+    )
     if len(links) != 1:
-        die(f"skill reference {reference!r} matched {len(links)} skills; choose one exact SOURCE:selector")
+        die(
+            f"skill reference {reference!r} matched {len(links)} skills; choose one exact SOURCE:selector"
+        )
     return links[0]
 
 
@@ -483,7 +628,9 @@ def validate_profile_skill_args(
     return include, exclude
 
 
-def with_inferred_include(include: list[str] | None, selector: str | None) -> list[str] | None:
+def with_inferred_include(
+    include: list[str] | None, selector: str | None
+) -> list[str] | None:
     if selector is None:
         return include
     values = [selector]
@@ -520,7 +667,9 @@ def profile_add_command(
             option="-AS",
         )
         include = with_inferred_include(include, inferred_include)
-        validate_profile_skill_selectors(add_skill, sources, root, include=include, exclude=exclude)
+        validate_profile_skill_selectors(
+            add_skill, sources, root, include=include, exclude=exclude
+        )
     profile = build_profile_config(
         name,
         description=description,
@@ -567,7 +716,9 @@ def profile_update_command(
             option="-AS",
         )
         include = with_inferred_include(include, inferred_include)
-        validate_profile_skill_selectors(add_skill, sources, root, include=include, exclude=exclude)
+        validate_profile_skill_selectors(
+            add_skill, sources, root, include=include, exclude=exclude
+        )
     remove_skill_selector = None
     if remove_skill:
         remove_skill, inferred_remove = resolve_profile_skill_reference(
@@ -578,7 +729,9 @@ def profile_update_command(
             option="-RS",
         )
         if inferred_remove is not None:
-            validate_profile_skill_selectors(remove_skill, sources, root, include=[inferred_remove], exclude=None)
+            validate_profile_skill_selectors(
+                remove_skill, sources, root, include=[inferred_remove], exclude=None
+            )
             remove_skill_selector = (remove_skill, inferred_remove)
             remove_skill = None
     updated = update_profile_config(
@@ -639,7 +792,9 @@ def source_list_command(*, root_value: str | None, checkout_dir: str | None) -> 
         )
 
 
-def source_show_command(*, name: str, root_value: str | None, checkout_dir: str | None) -> None:
+def source_show_command(
+    *, name: str, root_value: str | None, checkout_dir: str | None
+) -> None:
     root = workspace_root_arg(root_value)
     registry = load_registry(root)
     sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
@@ -717,16 +872,22 @@ def source_add_command(
         print("Would add source:")
         print(render_toml({"source": {source_name: entry}}).rstrip())
         if sync_source_entry is not None:
-            sync_sources_with_progress([(1, sync_source_entry)], total=1, dry_run=True, depth=sync_depth)
+            sync_sources_with_progress(
+                [(1, sync_source_entry)], total=1, dry_run=True, depth=sync_depth
+            )
         return
 
     write_toml(config_path, registry)
     print(f"added source: {source_name}")
     if sync_source_entry is not None:
-        sync_sources_with_progress([(1, sync_source_entry)], total=1, dry_run=False, depth=sync_depth)
+        sync_sources_with_progress(
+            [(1, sync_source_entry)], total=1, dry_run=False, depth=sync_depth
+        )
 
 
-def source_remove_command(*, name: str, force: bool, root_value: str | None, dry_run: bool) -> None:
+def source_remove_command(
+    *, name: str, force: bool, root_value: str | None, dry_run: bool
+) -> None:
     root = workspace_root_arg(root_value)
     config_path = workspace_config_path(root)
     registry = load_registry(root)
@@ -735,7 +896,9 @@ def source_remove_command(*, name: str, force: bool, root_value: str | None, dry
     references = find_profile_source_references(root, name)
     if references and not force:
         refs = ", ".join(str(path.relative_to(root)) for path in references)
-        die(f"source {name} is referenced by {refs}; pass --force to remove only the config entry")
+        die(
+            f"source {name} is referenced by {refs}; pass --force to remove only the config entry"
+        )
 
     remove_source_entry(registry, name)
     if dry_run:
@@ -757,25 +920,39 @@ def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
     )
 
 
-app = make_app(help_text="Manage Hagency workspaces, profiles, and sources.", add_completion=True)
+app = make_app(
+    help_text="Manage Hagency workspaces, profiles, sources, and local services.",
+    add_completion=True,
+)
 source_app = make_app(help_text="Manage workspace sources.", add_completion=False)
-skill_app = make_app(help_text="Manage workspace and source skills.", add_completion=False)
+skill_app = make_app(
+    help_text="Manage workspace and source skills.", add_completion=False
+)
 profile_app = make_app(help_text="Manage profiles.", add_completion=False)
+serve_app = make_app(help_text="Manage local Hagency services.", add_completion=False)
 
 app.add_typer(source_app, name="source")
 app.add_typer(source_app, name="s", help="Alias for source.")
 app.add_typer(skill_app, name="skill")
 app.add_typer(profile_app, name="profile")
 app.add_typer(profile_app, name="p", help="Alias for profile.")
+app.add_typer(serve_app, name="serve")
 
 
 @app.command("init", help="Initialize a Hagency workspace.")
 def init_cli(
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing workspace config")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing workspace config")
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Print planned actions without changing files"),
@@ -784,16 +961,122 @@ def init_cli(
     init_workspace_command(root=root, force=force, dry_run=dry_run)
 
 
+@serve_app.command("start", help="Start a service in the background.")
+def serve_start_cli(
+    model_proxy: Annotated[
+        bool,
+        typer.Option("--model-proxy", help="Serve the provider-level LLM model proxy"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    config: Annotated[
+        str | None,
+        typer.Option(
+            "--config",
+            help="Model proxy TOML config path",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    host: Annotated[
+        str, typer.Option("--host", help="Loopback IP address to listen on")
+    ] = "127.0.0.1",
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, help="TCP port to listen on")
+    ] = 8765,
+) -> None:
+    start_model_proxy_command(
+        model_proxy=model_proxy, root=root, config=config, host=host, port=port
+    )
+
+
+@serve_app.command("stop", help="Stop a background service.")
+def serve_stop_cli(
+    model_proxy: Annotated[
+        bool,
+        typer.Option("--model-proxy", help="Select the provider-level LLM model proxy"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    config: Annotated[
+        str | None,
+        typer.Option(
+            "--config",
+            help="Model proxy TOML config path",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+) -> None:
+    stop_model_proxy_command(model_proxy=model_proxy, root=root, config=config)
+
+
+@serve_app.command("restart", help="Restart a service in the background.")
+def serve_restart_cli(
+    model_proxy: Annotated[
+        bool,
+        typer.Option("--model-proxy", help="Select the provider-level LLM model proxy"),
+    ] = False,
+    root: Annotated[
+        str | None,
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    config: Annotated[
+        str | None,
+        typer.Option(
+            "--config",
+            help="Model proxy TOML config path",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    host: Annotated[
+        str, typer.Option("--host", help="Loopback IP address to listen on")
+    ] = "127.0.0.1",
+    port: Annotated[
+        int, typer.Option("--port", min=1, max=65535, help="TCP port to listen on")
+    ] = 8765,
+) -> None:
+    restart_model_proxy_command(
+        model_proxy=model_proxy, root=root, config=config, host=host, port=port
+    )
+
+
 @source_app.command("ls", help="Alias for list.")
 @source_app.command("list", help="List configured sources.")
 def source_list_cli(
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
 ) -> None:
     source_list_command(root_value=root, checkout_dir=checkout_dir)
@@ -801,14 +1084,25 @@ def source_list_cli(
 
 @source_app.command("show", help="Show one configured source.")
 def source_show_cli(
-    name: Annotated[str, typer.Argument(help="Source name", autocompletion=complete_source)],
+    name: Annotated[
+        str, typer.Argument(help="Source name", autocompletion=complete_source)
+    ],
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
 ) -> None:
     source_show_command(name=name, root_value=root, checkout_dir=checkout_dir)
@@ -819,25 +1113,42 @@ def source_show_cli(
     help="Add a source to the workspace config. Pass a Git URL directly to infer the source name.",
 )
 def source_add_cli(
-    source: Annotated[str, typer.Argument(help="Source name, or Git URL to infer the name from")],
+    source: Annotated[
+        str, typer.Argument(help="Source name, or Git URL to infer the name from")
+    ],
     name: Annotated[
         str | None,
-        typer.Option("--name", help="Override inferred source name when source is a Git URL"),
+        typer.Option(
+            "--name", help="Override inferred source name when source is a Git URL"
+        ),
     ] = None,
     url: Annotated[str | None, typer.Option("--url", help="Git remote URL")] = None,
     path: Annotated[
         str | None,
-        typer.Option("--path", help="Explicit local or checkout path", autocompletion=complete_directory),
+        typer.Option(
+            "--path",
+            help="Explicit local or checkout path",
+            autocompletion=complete_directory,
+        ),
     ] = None,
-    ref: Annotated[str | None, typer.Option("--ref", help="Git branch, tag, or ref")] = None,
-    remote_name: Annotated[str | None, typer.Option("--remote-name", help="Git remote name")] = None,
+    ref: Annotated[
+        str | None, typer.Option("--ref", help="Git branch, tag, or ref")
+    ] = None,
+    remote_name: Annotated[
+        str | None, typer.Option("--remote-name", help="Git remote name")
+    ] = None,
     sync: Annotated[
         bool,
         typer.Option("--sync", help="Sync the added source after writing the config"),
     ] = False,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -860,14 +1171,21 @@ def source_add_cli(
 @source_app.command("rm", help="Alias for remove.")
 @source_app.command("remove", help="Remove a source from the workspace config.")
 def source_remove_cli(
-    name: Annotated[str, typer.Argument(help="Source name", autocompletion=complete_source)],
+    name: Annotated[
+        str, typer.Argument(help="Source name", autocompletion=complete_source)
+    ],
     force: Annotated[
         bool,
         typer.Option("--force", help="Remove even if profiles reference the source"),
     ] = False,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -881,7 +1199,9 @@ def source_remove_cli(
 def source_sync_cli(
     names: Annotated[
         list[str] | None,
-        typer.Argument(help="Optional source names to sync", autocompletion=complete_source),
+        typer.Argument(
+            help="Optional source names to sync", autocompletion=complete_source
+        ),
     ] = None,
     profile: Annotated[
         str | None,
@@ -893,7 +1213,9 @@ def source_sync_cli(
     ] = None,
     depth: Annotated[
         int | None,
-        typer.Option("--depth", min=1, help="Create or update shallow checkouts with this depth"),
+        typer.Option(
+            "--depth", min=1, help="Create or update shallow checkouts with this depth"
+        ),
     ] = None,
     source_slice: Annotated[
         str | None,
@@ -905,15 +1227,27 @@ def source_sync_cli(
     ] = None,
     reanchor: Annotated[
         bool,
-        typer.Option("--reanchor", help="Replace clean local branches when fetched upstream history cannot fast-forward"),
+        typer.Option(
+            "--reanchor",
+            help="Replace clean local branches when fetched upstream history cannot fast-forward",
+        ),
     ] = False,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -936,7 +1270,10 @@ def source_sync_cli(
 def skill_add_cli(
     skill: Annotated[
         str,
-        typer.Argument(help="Unique skill name or exact SOURCE:selector", autocompletion=complete_skill_add),
+        typer.Argument(
+            help="Unique skill name or exact SOURCE:selector",
+            autocompletion=complete_skill_add,
+        ),
     ],
     skills_path: Annotated[
         str | None,
@@ -964,18 +1301,29 @@ def skill_add_cli(
     ] = False,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Print planned actions without changing files"),
     ] = False,
 ) -> None:
-    require_at_most_one({"--path": skills_path, "--dir": skills_root, "--global": global_install})
+    require_at_most_one(
+        {"--path": skills_path, "--dir": skills_root, "--global": global_install}
+    )
     skill_add_command(
         skill=skill,
         skills_path=skills_path,
@@ -1001,15 +1349,29 @@ def skill_list_cli(
     ] = None,
     profile: Annotated[
         str | None,
-        typer.Option("--profile", "-p", help="Limit to skills selected by a profile", autocompletion=complete_profile),
+        typer.Option(
+            "--profile",
+            "-p",
+            help="Limit to skills selected by a profile",
+            autocompletion=complete_profile,
+        ),
     ] = None,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
 ) -> None:
     skill_list_command(
@@ -1025,7 +1387,12 @@ def skill_list_cli(
 def profile_list_cli(
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
 ) -> None:
     profile_list_command(root_value=root)
@@ -1034,7 +1401,9 @@ def profile_list_cli(
 @profile_app.command("add", help="Add a profile.")
 def profile_add_cli(
     name: Annotated[str, typer.Argument(help="Profile name under profiles/")],
-    description: Annotated[str | None, typer.Option("--description", help="Profile description")] = None,
+    description: Annotated[
+        str | None, typer.Option("--description", help="Profile description")
+    ] = None,
     add_skill: Annotated[
         str | None,
         typer.Option(
@@ -1046,15 +1415,30 @@ def profile_add_cli(
     ] = None,
     include: Annotated[
         list[str] | None,
-        typer.Option("--include", "-i", help="Skill selectors to include", autocompletion=complete_selector),
+        typer.Option(
+            "--include",
+            "-i",
+            help="Skill selectors to include",
+            autocompletion=complete_selector,
+        ),
     ] = None,
     exclude: Annotated[
         list[str] | None,
-        typer.Option("--exclude", "-e", help="Skill selectors to exclude", autocompletion=complete_selector),
+        typer.Option(
+            "--exclude",
+            "-e",
+            help="Skill selectors to exclude",
+            autocompletion=complete_selector,
+        ),
     ] = None,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -1076,8 +1460,15 @@ def profile_add_cli(
 @profile_app.command("u", help="Alias for update.")
 @profile_app.command("update", help="Update a profile.")
 def profile_update_cli(
-    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
-    description: Annotated[str | None, typer.Option("--description", help="Profile description")] = None,
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Profile name under profiles/", autocompletion=complete_profile
+        ),
+    ],
+    description: Annotated[
+        str | None, typer.Option("--description", help="Profile description")
+    ] = None,
     add_skill: Annotated[
         str | None,
         typer.Option(
@@ -1098,16 +1489,33 @@ def profile_update_cli(
     ] = None,
     include: Annotated[
         list[str] | None,
-        typer.Option("--include", "-i", help="Skill selectors to include", autocompletion=complete_selector),
+        typer.Option(
+            "--include",
+            "-i",
+            help="Skill selectors to include",
+            autocompletion=complete_selector,
+        ),
     ] = None,
     exclude: Annotated[
         list[str] | None,
-        typer.Option("--exclude", "-e", help="Skill selectors to exclude", autocompletion=complete_selector),
+        typer.Option(
+            "--exclude",
+            "-e",
+            help="Skill selectors to exclude",
+            autocompletion=complete_selector,
+        ),
     ] = None,
-    replace: Annotated[bool, typer.Option("--replace", help="Replace one profile skill entry")] = False,
+    replace: Annotated[
+        bool, typer.Option("--replace", help="Replace one profile skill entry")
+    ] = False,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -1132,10 +1540,20 @@ def profile_update_cli(
 @profile_app.command("rm", help="Alias for remove.")
 @profile_app.command("remove", help="Remove a profile.")
 def profile_remove_cli(
-    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Profile name under profiles/", autocompletion=complete_profile
+        ),
+    ],
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -1147,10 +1565,20 @@ def profile_remove_cli(
 
 @profile_app.command("show", help="Show one profile config.")
 def profile_show_cli(
-    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Profile name under profiles/", autocompletion=complete_profile
+        ),
+    ],
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
 ) -> None:
     profile_show_command(name=name, root_value=root)
@@ -1162,7 +1590,12 @@ def profile_show_cli(
     epilog="Migration: replace previous -p WORKSPACE usage with -d WORKSPACE.",
 )
 def profile_init_cli(
-    name: Annotated[str, typer.Argument(help="Profile name under profiles/", autocompletion=complete_profile)],
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Profile name under profiles/", autocompletion=complete_profile
+        ),
+    ],
     skills_path: Annotated[
         str | None,
         typer.Option(
@@ -1183,7 +1616,9 @@ def profile_init_cli(
             autocompletion=complete_directory,
         ),
     ] = None,
-    copy: Annotated[bool, typer.Option("-cp", help="Copy skill directories instead of linking")] = False,
+    copy: Annotated[
+        bool, typer.Option("-cp", help="Copy skill directories instead of linking")
+    ] = False,
     link_mode: Annotated[
         LinkMode | None,
         typer.Option(
@@ -1193,11 +1628,20 @@ def profile_init_cli(
     ] = None,
     root: Annotated[
         str | None,
-        typer.Option("--root", "-r", help="Hagency workspace root", autocompletion=complete_directory),
+        typer.Option(
+            "--root",
+            "-r",
+            help="Hagency workspace root",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     checkout_dir: Annotated[
         str | None,
-        typer.Option("--checkout-dir", help="Override the configured checkout directory", autocompletion=complete_directory),
+        typer.Option(
+            "--checkout-dir",
+            help="Override the configured checkout directory",
+            autocompletion=complete_directory,
+        ),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -1264,4 +1708,6 @@ def main(args: Sequence[str] | None = None) -> None:
             if previous_detection is None:
                 os.environ.pop("_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION", None)
             else:
-                os.environ["_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION"] = previous_detection
+                os.environ["_TYPER_COMPLETE_TEST_DISABLE_SHELL_DETECTION"] = (
+                    previous_detection
+                )

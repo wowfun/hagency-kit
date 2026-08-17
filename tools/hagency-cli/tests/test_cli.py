@@ -94,7 +94,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, expected, result.stderr)
         return result.stdout, result.stderr
 
-    def complete_bash(self, words: str, cword: int, *, cwd: Path | None = None) -> tuple[list[str], str]:
+    def complete_bash(
+        self, words: str, cword: int, *, cwd: Path | None = None
+    ) -> tuple[list[str], str]:
         old_cwd = Path.cwd()
         try:
             os.chdir(cwd or self.root)
@@ -115,7 +117,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.stderr)
         return [line for line in result.stdout.splitlines() if line], result.stderr
 
-    def run_main(self, *args: str, cwd: Path | None = None, expected: int = 0) -> tuple[str, str]:
+    def run_main(
+        self, *args: str, cwd: Path | None = None, expected: int = 0
+    ) -> tuple[str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
         old_cwd = Path.cwd()
@@ -179,13 +183,26 @@ class CliTests(unittest.TestCase):
     def commit_file(self, repo: Path, content: str, message: str) -> str:
         (repo / "file.txt").write_text(content, encoding="utf-8")
         self.run_git(repo, "add", "file.txt")
-        self.run_git(repo, "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", message)
+        self.run_git(
+            repo,
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            message,
+        )
         return self.run_git(repo, "rev-parse", "HEAD")
 
-    def write_remote_source_config(self, name: str, origin: Path, *, depth: int | None = 1) -> None:
+    def write_remote_source_config(
+        self, name: str, origin: Path, *, depth: int | None = 1
+    ) -> None:
         self.write_remote_sources_config({name: origin}, depth=depth)
 
-    def write_remote_sources_config(self, origins: dict[str, Path], *, depth: int | None = 1) -> None:
+    def write_remote_sources_config(
+        self, origins: dict[str, Path], *, depth: int | None = 1
+    ) -> None:
         depth_line = f"depth = {depth}\n" if depth is not None else ""
         source_lines = "\n".join(
             textwrap.dedent(
@@ -208,7 +225,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def create_remote_source_pair(self, name: str, *, shallow: bool) -> tuple[Path, Path]:
+    def create_remote_source_pair(
+        self, name: str, *, shallow: bool
+    ) -> tuple[Path, Path]:
         origin = self.root / f"{name}-origin"
         self.run_git(None, "init", "-b", "main", str(origin))
         self.commit_file(origin, "one", "one")
@@ -222,16 +241,19 @@ class CliTests(unittest.TestCase):
         self.run_git(None, *clone_args)
         return origin, checkout
 
-    def create_remote_source_checkout(self, name: str = "remote-source", *, shallow: bool = True) -> tuple[Path, Path]:
+    def create_remote_source_checkout(
+        self, name: str = "remote-source", *, shallow: bool = True
+    ) -> tuple[Path, Path]:
         origin, checkout = self.create_remote_source_pair(name, shallow=shallow)
         self.write_remote_source_config(name, origin, depth=1 if shallow else None)
         return origin, checkout
 
     def test_package_exposes_only_hgc_console_script(self) -> None:
         with (ROOT / "pyproject.toml").open("rb") as handle:
-            scripts = tomllib.load(handle)["project"]["scripts"]
+            project = tomllib.load(handle)["project"]
 
-        self.assertEqual(scripts, {"hgc": "hagency_cli.cli:main"})
+        self.assertEqual(project["scripts"], {"hgc": "hagency_cli.cli:main"})
+        self.assertIn("multidict>=6,<7", project["dependencies"])
 
     def test_help_and_usage_errors_are_plain_text_with_completion_enabled(self) -> None:
         stdout, stderr = self.run_cli("--help", color=True)
@@ -251,17 +273,101 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("╰", output)
 
     def test_short_help_option_is_available_at_every_command_level(self) -> None:
-        for args in (("-h",), ("source", "-h"), ("source", "show", "-h"), ("p", "init", "-h")):
+        for args in (
+            ("-h",),
+            ("serve", "-h"),
+            ("serve", "start", "-h"),
+            ("source", "-h"),
+            ("source", "show", "-h"),
+            ("p", "init", "-h"),
+        ):
             with self.subTest(args=args):
                 stdout, stderr = self.run_cli(*args)
                 self.assertEqual(stderr, "")
                 self.assertIn("Usage:", stdout)
                 self.assertIn("-h, --help", stdout)
 
+    def test_serve_model_proxy_resolves_workspace_config_and_validates_listen_address(
+        self,
+    ) -> None:
+        proxy_config = self.root / "hagency-model-proxy.toml"
+        proxy_config.write_text(
+            'version = 1\ndefault_provider = "openai"\n[providers.openai]\nadapter = "openai"\n',
+            encoding="utf-8",
+        )
+        state = mock.Mock(pid=123, host="127.0.0.1", port=9876)
+        paths = mock.Mock(log=self.root / "service.log")
+        with mock.patch.object(
+            cli, "start_model_proxy", return_value=(state, paths)
+        ) as start_mock:
+            stdout, _stderr = self.run_cli(
+                "serve", "start", "--model-proxy", "--port", "9876"
+            )
+        start_mock.assert_called_once_with(proxy_config, host="127.0.0.1", port=9876)
+        self.assertIn("started model proxy: pid 123", stdout)
+
+        state.host = "::1"
+        with mock.patch.object(cli, "start_model_proxy", return_value=(state, paths)):
+            stdout, _stderr = self.run_cli(
+                "serve", "start", "--model-proxy", "--host", "::1"
+            )
+        self.assertIn("http://[::1]:9876", stdout)
+
+        _stdout, stderr = self.run_cli("serve", "start", expected=2)
+        self.assertIn("--model-proxy is required", stderr)
+        _stdout, stderr = self.run_cli(
+            "serve",
+            "restart",
+            "--model-proxy",
+            "--host",
+            "0.0.0.0",
+            expected=2,
+        )
+        self.assertIn("loopback IP address", stderr)
+
+    def test_serve_model_proxy_config_and_root_are_mutually_exclusive(self) -> None:
+        _stdout, stderr = self.run_cli(
+            "serve",
+            "stop",
+            "--model-proxy",
+            "--root",
+            str(self.root),
+            "--config",
+            "proxy.toml",
+            expected=2,
+        )
+        self.assertIn("options are mutually exclusive", stderr)
+
+    def test_serve_stop_and_restart_dispatch_lifecycle_operations(self) -> None:
+        state = mock.Mock(pid=456, host="127.0.0.1", port=8765)
+        paths = mock.Mock(log=self.root / "service.log")
+        with mock.patch.object(
+            cli, "stop_model_proxy", return_value=(True, paths)
+        ) as stop_mock:
+            stdout, _stderr = self.run_cli("serve", "stop", "--model-proxy")
+        stop_mock.assert_called_once_with(self.root / "hagency-model-proxy.toml")
+        self.assertIn("stopped model proxy", stdout)
+
+        with mock.patch.object(
+            cli, "restart_model_proxy", return_value=(state, paths)
+        ) as restart_mock:
+            stdout, _stderr = self.run_cli("serve", "restart", "--model-proxy")
+        restart_mock.assert_called_once_with(
+            self.root / "hagency-model-proxy.toml",
+            host="127.0.0.1",
+            port=8765,
+        )
+        self.assertIn("restarted model proxy: pid 456", stdout)
+
     def test_bash_completion_includes_commands_aliases_and_options(self) -> None:
         values, stderr = self.complete_bash("hgc ", 1)
         self.assertEqual(stderr, "")
-        self.assertEqual(values, ["init", "source", "s", "skill", "profile", "p"])
+        self.assertEqual(
+            values, ["init", "source", "s", "skill", "profile", "p", "serve"]
+        )
+
+        values, _stderr = self.complete_bash("hgc serve ", 2)
+        self.assertEqual(values, ["start", "stop", "restart"])
 
         values, _stderr = self.complete_bash("hgc source ", 2)
         self.assertEqual(values, ["list", "ls", "show", "add", "remove", "rm", "sync"])
@@ -294,7 +400,9 @@ class CliTests(unittest.TestCase):
         values, _stderr = self.complete_bash("hgc source sync local-source ", 4)
         self.assertNotIn("local-source", values)
 
-        values, _stderr = self.complete_bash("hgc profile add research -AS local-source -i ", 7)
+        values, _stderr = self.complete_bash(
+            "hgc profile add research -AS local-source -i ", 7
+        )
         self.assertIn("*", values)
         self.assertIn("nested/external-one", values)
 
@@ -365,7 +473,9 @@ class CliTests(unittest.TestCase):
 
         malformed = self.root / "malformed"
         malformed.mkdir()
-        (malformed / "hagency-config.toml").write_text('source = "not-a-table"\n', encoding="utf-8")
+        (malformed / "hagency-config.toml").write_text(
+            'source = "not-a-table"\n', encoding="utf-8"
+        )
         words = f"hgc source show --root {malformed} "
         values, stderr = self.complete_bash(words, 5)
         self.assertEqual(values, [])
@@ -391,7 +501,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("bash completion installed", stdout)
         completion = home / ".bash_completions" / "hgc.sh"
         self.assertTrue(completion.is_file())
-        self.assertIn("complete -o default -F _hgc_completion hgc", completion.read_text(encoding="utf-8"))
+        self.assertIn(
+            "complete -o default -F _hgc_completion hgc",
+            completion.read_text(encoding="utf-8"),
+        )
         self.assertFalse((home / ".bash_completions" / "hagency.sh").exists())
 
     def test_show_completion_rejects_an_unknown_explicit_shell(self) -> None:
@@ -415,7 +528,9 @@ class CliTests(unittest.TestCase):
         _stdout, stderr = self.run_cli("init", "--root", str(new_root), expected=1)
         self.assertIn("workspace config already exists", stderr)
 
-        stdout, _stderr = self.run_cli("init", "--root", str(new_root), "--force", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "init", "--root", str(new_root), "--force", "--dry-run"
+        )
         self.assertIn("Would overwrite workspace config:", stdout)
 
     def test_workspace_discovery_and_root_override(self) -> None:
@@ -436,18 +551,32 @@ class CliTests(unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
-        stdout, _stderr = self.run_cli("source", "list", "--root", str(other), cwd=nested)
+        stdout, _stderr = self.run_cli(
+            "source", "list", "--root", str(other), cwd=nested
+        )
         self.assertIn("other-source\tlocal", stdout)
         self.assertNotIn("local-source\tlocal", stdout)
 
     def test_windows_git_bash_path_normalization(self) -> None:
         with mock.patch.object(common_module.os, "name", "nt"):
-            self.assertEqual(common_module.normalize_windows_shell_path("/c/Users/me/project"), "C:/Users/me/project")
+            self.assertEqual(
+                common_module.normalize_windows_shell_path("/c/Users/me/project"),
+                "C:/Users/me/project",
+            )
             self.assertEqual(common_module.normalize_windows_shell_path("/d"), "D:/")
-            self.assertEqual(common_module.normalize_windows_shell_path("/d/Projects/references"), "D:/Projects/references")
-            self.assertEqual(common_module.normalize_windows_shell_path(r"C:\Users\me\project"), r"C:\Users\me\project")
+            self.assertEqual(
+                common_module.normalize_windows_shell_path("/d/Projects/references"),
+                "D:/Projects/references",
+            )
+            self.assertEqual(
+                common_module.normalize_windows_shell_path(r"C:\Users\me\project"),
+                r"C:\Users\me\project",
+            )
 
-        self.assertEqual(common_module.normalize_windows_shell_path("/c/Users/me/project"), "/c/Users/me/project")
+        self.assertEqual(
+            common_module.normalize_windows_shell_path("/c/Users/me/project"),
+            "/c/Users/me/project",
+        )
 
     def test_checkout_directory_selection_uses_platform_specific_default(self) -> None:
         defaults = {
@@ -456,15 +585,21 @@ class CliTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            source_module.configured_checkout_dir(defaults, checkout_override=None, windows=True),
+            source_module.configured_checkout_dir(
+                defaults, checkout_override=None, windows=True
+            ),
             "/d/Projects/references",
         )
         self.assertEqual(
-            source_module.configured_checkout_dir(defaults, checkout_override=None, windows=False),
+            source_module.configured_checkout_dir(
+                defaults, checkout_override=None, windows=False
+            ),
             "~/Projects/references",
         )
 
-    def test_checkout_directory_selection_falls_back_when_windows_default_is_missing_or_empty(self) -> None:
+    def test_checkout_directory_selection_falls_back_when_windows_default_is_missing_or_empty(
+        self,
+    ) -> None:
         cases = (
             {"checkout_dir": "~/Projects/references"},
             {"checkout_dir": "~/Projects/references", "checkout_dir_windows": ""},
@@ -473,7 +608,9 @@ class CliTests(unittest.TestCase):
         for defaults in cases:
             with self.subTest(defaults=defaults):
                 self.assertEqual(
-                    source_module.configured_checkout_dir(defaults, checkout_override=None, windows=True),
+                    source_module.configured_checkout_dir(
+                        defaults, checkout_override=None, windows=True
+                    ),
                     "~/Projects/references",
                 )
 
@@ -508,9 +645,13 @@ class CliTests(unittest.TestCase):
             "cli-checkouts",
         )
 
-        self.assertIn(f"resolved_path: {self.root / 'cli-checkouts' / 'remote-source'}", stdout)
+        self.assertIn(
+            f"resolved_path: {self.root / 'cli-checkouts' / 'remote-source'}", stdout
+        )
 
-    def test_remote_source_without_checkout_directory_uses_platform_neutral_error(self) -> None:
+    def test_remote_source_without_checkout_directory_uses_platform_neutral_error(
+        self,
+    ) -> None:
         self.config_path.write_text(
             textwrap.dedent(
                 """
@@ -550,7 +691,9 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn("added source: example-pack", stdout)
         added = self.read_config()["source"]["example-pack"]
-        self.assertEqual(added["remote"]["url"], "https://example.invalid/acme/ExamplePack.git")
+        self.assertEqual(
+            added["remote"]["url"], "https://example.invalid/acme/ExamplePack.git"
+        )
         self.assertNotIn("skills_path", added)
 
         stdout, _stderr = self.run_cli("source", "list")
@@ -604,9 +747,13 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("added source: ExamplePack", stdout)
         added = self.read_config()["source"]["ExamplePack"]
-        self.assertEqual(added["remote"]["url"], "https://example.invalid/acme/ExamplePack.git")
+        self.assertEqual(
+            added["remote"]["url"], "https://example.invalid/acme/ExamplePack.git"
+        )
 
-    def test_source_add_url_positional_strips_trailing_slash_and_git_suffix(self) -> None:
+    def test_source_add_url_positional_strips_trailing_slash_and_git_suffix(
+        self,
+    ) -> None:
         stdout, _stderr = self.run_cli(
             "source",
             "add",
@@ -625,7 +772,9 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("added source: ExamplePack", stdout)
         added = self.read_config()["source"]["ExamplePack"]
-        self.assertEqual(added["remote"]["url"], "git@example.invalid:acme/ExamplePack.git")
+        self.assertEqual(
+            added["remote"]["url"], "git@example.invalid:acme/ExamplePack.git"
+        )
 
     def test_source_add_url_positional_name_override(self) -> None:
         stdout, _stderr = self.run_cli(
@@ -692,7 +841,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(sync_mock.call_args.kwargs["depth"], 1)
 
     def test_source_add_url_positional_keeps_basename_when_no_conflict(self) -> None:
-        stdout, _stderr = self.run_cli("source", "add", "https://example.invalid/anthropic/skills.git")
+        stdout, _stderr = self.run_cli(
+            "source", "add", "https://example.invalid/anthropic/skills.git"
+        )
 
         self.assertIn("added source: skills", stdout)
         self.assertIn("skills", self.read_config()["source"])
@@ -700,26 +851,40 @@ class CliTests(unittest.TestCase):
     def test_source_add_inferred_name_conflict_uses_owner_prefixed_name(self) -> None:
         self.run_cli("source", "add", "https://example.invalid/anthropic/skills.git")
 
-        stdout, _stderr = self.run_cli("source", "add", "https://example.invalid/mattpocock/skills.git")
+        stdout, _stderr = self.run_cli(
+            "source", "add", "https://example.invalid/mattpocock/skills.git"
+        )
 
         self.assertIn("added source: mattpocock/skills", stdout)
         added = self.read_config()["source"]["mattpocock/skills"]
-        self.assertEqual(added["remote"]["url"], "https://example.invalid/mattpocock/skills.git")
+        self.assertEqual(
+            added["remote"]["url"], "https://example.invalid/mattpocock/skills.git"
+        )
 
-    def test_source_add_scp_style_inferred_name_conflict_uses_owner_prefixed_name(self) -> None:
+    def test_source_add_scp_style_inferred_name_conflict_uses_owner_prefixed_name(
+        self,
+    ) -> None:
         self.run_cli("source", "add", "https://example.invalid/anthropic/skills.git")
 
-        stdout, _stderr = self.run_cli("source", "add", "git@example.invalid:mattpocock/skills.git")
+        stdout, _stderr = self.run_cli(
+            "source", "add", "git@example.invalid:mattpocock/skills.git"
+        )
 
         self.assertIn("added source: mattpocock/skills", stdout)
         added = self.read_config()["source"]["mattpocock/skills"]
-        self.assertEqual(added["remote"]["url"], "git@example.invalid:mattpocock/skills.git")
+        self.assertEqual(
+            added["remote"]["url"], "git@example.invalid:mattpocock/skills.git"
+        )
 
-    def test_source_add_inferred_owner_prefixed_conflict_fails_with_custom_name_hint(self) -> None:
+    def test_source_add_inferred_owner_prefixed_conflict_fails_with_custom_name_hint(
+        self,
+    ) -> None:
         self.run_cli("source", "add", "https://example.invalid/anthropic/skills.git")
         self.run_cli("source", "add", "https://example.invalid/mattpocock/skills.git")
 
-        _stdout, stderr = self.run_cli("source", "add", "https://example.invalid/mattpocock/skills", expected=1)
+        _stdout, stderr = self.run_cli(
+            "source", "add", "https://example.invalid/mattpocock/skills", expected=1
+        )
 
         self.assertIn("source already exists: skills", stderr)
         self.assertIn("owner-prefixed source also exists: mattpocock/skills", stderr)
@@ -740,10 +905,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("source already exists: skills", stderr)
         self.assertNotIn("mattpocock/skills", self.read_config()["source"])
 
-    def test_source_add_inferred_name_conflict_fails_when_owner_name_cannot_be_inferred(self) -> None:
+    def test_source_add_inferred_name_conflict_fails_when_owner_name_cannot_be_inferred(
+        self,
+    ) -> None:
         self.run_cli("source", "add", "https://example.invalid/skills.git")
 
-        _stdout, stderr = self.run_cli("source", "add", "https://example.invalid/skills", expected=1)
+        _stdout, stderr = self.run_cli(
+            "source", "add", "https://example.invalid/skills", expected=1
+        )
 
         self.assertIn("source already exists: skills", stderr)
         self.assertIn("could not infer owner/repo name from URL", stderr)
@@ -752,7 +921,9 @@ class CliTests(unittest.TestCase):
     def test_source_add_inferred_names_remain_case_sensitive(self) -> None:
         self.run_cli("source", "add", "https://example.invalid/acme/ExamplePack.git")
 
-        stdout, _stderr = self.run_cli("source", "add", "https://example.invalid/acme/example-pack")
+        stdout, _stderr = self.run_cli(
+            "source", "add", "https://example.invalid/acme/example-pack"
+        )
         self.assertIn("added source: example-pack", stdout)
 
     def test_source_sync_default_depth_config_applies_to_clone_dry_run(self) -> None:
@@ -784,7 +955,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--depth", "2", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "source", "sync", "remote-source", "--depth", "2", "--dry-run"
+        )
 
         self.assertIn("sync source [1/1] remote-source", stdout)
         self.assertIn(
@@ -793,7 +966,9 @@ class CliTests(unittest.TestCase):
         )
 
     def test_source_sync_depth_rejects_non_positive_values(self) -> None:
-        _stdout, stderr = self.run_cli("source", "sync", "--depth", "0", "--dry-run", expected=2)
+        _stdout, stderr = self.run_cli(
+            "source", "sync", "--depth", "0", "--dry-run", expected=2
+        )
         self.assertIn("Invalid value for '--depth'", stderr)
         self.assertIn("x>=1", stderr)
 
@@ -810,7 +985,9 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("defaults.depth must be a positive integer", stderr)
 
-    def test_source_sync_existing_shallow_checkout_fast_forwards_after_remote_advances(self) -> None:
+    def test_source_sync_existing_shallow_checkout_fast_forwards_after_remote_advances(
+        self,
+    ) -> None:
         origin, checkout = self.create_remote_source_checkout()
         latest = self.commit_file(origin, "two", "two")
 
@@ -825,7 +1002,10 @@ class CliTests(unittest.TestCase):
         latest = self.commit_file(origin, "two", "two")
         self.run_git(checkout, "fetch", "--depth", "1", "origin")
 
-        self.assertIn("[ahead 1, behind 1]", self.run_git(checkout, "status", "--short", "--branch"))
+        self.assertIn(
+            "[ahead 1, behind 1]",
+            self.run_git(checkout, "status", "--short", "--branch"),
+        )
 
         stdout, _stderr = self.run_cli("source", "sync", "remote-source")
 
@@ -833,7 +1013,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), latest)
         self.assertNotIn("reset", stdout)
 
-    def test_source_sync_real_divergence_fails_without_resetting_local_commit(self) -> None:
+    def test_source_sync_real_divergence_fails_without_resetting_local_commit(
+        self,
+    ) -> None:
         origin, checkout = self.create_remote_source_checkout(shallow=False)
         local = self.commit_file(checkout, "local", "local")
         self.commit_file(origin, "remote", "remote")
@@ -850,7 +1032,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
         self.assertNotIn("reset", stdout)
 
-    def test_source_sync_reanchor_replaces_clean_divergent_branch_without_persistent_state(self) -> None:
+    def test_source_sync_reanchor_replaces_clean_divergent_branch_without_persistent_state(
+        self,
+    ) -> None:
         origin, checkout = self.create_remote_source_checkout(shallow=False)
         local = self.commit_file(checkout, "local", "local")
         remote = self.commit_file(origin, "remote", "remote")
@@ -863,10 +1047,17 @@ class CliTests(unittest.TestCase):
             f"reanchor source remote-source: main {local} -> origin/main {remote}",
             stdout,
         )
-        self.assertEqual(self.run_git(checkout, "for-each-ref", "--format=%(refname)", "refs/hagency"), "")
+        self.assertEqual(
+            self.run_git(
+                checkout, "for-each-ref", "--format=%(refname)", "refs/hagency"
+            ),
+            "",
+        )
         self.assertFalse((checkout / ".git" / "hagency").exists())
 
-    def test_source_sync_reanchor_rejects_staged_unstaged_and_untracked_changes(self) -> None:
+    def test_source_sync_reanchor_rejects_staged_unstaged_and_untracked_changes(
+        self,
+    ) -> None:
         for dirty_kind in ("staged", "unstaged", "untracked"):
             with self.subTest(dirty_kind=dirty_kind):
                 name = f"{dirty_kind}-source"
@@ -881,9 +1072,13 @@ class CliTests(unittest.TestCase):
                 elif dirty_kind == "unstaged":
                     (checkout / "file.txt").write_text("unstaged", encoding="utf-8")
                 else:
-                    (checkout / "untracked.txt").write_text("untracked", encoding="utf-8")
+                    (checkout / "untracked.txt").write_text(
+                        "untracked", encoding="utf-8"
+                    )
 
-                _stdout, stderr = self.run_cli("source", "sync", name, "--reanchor", expected=1)
+                _stdout, stderr = self.run_cli(
+                    "source", "sync", name, "--reanchor", expected=1
+                )
 
                 self.assertIn(
                     "cannot reanchor main: checkout has staged, tracked, or untracked changes",
@@ -908,16 +1103,22 @@ class CliTests(unittest.TestCase):
             "-m",
             "remote",
         )
-        (checkout / ".git" / "info" / "exclude").write_text("generated.txt\n", encoding="utf-8")
+        (checkout / ".git" / "info" / "exclude").write_text(
+            "generated.txt\n", encoding="utf-8"
+        )
         (checkout / "generated.txt").write_text("keep", encoding="utf-8")
         self.assertEqual(self.run_git(checkout, "status", "--porcelain"), "")
 
-        _stdout, stderr = self.run_cli("source", "sync", "remote-source", "--reanchor", expected=1)
+        _stdout, stderr = self.run_cli(
+            "source", "sync", "remote-source", "--reanchor", expected=1
+        )
 
         self.assertIn("git checkout --no-overwrite-ignore -B main origin/main", stderr)
         self.assertNotIn("Tip:", stderr)
         self.assertEqual(self.run_git(checkout, "rev-parse", "HEAD"), local)
-        self.assertEqual((checkout / "generated.txt").read_text(encoding="utf-8"), "keep")
+        self.assertEqual(
+            (checkout / "generated.txt").read_text(encoding="utf-8"), "keep"
+        )
 
     def test_source_sync_reanchor_handles_unrelated_upstream_history(self) -> None:
         origin, checkout = self.create_remote_source_checkout(shallow=False)
@@ -935,15 +1136,25 @@ class CliTests(unittest.TestCase):
             stdout,
         )
 
-    def test_source_sync_reanchor_batch_updates_eligible_sources_and_reports_dirty_source(self) -> None:
-        fast_origin, fast_checkout = self.create_remote_source_pair("fast-source", shallow=False)
+    def test_source_sync_reanchor_batch_updates_eligible_sources_and_reports_dirty_source(
+        self,
+    ) -> None:
+        fast_origin, fast_checkout = self.create_remote_source_pair(
+            "fast-source", shallow=False
+        )
         fast_remote = self.commit_file(fast_origin, "fast remote", "fast remote")
 
-        rewrite_origin, rewrite_checkout = self.create_remote_source_pair("rewrite-source", shallow=False)
+        rewrite_origin, rewrite_checkout = self.create_remote_source_pair(
+            "rewrite-source", shallow=False
+        )
         self.commit_file(rewrite_checkout, "rewrite local", "rewrite local")
-        rewrite_remote = self.commit_file(rewrite_origin, "rewrite remote", "rewrite remote")
+        rewrite_remote = self.commit_file(
+            rewrite_origin, "rewrite remote", "rewrite remote"
+        )
 
-        dirty_origin, dirty_checkout = self.create_remote_source_pair("dirty-source", shallow=False)
+        dirty_origin, dirty_checkout = self.create_remote_source_pair(
+            "dirty-source", shallow=False
+        )
         dirty_local = self.commit_file(dirty_checkout, "dirty local", "dirty local")
         self.commit_file(dirty_origin, "dirty remote", "dirty remote")
         (dirty_checkout / "untracked.txt").write_text("keep", encoding="utf-8")
@@ -960,19 +1171,27 @@ class CliTests(unittest.TestCase):
         stdout, stderr = self.run_cli("source", "sync", "--reanchor", expected=1)
 
         self.assertEqual(self.run_git(fast_checkout, "rev-parse", "HEAD"), fast_remote)
-        self.assertEqual(self.run_git(rewrite_checkout, "rev-parse", "HEAD"), rewrite_remote)
+        self.assertEqual(
+            self.run_git(rewrite_checkout, "rev-parse", "HEAD"), rewrite_remote
+        )
         self.assertEqual(self.run_git(dirty_checkout, "rev-parse", "HEAD"), dirty_local)
         self.assertIn("reanchor source rewrite-source:", stdout)
         self.assertIn("source dirty-source failed: cannot reanchor main", stderr)
         self.assertIn("source sync failed for: dirty-source", stderr)
         self.assertNotIn("Tip:", stderr)
 
-    def test_source_sync_aggregates_reanchor_tip_for_all_divergent_sources(self) -> None:
-        first_origin, first_checkout = self.create_remote_source_pair("first-source", shallow=False)
+    def test_source_sync_aggregates_reanchor_tip_for_all_divergent_sources(
+        self,
+    ) -> None:
+        first_origin, first_checkout = self.create_remote_source_pair(
+            "first-source", shallow=False
+        )
         first_local = self.commit_file(first_checkout, "first local", "first local")
         self.commit_file(first_origin, "first remote", "first remote")
 
-        second_origin, second_checkout = self.create_remote_source_pair("second-source", shallow=False)
+        second_origin, second_checkout = self.create_remote_source_pair(
+            "second-source", shallow=False
+        )
         second_local = self.commit_file(second_checkout, "second local", "second local")
         self.commit_file(second_origin, "second remote", "second remote")
 
@@ -993,15 +1212,21 @@ class CliTests(unittest.TestCase):
         )
         self.assertIn("source sync failed for: first-source, second-source", stderr)
         self.assertEqual(self.run_git(first_checkout, "rev-parse", "HEAD"), first_local)
-        self.assertEqual(self.run_git(second_checkout, "rev-parse", "HEAD"), second_local)
+        self.assertEqual(
+            self.run_git(second_checkout, "rev-parse", "HEAD"), second_local
+        )
 
-    def test_source_sync_reanchor_dry_run_only_describes_conditional_behavior(self) -> None:
+    def test_source_sync_reanchor_dry_run_only_describes_conditional_behavior(
+        self,
+    ) -> None:
         origin, checkout = self.create_remote_source_checkout(shallow=False)
         old_head = self.commit_file(checkout, "local", "local")
         self.commit_file(origin, "remote", "remote")
         old_remote = self.run_git(checkout, "rev-parse", "origin/main")
 
-        stdout, _stderr = self.run_cli("source", "sync", "remote-source", "--reanchor", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "source", "sync", "remote-source", "--reanchor", "--dry-run"
+        )
 
         self.assertIn("git fetch origin +main:refs/remotes/origin/main", stdout)
         self.assertIn(
@@ -1077,7 +1302,11 @@ class CliTests(unittest.TestCase):
 
     def test_source_slice_parsing_invalid_values(self) -> None:
         for value in ["0", "-1", "4:2", "abc", "1:2:3", "6", "1,,3", ",1", "1,"]:
-            with self.subTest(value=value), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            with (
+                self.subTest(value=value),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
                 cli.parse_source_slice(value, 5)
 
     def test_source_sync_slice_dry_run_uses_original_indexes(self) -> None:
@@ -1128,17 +1357,23 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("source", "sync", "--profile", "content", "-s", "2:", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "source", "sync", "--profile", "content", "-s", "2:", "--dry-run"
+        )
 
         self.assertNotIn("sync source [1/3] local-source", stdout)
         self.assertIn("sync source [2/3] second-source", stdout)
         self.assertIn("sync source [3/3] third-source", stdout)
 
-    def test_source_sync_failure_continues_and_summarizes_without_traceback(self) -> None:
+    def test_source_sync_failure_continues_and_summarizes_without_traceback(
+        self,
+    ) -> None:
         self.append_local_source("second-source")
         self.append_local_source("third-source")
 
-        def fake_sync(source, *, dry_run: bool, depth: int | None = None, reanchor: bool = False) -> None:
+        def fake_sync(
+            source, *, dry_run: bool, depth: int | None = None, reanchor: bool = False
+        ) -> None:
             if source.name == "second-source":
                 raise subprocess.CalledProcessError(128, ["git", "fetch", "origin"])
 
@@ -1165,7 +1400,9 @@ class CliTests(unittest.TestCase):
                 ref="main",
             ),
         )
-        current_remote = subprocess.CompletedProcess(["git"], 0, "https://example.invalid/acme/ExamplePack.git\n", "")
+        current_remote = subprocess.CompletedProcess(
+            ["git"], 0, "https://example.invalid/acme/ExamplePack.git\n", ""
+        )
         calls: list[list[str]] = []
 
         def fail_run(cmd, *, cwd=None, dry_run: bool = False):
@@ -1175,7 +1412,9 @@ class CliTests(unittest.TestCase):
         stdout = io.StringIO()
         with (
             mock.patch.object(source_module, "git_ok", return_value=True),
-            mock.patch.object(source_module.subprocess, "run", return_value=current_remote),
+            mock.patch.object(
+                source_module.subprocess, "run", return_value=current_remote
+            ),
             mock.patch.object(source_module, "run", side_effect=fail_run),
             mock.patch.object(source_module.time, "sleep"),
             contextlib.redirect_stdout(stdout),
@@ -1234,7 +1473,9 @@ class CliTests(unittest.TestCase):
         stdout = io.StringIO()
         with (
             mock.patch.object(source_module, "git_ok", return_value=True),
-            mock.patch.object(source_module.subprocess, "run", return_value=missing_remote),
+            mock.patch.object(
+                source_module.subprocess, "run", return_value=missing_remote
+            ),
             contextlib.redirect_stdout(stdout),
         ):
             source_module.sync_source(source, dry_run=True, depth=1)
@@ -1306,7 +1547,9 @@ class CliTests(unittest.TestCase):
         self.assertIn('include = ["nested"]', stdout)
         self.assertFalse((self.root / "profiles" / "example-pack").exists())
 
-        stdout, _stderr = self.run_cli("profile", "add", "example-pack", "-AS", "local-source")
+        stdout, _stderr = self.run_cli(
+            "profile", "add", "example-pack", "-AS", "local-source"
+        )
         self.assertIn("added profile: example-pack", stdout)
         self.assertEqual(self.read_profile("example-pack")["skill"]["local-source"], {})
 
@@ -1352,11 +1595,17 @@ class CliTests(unittest.TestCase):
                 )
             )
 
-        _stdout, stderr = self.run_cli("profile", "add", "example-pack", "-AS", "external-one", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "add", "example-pack", "-AS", "external-one", expected=1
+        )
 
         self.assertIn("skill name 'external-one' is ambiguous. Choose one:", stderr)
-        self.assertIn("hgc profile add example-pack -AS local-source:nested/external-one", stderr)
-        self.assertIn("hgc profile add example-pack -AS other-source:nested/external-one", stderr)
+        self.assertIn(
+            "hgc profile add example-pack -AS local-source:nested/external-one", stderr
+        )
+        self.assertIn(
+            "hgc profile add example-pack -AS other-source:nested/external-one", stderr
+        )
 
     def test_profile_update_add_skill_merges_and_dedupes(self) -> None:
         self.write_skill(self.root / "local-source" / "other")
@@ -1424,19 +1673,28 @@ class CliTests(unittest.TestCase):
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text('name = "content"\n', encoding="utf-8")
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-AS", "external-one")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-AS", "external-one"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["external-one"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["include"], ["external-one"]
+        )
 
     def test_profile_update_add_source_selector_reference(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text('name = "content"\n', encoding="utf-8")
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-AS", "local-source:nested/external-one")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-AS", "local-source:nested/external-one"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["nested/external-one"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["include"],
+            ["nested/external-one"],
+        )
 
     def test_profile_update_remove_source_selector_reference(self) -> None:
         self.write_skill(self.root / "local-source" / "external-two")
@@ -1453,27 +1711,44 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-RS", "local-source:nested/external-one")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-RS", "local-source:nested/external-one"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["external-two"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["include"], ["external-two"]
+        )
 
-    def test_profile_update_ambiguous_skill_name_suggests_source_selector_references(self) -> None:
+    def test_profile_update_ambiguous_skill_name_suggests_source_selector_references(
+        self,
+    ) -> None:
         self.write_skill(self.root / "local-source" / "skills" / "write")
-        self.write_skill(self.root / "local-source" / "plugins" / "waza" / "skills" / "write")
+        self.write_skill(
+            self.root / "local-source" / "plugins" / "waza" / "skills" / "write"
+        )
         profile_path = self.root / "profiles" / "content" / "config.toml"
         before = profile_path.read_text(encoding="utf-8")
 
-        _stdout, stderr = self.run_cli("profile", "update", "content", "-AS", "write", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "update", "content", "-AS", "write", expected=1
+        )
 
         self.assertIn("skill name 'write' is ambiguous. Choose one:", stderr)
-        self.assertIn("hgc profile update content -AS local-source:plugins/waza/skills/write", stderr)
-        self.assertIn("hgc profile update content -AS local-source:skills/write", stderr)
+        self.assertIn(
+            "hgc profile update content -AS local-source:plugins/waza/skills/write",
+            stderr,
+        )
+        self.assertIn(
+            "hgc profile update content -AS local-source:skills/write", stderr
+        )
         self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
 
     def test_profile_update_include_ambiguous_selector_fails_before_write(self) -> None:
         self.write_skill(self.root / "local-source" / "skills" / "write")
-        self.write_skill(self.root / "local-source" / "plugins" / "waza" / "skills" / "write")
+        self.write_skill(
+            self.root / "local-source" / "plugins" / "waza" / "skills" / "write"
+        )
         profile_path = self.root / "profiles" / "content" / "config.toml"
         before = profile_path.read_text(encoding="utf-8")
 
@@ -1488,7 +1763,10 @@ class CliTests(unittest.TestCase):
             expected=1,
         )
 
-        self.assertIn("skill selector 'write' for source local-source matched multiple candidates", stderr)
+        self.assertIn(
+            "skill selector 'write' for source local-source matched multiple candidates",
+            stderr,
+        )
         self.assertIn("plugins/waza/skills/write", stderr)
         self.assertIn("skills/write", stderr)
         self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
@@ -1507,10 +1785,14 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("p", "u", "content", "-AS", "local-source", "-i", "nested")
+        stdout, _stderr = self.run_cli(
+            "p", "u", "content", "-AS", "local-source", "-i", "nested"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["old", "nested"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["include"], ["old", "nested"]
+        )
 
     def test_profile_update_existing_all_include_stays_all(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -1525,7 +1807,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.run_cli("profile", "update", "content", "-AS", "local-source", "--include", "nested")
+        self.run_cli(
+            "profile", "update", "content", "-AS", "local-source", "--include", "nested"
+        )
         self.assertNotIn("include", self.read_profile()["skill"]["local-source"])
 
         profile_path.write_text(
@@ -1539,7 +1823,9 @@ class CliTests(unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
-        self.run_cli("profile", "update", "content", "-AS", "local-source", "--include", "nested")
+        self.run_cli(
+            "profile", "update", "content", "-AS", "local-source", "--include", "nested"
+        )
         self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["*"])
 
     def test_profile_update_add_skill_replace(self) -> None:
@@ -1586,7 +1872,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-RS", "local-source")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-RS", "local-source"
+        )
 
         self.assertIn("updated profile: content", stdout)
         self.assertNotIn("skill", self.read_profile())
@@ -1606,12 +1894,18 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-RS", "external-one")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-RS", "external-one"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["include"], ["external-two"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["include"], ["external-two"]
+        )
 
-    def test_profile_update_remove_skill_name_from_full_source_adds_exclude(self) -> None:
+    def test_profile_update_remove_skill_name_from_full_source_adds_exclude(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -1624,16 +1918,24 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("profile", "update", "content", "-RS", "external-one")
+        stdout, _stderr = self.run_cli(
+            "profile", "update", "content", "-RS", "external-one"
+        )
 
         self.assertIn("updated profile: content", stdout)
-        self.assertEqual(self.read_profile()["skill"]["local-source"]["exclude"], ["external-one"])
+        self.assertEqual(
+            self.read_profile()["skill"]["local-source"]["exclude"], ["external-one"]
+        )
 
     def test_profile_update_unknown_source_rejected(self) -> None:
-        _stdout, stderr = self.run_cli("profile", "update", "content", "-AS", "missing", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "update", "content", "-AS", "missing", expected=1
+        )
         self.assertIn("unknown source or skill: missing", stderr)
 
-    def test_profile_update_unknown_skill_mentions_unsynced_remote_sources(self) -> None:
+    def test_profile_update_unknown_skill_mentions_unsynced_remote_sources(
+        self,
+    ) -> None:
         with self.config_path.open("a", encoding="utf-8") as handle:
             handle.write(
                 textwrap.dedent(
@@ -1645,13 +1947,17 @@ class CliTests(unittest.TestCase):
                 )
             )
 
-        _stdout, stderr = self.run_cli("profile", "update", "content", "-AS", "frontend-design", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "update", "content", "-AS", "frontend-design", expected=1
+        )
 
         self.assertIn("unknown source or skill: frontend-design", stderr)
         self.assertIn("hgc source sync remote-pack", stderr)
 
     def test_profile_update_include_requires_add_skill(self) -> None:
-        _stdout, stderr = self.run_cli("profile", "update", "content", "--include", "nested", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "update", "content", "--include", "nested", expected=1
+        )
         self.assertIn("--include and --exclude require --add-skill", stderr)
 
     def test_profile_rejects_unsafe_names(self) -> None:
@@ -1660,8 +1966,12 @@ class CliTests(unittest.TestCase):
 
     def test_profile_remove_deletes_directory_and_dry_run_does_not(self) -> None:
         (self.root / "profiles" / "scratch" / "notes").mkdir(parents=True)
-        (self.root / "profiles" / "scratch" / "config.toml").write_text('name = "scratch"\n', encoding="utf-8")
-        (self.root / "profiles" / "scratch" / "notes" / "README.md").write_text("keep", encoding="utf-8")
+        (self.root / "profiles" / "scratch" / "config.toml").write_text(
+            'name = "scratch"\n', encoding="utf-8"
+        )
+        (self.root / "profiles" / "scratch" / "notes" / "README.md").write_text(
+            "keep", encoding="utf-8"
+        )
 
         stdout, _stderr = self.run_cli("profile", "remove", "scratch", "--dry-run")
         self.assertIn("Would remove profile directory:", stdout)
@@ -1712,10 +2022,15 @@ class CliTests(unittest.TestCase):
 
         destination = skills_dir / "external-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
         self.assertFalse((skills_dir / ".agents").exists())
 
-    def test_profile_init_relative_path_uses_invocation_cwd_with_explicit_root(self) -> None:
+    def test_profile_init_relative_path_uses_invocation_cwd_with_explicit_root(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -1746,7 +2061,9 @@ class CliTests(unittest.TestCase):
         self.assertTrue(destination.is_symlink())
         self.assertFalse((self.root / "shared").exists())
 
-    def test_profile_init_relative_dir_uses_invocation_cwd_with_explicit_root(self) -> None:
+    def test_profile_init_relative_dir_uses_invocation_cwd_with_explicit_root(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -1809,7 +2126,9 @@ class CliTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 _stdout, stderr = self.run_cli(*command, expected=1)
-                self.assertIn(f"skills destination is not a directory: {destination}", stderr)
+                self.assertIn(
+                    f"skills destination is not a directory: {destination}", stderr
+                )
 
         self.assertEqual(destination.read_text(encoding="utf-8"), "keep\n")
 
@@ -1842,7 +2161,9 @@ class CliTests(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 _stdout, stderr = self.run_cli(*command, expected=1)
-                self.assertIn(f"skills destination is a broken symlink: {destination}", stderr)
+                self.assertIn(
+                    f"skills destination is a broken symlink: {destination}", stderr
+                )
 
         self.assertTrue(destination.is_symlink())
         self.assertFalse(destination.exists())
@@ -1862,7 +2183,9 @@ class CliTests(unittest.TestCase):
         )
         skills_dir = self.root / "target" / "skills"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-p", str(skills_dir), "content", "-cp")
+        stdout, _stderr = self.run_cli(
+            "profile", "init", "-p", str(skills_dir), "content", "-cp"
+        )
 
         copied = skills_dir / "external-one"
         source = self.root / "local-source" / "nested" / "external-one"
@@ -1889,13 +2212,17 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "profile", "init", "-d", str(target), "content", "--dry-run"
+        )
 
         self.assertIn("link", stdout)
         self.assertNotIn("ln -s", stdout)
         self.assertFalse((target / ".agents" / "skills" / "external-one").exists())
 
-    def test_profile_init_link_mode_copy_dry_run_does_not_create_destination(self) -> None:
+    def test_profile_init_link_mode_copy_dry_run_does_not_create_destination(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -1910,7 +2237,16 @@ class CliTests(unittest.TestCase):
         )
         target = self.root / "target"
 
-        stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--link-mode", "copy", "--dry-run")
+        stdout, _stderr = self.run_cli(
+            "profile",
+            "init",
+            "-d",
+            str(target),
+            "content",
+            "--link-mode",
+            "copy",
+            "--dry-run",
+        )
 
         self.assertIn("copy", stdout)
         self.assertNotIn("ln -s", stdout)
@@ -1939,7 +2275,9 @@ class CliTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(["powershell"], 0),
             ) as run,
         ):
-            stdout, _stderr = self.run_cli("profile", "init", "-p", str(skills_dir), "content")
+            stdout, _stderr = self.run_cli(
+                "profile", "init", "-p", str(skills_dir), "content"
+            )
 
         self.assertIn("junction", stdout)
         run.assert_called_once()
@@ -1951,7 +2289,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_LINK", command[4])
         self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_TARGET", command[4])
         child_env = run.call_args.kwargs["env"]
-        self.assertEqual(Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]), skills_dir / "external-one")
+        self.assertEqual(
+            Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]),
+            skills_dir / "external-one",
+        )
         self.assertEqual(
             Path(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"]),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -1962,7 +2303,9 @@ class CliTests(unittest.TestCase):
         target = Path(r"D:\Source Trees\pack;name\$literal's")
 
         with (
-            mock.patch.dict(profile_module.os.environ, {"HAGENCY_TEST_SENTINEL": "kept"}, clear=True),
+            mock.patch.dict(
+                profile_module.os.environ, {"HAGENCY_TEST_SENTINEL": "kept"}, clear=True
+            ),
             mock.patch.object(
                 profile_module.subprocess,
                 "run",
@@ -1972,11 +2315,15 @@ class CliTests(unittest.TestCase):
             profile_module.create_windows_junction(link, target)
 
             self.assertNotIn("HAGENCY_PROFILE_JUNCTION_LINK", profile_module.os.environ)
-            self.assertNotIn("HAGENCY_PROFILE_JUNCTION_TARGET", profile_module.os.environ)
+            self.assertNotIn(
+                "HAGENCY_PROFILE_JUNCTION_TARGET", profile_module.os.environ
+            )
 
         run.assert_called_once()
         command = run.call_args.args[0]
-        self.assertEqual(command[:4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertEqual(
+            command[:4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+        )
         self.assertEqual(len(command), 5)
         self.assertNotIn(str(link), command[4])
         self.assertNotIn(str(target), command[4])
@@ -1987,7 +2334,9 @@ class CliTests(unittest.TestCase):
         self.assertTrue(run.call_args.kwargs["check"])
         self.assertTrue(run.call_args.kwargs["text"])
 
-    def test_profile_init_windows_junction_dry_run_does_not_call_powershell(self) -> None:
+    def test_profile_init_windows_junction_dry_run_does_not_call_powershell(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -2006,7 +2355,9 @@ class CliTests(unittest.TestCase):
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
             mock.patch.object(profile_module.subprocess, "run") as run,
         ):
-            stdout, _stderr = self.run_cli("profile", "init", "-d", str(target), "content", "--dry-run")
+            stdout, _stderr = self.run_cli(
+                "profile", "init", "-d", str(target), "content", "--dry-run"
+            )
 
         self.assertIn("junction", stdout)
         run.assert_not_called()
@@ -2026,7 +2377,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with mock.patch.object(profile_module, "is_windows_platform", return_value=False):
+        with mock.patch.object(
+            profile_module, "is_windows_platform", return_value=False
+        ):
             _stdout, stderr = self.run_cli(
                 "profile",
                 "init",
@@ -2038,7 +2391,9 @@ class CliTests(unittest.TestCase):
                 expected=1,
             )
 
-        self.assertIn("profile init link mode junction is only supported on Windows", stderr)
+        self.assertIn(
+            "profile init link mode junction is only supported on Windows", stderr
+        )
 
     def test_profile_init_copy_refuses_existing_destination(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -2059,7 +2414,9 @@ class CliTests(unittest.TestCase):
         marker = copied / "local-note.md"
         marker.write_text("keep\n", encoding="utf-8")
 
-        _stdout, stderr = self.run_cli("profile", "init", "-d", str(target), "content", "-cp", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "init", "-d", str(target), "content", "-cp", expected=1
+        )
 
         self.assertIn("refusing to overwrite existing skill destination", stderr)
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep\n")
@@ -2079,7 +2436,9 @@ class CliTests(unittest.TestCase):
                     expected=1,
                 )
 
-            self.assertIn(f"-cp cannot be combined with --link-mode {link_mode}", stderr)
+            self.assertIn(
+                f"-cp cannot be combined with --link-mode {link_mode}", stderr
+            )
 
     def test_profile_init_copy_long_option_is_not_registered(self) -> None:
         _stdout, stderr = self.run_cli(
@@ -2095,7 +2454,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("No such option: --copy", stderr)
         self.assertIn("-cp", stderr)
 
-    def test_profile_init_windows_symlink_error_mentions_administrator_mode(self) -> None:
+    def test_profile_init_windows_symlink_error_mentions_administrator_mode(
+        self,
+    ) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
         profile_path.write_text(
             textwrap.dedent(
@@ -2111,7 +2472,9 @@ class CliTests(unittest.TestCase):
 
         with (
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
-            mock.patch.object(profile_module.os, "symlink", side_effect=OSError("permission denied")),
+            mock.patch.object(
+                profile_module.os, "symlink", side_effect=OSError("permission denied")
+            ),
         ):
             _stdout, stderr = self.run_cli(
                 "profile",
@@ -2143,7 +2506,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        _stdout, stderr = self.run_cli("profile", "init", "-d", str(self.root / "target"), "content", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "init", "-d", str(self.root / "target"), "content", expected=1
+        )
         self.assertIn("duplicate discovered skill name", stderr)
         self.assertIn("more specific path prefix", stderr)
 
@@ -2193,15 +2558,22 @@ class CliTests(unittest.TestCase):
         invocation_cwd = self.root / "projects" / "example"
         invocation_cwd.mkdir(parents=True)
 
-        stdout, stderr = self.run_cli("skill", "add", "external-one", cwd=invocation_cwd)
+        stdout, stderr = self.run_cli(
+            "skill", "add", "external-one", cwd=invocation_cwd
+        )
 
         destination = invocation_cwd / ".agents" / "skills" / "external-one"
         self.assertEqual(stderr, "")
         self.assertIn(f"link {destination} ->", stdout)
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
 
-    def test_skill_add_root_only_affects_discovery_and_default_destination(self) -> None:
+    def test_skill_add_root_only_affects_discovery_and_default_destination(
+        self,
+    ) -> None:
         invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
@@ -2216,7 +2588,10 @@ class CliTests(unittest.TestCase):
 
         destination = invocation_cwd / ".agents" / "skills" / "external-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
 
     def test_skill_add_path_is_exact_absolute_skills_directory(self) -> None:
         skills_dir = self.root / "custom" / "skills"
@@ -2225,14 +2600,24 @@ class CliTests(unittest.TestCase):
 
         destination = skills_dir / "external-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
         self.assertFalse((skills_dir / ".agents").exists())
 
     def test_skill_add_relative_path_uses_invocation_cwd(self) -> None:
         invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
-        self.run_cli("skill", "add", "external-one", "--path", "shared/skills", cwd=invocation_cwd)
+        self.run_cli(
+            "skill",
+            "add",
+            "external-one",
+            "--path",
+            "shared/skills",
+            cwd=invocation_cwd,
+        )
 
         destination = invocation_cwd / "shared" / "skills" / "external-one"
         self.assertTrue(destination.is_symlink())
@@ -2246,7 +2631,10 @@ class CliTests(unittest.TestCase):
 
         destination = home / "shared-skills" / "external-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
 
     def test_skill_add_dir_installs_under_workspace_layout(self) -> None:
         target_workspace = self.root / "consumer-project"
@@ -2255,7 +2643,10 @@ class CliTests(unittest.TestCase):
 
         destination = target_workspace / ".agents" / "skills" / "external-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "local-source" / "nested" / "external-one").resolve())
+        self.assertEqual(
+            destination.resolve(),
+            (self.root / "local-source" / "nested" / "external-one").resolve(),
+        )
 
     def test_skill_add_destination_options_are_mutually_exclusive(self) -> None:
         conflicts = (
@@ -2266,7 +2657,9 @@ class CliTests(unittest.TestCase):
 
         for options in conflicts:
             with self.subTest(options=options):
-                _stdout, stderr = self.run_cli("skill", "add", "external-one", *options, expected=2)
+                _stdout, stderr = self.run_cli(
+                    "skill", "add", "external-one", *options, expected=2
+                )
                 self.assertIn("options are mutually exclusive", stderr)
 
     def test_skill_add_global_installs_under_user_home(self) -> None:
@@ -2279,7 +2672,9 @@ class CliTests(unittest.TestCase):
 
         destination = home / ".agents" / "skills" / "local-one"
         self.assertTrue(destination.is_symlink())
-        self.assertEqual(destination.resolve(), (self.root / "skills" / "local-one").resolve())
+        self.assertEqual(
+            destination.resolve(), (self.root / "skills" / "local-one").resolve()
+        )
         self.assertFalse((invocation_cwd / ".agents").exists())
 
     def test_skill_add_dry_run_does_not_create_destination(self) -> None:
@@ -2300,13 +2695,18 @@ class CliTests(unittest.TestCase):
         self.assertIn(f"link {destination} ->", stdout)
         self.assertFalse((invocation_cwd / "planned").exists())
 
-    def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(self) -> None:
+    def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(
+        self,
+    ) -> None:
         _stdout, stderr = self.run_cli("skill", "add", "local-source", expected=1)
         self.assertIn("skill add requires one skill, not source: local-source", stderr)
 
         self.write_skill(self.root / "local-source" / "other" / "external-two")
         _stdout, stderr = self.run_cli("skill", "add", "local-source:*", expected=1)
-        self.assertIn("skill reference 'local-source:*' matched 2 skills; choose one exact SOURCE:selector", stderr)
+        self.assertIn(
+            "skill reference 'local-source:*' matched 2 skills; choose one exact SOURCE:selector",
+            stderr,
+        )
 
         self.write_skill(self.root / "skills" / "external-one")
         _stdout, stderr = self.run_cli("skill", "add", "external-one", expected=1)
@@ -2319,14 +2719,20 @@ class CliTests(unittest.TestCase):
         self.assertIn("unknown source or skill: missing", stderr)
 
         self.append_remote_source("remote-source")
-        _stdout, stderr = self.run_cli("skill", "add", "remote-source:missing", expected=1)
+        _stdout, stderr = self.run_cli(
+            "skill", "add", "remote-source:missing", expected=1
+        )
         self.assertIn("source path does not exist; run hgc source sync first", stderr)
 
-    def test_skill_add_is_idempotent_retargets_links_and_refuses_real_destinations(self) -> None:
+    def test_skill_add_is_idempotent_retargets_links_and_refuses_real_destinations(
+        self,
+    ) -> None:
         invocation_cwd = self.root / "consumer"
         invocation_cwd.mkdir()
 
-        self.run_cli("skill", "add", "local-source:nested/external-one", cwd=invocation_cwd)
+        self.run_cli(
+            "skill", "add", "local-source:nested/external-one", cwd=invocation_cwd
+        )
         stdout, _stderr = self.run_cli(
             "skill",
             "add",
@@ -2366,7 +2772,9 @@ class CliTests(unittest.TestCase):
 
         with (
             mock.patch.object(profile_module, "is_windows_platform", return_value=True),
-            mock.patch.object(profile_module, "create_windows_junction") as create_junction,
+            mock.patch.object(
+                profile_module, "create_windows_junction"
+            ) as create_junction,
         ):
             self.run_cli("skill", "add", "external-one", cwd=invocation_cwd)
 
@@ -2418,7 +2826,9 @@ class CliTests(unittest.TestCase):
         lines = stdout.strip().splitlines()
 
         self.assertEqual(lines[0], "source\tname\tselector\tpath")
-        self.assertEqual([line.split("\t")[0] for line in lines[1:]], ["local-source", "workspace"])
+        self.assertEqual(
+            [line.split("\t")[0] for line in lines[1:]], ["local-source", "workspace"]
+        )
 
     def test_skill_list_profile_applies_include_and_exclude(self) -> None:
         self.write_skill(self.root / "local-source" / "nested" / "external-two")
@@ -2462,7 +2872,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        stdout, _stderr = self.run_cli("skill", "list", "-p", "content", "-s", "local-source")
+        stdout, _stderr = self.run_cli(
+            "skill", "list", "-p", "content", "-s", "local-source"
+        )
 
         self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
         self.assertNotIn("workspace\tlocal-one", stdout)
@@ -2495,12 +2907,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
         self.assertIn("Warning: skipping missing source remote-source:", stderr)
 
-    def test_skill_list_rejects_unknown_missing_source_and_unknown_profile(self) -> None:
+    def test_skill_list_rejects_unknown_missing_source_and_unknown_profile(
+        self,
+    ) -> None:
         _stdout, stderr = self.run_cli("skill", "list", "-s", "missing", expected=1)
         self.assertIn("unknown source: missing", stderr)
 
         self.append_remote_source("remote-source")
-        _stdout, stderr = self.run_cli("skill", "list", "-s", "remote-source", expected=1)
+        _stdout, stderr = self.run_cli(
+            "skill", "list", "-s", "remote-source", expected=1
+        )
         self.assertIn("source path does not exist; run hgc source sync first", stderr)
 
         _stdout, stderr = self.run_cli("skill", "list", "-p", "missing", expected=1)
@@ -2535,7 +2951,9 @@ class CliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        _stdout, stderr = self.run_cli("profile", "init", "-d", str(self.root / "target"), "content", expected=1)
+        _stdout, stderr = self.run_cli(
+            "profile", "init", "-d", str(self.root / "target"), "content", expected=1
+        )
         self.assertIn("legacy [[skills]]", stderr)
 
     def test_profile_skill_subcommand_is_not_registered(self) -> None:

@@ -54,6 +54,8 @@ hook = "corp.py"
 "X-Tenant" = { env = "CORP_TENANT" }
 ```
 
+环境变量值会先从 `hagency-model-proxy.toml` 同目录的 `.env` 读取，再由进程环境中的同名变量覆盖。受信任的 Hook 也可以通过只读的 `init.env` 访问合并结果，因此 provider 的特殊认证无需自行加载文件。不要将 `.env` 提交到版本控制。
+
 OpenAI-compatible 客户端可使用以下 base URL：
 
 ```text
@@ -72,9 +74,9 @@ hgc serve restart --model-proxy -r <workspace>
 
 Linux 使用 detached session；Windows 使用 detached、无控制台窗口的独立进程组。状态和日志在 Linux 下写入 `XDG_STATE_HOME`/`~/.local/state`，在 Windows 下写入 `LOCALAPPDATA`；可将 `HAGENCY_STATE_HOME` 设为绝对路径来覆盖根目录。`start` 会输出准确日志路径；日志达到 10 MiB 时轮转，并保留三份备份。
 
-不带 provider 的 `/v1` 路由使用 `default_provider`；`/<provider>/v1` 显式选择 provider。`POST /responses` 与 `POST /chat/completions` 始终可用：上游协议匹配时走原始实体透传路径，另一接口执行转换。原生协议族下的额外资源操作会继续透传，但不会跨协议模拟。
+不带 provider 的 `/v1` 路由使用 `default_provider`；`/<provider>/v1` 显式选择 provider。`POST /responses`、`POST /chat/completions` 与 `GET /models` 无需客户端额外配置即可使用：上游协议匹配时走原始实体透传路径，另一接口执行转换。`/models` 会代理 adapter 的模型列表操作，并执行相同的请求、认证和响应 Hook 阶段；若 provider 没有标准模型列表接口，Hook 也可以实现 `fetch_models(ctx)` 并返回模型 ID 字符串。由于该精简契约不含创建时间，合成的模型记录使用稳定的未知值 `created = 0`。原生协议族下的额外资源操作会继续透传，但不会跨协议模拟。
 
-下游凭证 header 默认剥离。需要逐 provider 传递时使用 `forward_credential_headers`；普通认证使用静态/env header；复杂签名或协议方言可在 `<config-dir>/hooks/` 下添加可信 Python Hook。Hook 在进程内运行，修改后需重启。定义 `process_response` 后，非 SSE 响应会先完整缓冲再调用 Hook，并受 64 MiB 响应上限约束；无需检查响应时应省略该方法。服务只接受 loopback 监听地址。
+下游凭证 header 默认剥离。需要逐 provider 传递时使用 `forward_credential_headers`；普通认证使用静态/env header；复杂签名或协议方言可在 `<config-dir>/hooks/` 下添加可信 Python Hook。Hook 通过只读的 `init.env` 获取合并后的环境变量，在进程内运行，修改后需重启。定义 `process_response` 后，非 SSE 响应会先完整缓冲再调用 Hook，并受 64 MiB 响应上限约束；无需检查响应时应省略该方法。服务只接受 loopback 监听地址。
 
 `adapter = "openai"` 会提供 Responses 协议和 OpenAI API 根地址；`adapter = "openai_compatible"` 默认使用 Chat Completions，并要求填写 `base_url`。需要时可在 provider 级覆盖 `protocol`。新增 provider 家族时，只需在 [`model_proxy/providers`](tools/hagency-cli/src/hagency_cli/model_proxy/providers/README.md) 下新增一个导出 `ADAPTER` 的模块；文件名就是 adapter 值，不需要修改中央注册表。
 

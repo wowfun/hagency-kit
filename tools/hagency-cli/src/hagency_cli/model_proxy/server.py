@@ -886,6 +886,261 @@ async def _proxy_request(
         ) from exc
 
 
+async def _models_request(request: web.Request) -> web.StreamResponse:
+    config = request.app[CONFIG_KEY]
+    provider_name = request.match_info.get("provider") or config.default_provider
+    provider = config.providers.get(provider_name)
+    if provider is None:
+        raise ProxyHttpError(
+            404, "unknown_provider", f"unknown provider: {provider_name}"
+        )
+
+    request_id = f"hgc_{uuid.uuid4().hex}"
+    hook_runtime = request.app[HOOKS_KEY][provider_name]
+
+    if hook_runtime is not None and hook_runtime.fetch_models is not None:
+        context = HookContext(
+            request_id=request_id,
+            provider=provider_name,
+            downstream_protocol="openai_models",
+            upstream_protocol=provider.protocol,
+            stream=False,
+        )
+        try:
+            models = await _call_hook(hook_runtime, hook_runtime.fetch_models, context)
+        except HookReject as exc:
+            raise ProxyHttpError(exc.status, exc.code, exc.public_message) from exc
+        if models is None:
+            raise ProxyHttpError(
+                404,
+                "unsupported_operation",
+                "provider hook returned no model list",
+            )
+        if not isinstance(models, list):
+            raise ProxyHttpError(
+                502,
+                "provider_hook_error",
+                "fetch_models returned an invalid result",
+            )
+        if any(not isinstance(model, str) or not model for model in models):
+            raise ProxyHttpError(
+                502,
+                "provider_hook_error",
+                "fetch_models returned an invalid model id",
+            )
+        body = {
+            "object": "list",
+            "data": [
+                {
+                    "id": model,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": provider_name,
+                }
+                for model in models
+            ],
+        }
+        return web.Response(
+            status=200,
+            body=_json_bytes(body),
+            content_type="application/json",
+        )
+
+    models_path = provider.adapter.models_path
+    if models_path is None:
+        raise ProxyHttpError(
+            404,
+            "unsupported_operation",
+            "this provider does not expose a models endpoint",
+        )
+
+    headers = _request_headers(request, provider)
+    query = parse_qsl(request.query_string, keep_blank_values=True)
+    context = HookContext(
+        request_id=request_id,
+        provider=provider_name,
+        downstream_protocol="openai_models",
+        upstream_protocol=provider.protocol,
+        stream=False,
+    )
+    initial_url = _url(provider.base_url, models_path, query)
+    if hook_runtime is not None and hook_runtime.prepare_request is not None:
+        hook_request = ProviderRequest(
+            method="GET",
+            url=initial_url,
+            headers=_header_view(headers),
+            body=b"",
+            protocol=provider.protocol,
+        )
+        try:
+            patch = await _call_hook(
+                hook_runtime, hook_runtime.prepare_request, context, hook_request
+            )
+        except HookReject as exc:
+            raise ProxyHttpError(exc.status, exc.code, exc.public_message) from exc
+        if patch is not None:
+            if not isinstance(patch, RequestPatch):
+                raise ProxyHttpError(
+                    502,
+                    "provider_hook_error",
+                    "prepare_request returned an invalid patch",
+                )
+            if patch.json_body is not None:
+                raise ProxyHttpError(
+                    502,
+                    "provider_hook_error",
+                    "prepare_request cannot add a body to a models request",
+                )
+            _apply_header_patch(headers, patch.headers)
+            query = _apply_query_patch(query, patch.query)
+
+    for name, value in provider.headers:
+        headers[name] = value
+    for name, value in provider.query:
+        query = [(key, item) for key, item in query if key != name]
+        query.append((name, value))
+    final_url = _url(provider.base_url, models_path, query)
+    parsed_url = urlsplit(final_url)
+    headers["Host"] = parsed_url.netloc
+
+    if hook_runtime is not None and hook_runtime.authenticate is not None:
+        final_request = FinalRequest(
+            method="GET",
+            url=final_url,
+            headers=_header_view(headers),
+            body=b"",
+            protocol=provider.protocol,
+        )
+        try:
+            auth_patch = await _call_hook(
+                hook_runtime, hook_runtime.authenticate, context, final_request
+            )
+        except HookReject as exc:
+            raise ProxyHttpError(exc.status, exc.code, exc.public_message) from exc
+        if auth_patch is not None:
+            if not isinstance(auth_patch, AuthPatch):
+                raise ProxyHttpError(
+                    502,
+                    "provider_hook_error",
+                    "authenticate returned an invalid patch",
+                )
+            _apply_header_patch(headers, auth_patch.headers, auth=True)
+            query = _apply_query_patch(query, auth_patch.query)
+            final_url = _url(provider.base_url, models_path, query)
+
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        connect=provider.connect_timeout_seconds,
+        sock_connect=provider.connect_timeout_seconds,
+        sock_read=provider.idle_timeout_seconds,
+    )
+    session = request.app[SESSION_KEY]
+    try:
+        async with session.get(
+            final_url,
+            headers=headers,
+            allow_redirects=False,
+            timeout=timeout,
+        ) as upstream:
+            body = await _read_buffered_response(upstream)
+            response_patch: ResponsePatch | None = None
+            if hook_runtime is not None and hook_runtime.process_response is not None:
+                provider_response = ProviderResponse(
+                    status=upstream.status,
+                    headers=_header_view(upstream.headers),
+                    protocol=provider.protocol,
+                    is_sse=False,
+                    body=body,
+                )
+                try:
+                    response_patch = await _call_hook(
+                        hook_runtime,
+                        hook_runtime.process_response,
+                        context,
+                        provider_response,
+                    )
+                except HookReject as exc:
+                    raise ProxyHttpError(
+                        exc.status, exc.code, exc.public_message
+                    ) from exc
+                if response_patch is not None and not isinstance(
+                    response_patch, ResponsePatch
+                ):
+                    raise ProxyHttpError(
+                        502,
+                        "provider_hook_error",
+                        "process_response returned an invalid patch",
+                    )
+
+            status = (
+                response_patch.status
+                if response_patch is not None and response_patch.status is not None
+                else upstream.status
+            )
+            if (
+                isinstance(status, bool)
+                or not isinstance(status, int)
+                or not 100 <= status <= 599
+            ):
+                raise ProxyHttpError(
+                    502,
+                    "provider_hook_error",
+                    "process_response returned an invalid status",
+                )
+            body_changed = bool(
+                response_patch is not None and response_patch.json_body is not None
+            )
+            response_headers = _response_headers(
+                upstream.headers, body_changed=body_changed
+            )
+            if response_patch is not None:
+                if response_patch.sse_mapper is not None:
+                    raise ProxyHttpError(
+                        502,
+                        "provider_hook_error",
+                        "models response hook cannot return sse_mapper",
+                    )
+                _apply_header_patch(response_headers, response_patch.headers)
+                if response_patch.json_body is not None:
+                    if not isinstance(response_patch.json_body, dict):
+                        raise ProxyHttpError(
+                            502,
+                            "provider_hook_error",
+                            "process_response returned an invalid JSON body",
+                        )
+                    body = _json_bytes(response_patch.json_body)
+                    response_headers["Content-Type"] = "application/json"
+            return web.Response(
+                status=status,
+                headers=response_headers,
+                body=body,
+            )
+    except aiohttp.ServerTimeoutError as exc:
+        raise ProxyHttpError(
+            504, "upstream_timeout", "upstream request timed out"
+        ) from exc
+    except aiohttp.ClientConnectionError as exc:
+        raise ProxyHttpError(
+            502, "upstream_connection_error", "could not connect to upstream provider"
+        ) from exc
+
+
+async def _models_route(request: web.Request) -> web.StreamResponse:
+    try:
+        return await _models_request(request)
+    except ProxyHttpError as exc:
+        return _error_response(exc)
+    except web.HTTPException as exc:
+        return _error_response(ProxyHttpError(exc.status, "http_error", exc.reason))
+    except Exception as exc:
+        LOGGER.exception(
+            "model proxy models request failed error=%s", type(exc).__name__
+        )
+        return _error_response(
+            ProxyHttpError(500, "internal_error", "model proxy request failed")
+        )
+
+
 async def _route(request: web.Request, *, protocol: str) -> web.StreamResponse:
     try:
         return await _proxy_request(request, protocol)
@@ -910,7 +1165,7 @@ async def _close_session(app: web.Application) -> None:
 
 def create_model_proxy_app(config: ProxyConfig) -> web.Application:
     hooks = {
-        name: load_hook(provider, config.path, LOGGER)
+        name: load_hook(provider, config.path, config.env, LOGGER)
         for name, provider in config.providers.items()
     }
     app = web.Application(
@@ -933,6 +1188,8 @@ def create_model_proxy_app(config: ProxyConfig) -> web.Application:
     )
     for path, protocol in routes:
         app.router.add_route("*", path, functools.partial(_route, protocol=protocol))
+    for models_path in ("/v1/models", "/{provider}/v1/models"):
+        app.router.add_route("GET", models_path, _models_route)
     return app
 
 

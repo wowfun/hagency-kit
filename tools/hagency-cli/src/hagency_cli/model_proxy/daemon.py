@@ -6,7 +6,9 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -21,6 +23,7 @@ START_TIMEOUT_SECONDS = 10.0
 STOP_TIMEOUT_SECONDS = 10.0
 LOG_ROTATION_BYTES = 10 * 1024 * 1024
 LOG_ROTATION_BACKUPS = 3
+STARTUP_NONCE_ENV = "HAGENCY_MODEL_PROXY_STARTUP_NONCE"
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 WINDOWS_DETACHED_PROCESS = 0x00000008
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
@@ -50,6 +53,7 @@ class ServiceState:
     port: int
     started_at: float
     process_identity: str
+    startup_nonce: str
 
 
 def service_paths(
@@ -221,6 +225,8 @@ def _read_state(path: Path) -> ServiceState | None:
         or raw["started_at"] < 0
         or not isinstance(raw.get("process_identity"), str)
         or not raw["process_identity"]
+        or not isinstance(raw.get("startup_nonce"), str)
+        or not raw["startup_nonce"]
     ):
         raise ModelProxyServiceError(f"invalid model proxy state file: {path}")
     return ServiceState(
@@ -230,6 +236,7 @@ def _read_state(path: Path) -> ServiceState | None:
         port=raw["port"],
         started_at=float(raw["started_at"]),
         process_identity=raw["process_identity"],
+        startup_nonce=raw["startup_nonce"],
     )
 
 
@@ -245,6 +252,7 @@ def write_service_state(path: Path, state: ServiceState) -> None:
                 "port": state.port,
                 "started_at": state.started_at,
                 "process_identity": state.process_identity,
+                "startup_nonce": state.startup_nonce,
             },
             separators=(",", ":"),
         ),
@@ -315,8 +323,17 @@ def _control_lock(paths: ServicePaths) -> Iterator[None]:
 
 
 def _worker_command(config_path: Path, host: str, port: int) -> list[str]:
+    if getattr(sys, "frozen", False):
+        python_exe = shutil.which("python") or shutil.which("python3")
+        if not python_exe:
+            raise ModelProxyServiceError(
+                "Cannot find Python interpreter. Please ensure Python is installed and in PATH."
+            )
+    else:
+        python_exe = sys.executable
+
     return [
-        sys.executable,
+        python_exe,
         "-m",
         "hagency_cli.model_proxy.worker",
         "--config",
@@ -328,13 +345,14 @@ def _worker_command(config_path: Path, host: str, port: int) -> list[str]:
     ]
 
 
-def _worker_environment() -> dict[str, str]:
+def _worker_environment(startup_nonce: str) -> dict[str, str]:
     environ = dict(os.environ)
     source_root = str(Path(__file__).resolve().parents[2])
     current = environ.get("PYTHONPATH")
     environ["PYTHONPATH"] = (
         source_root if not current else os.pathsep.join((source_root, current))
     )
+    environ[STARTUP_NONCE_ENV] = startup_nonce
     return environ
 
 
@@ -411,33 +429,48 @@ def _start_model_proxy_locked(
         )
     paths.state.unlink(missing_ok=True)
     _rotate_service_log(paths.log)
+    startup_nonce = secrets.token_hex(16)
     log_descriptor = os.open(paths.log, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     with contextlib.suppress(OSError):
         paths.log.chmod(0o600)
-    with os.fdopen(log_descriptor, "ab", buffering=0) as log_handle:
+    log_handle = os.fdopen(log_descriptor, "ab", buffering=0)
+    try:
         process = _spawn_worker(
             _worker_command(config_path, host, port),
             log_handle,
-            environ=_worker_environment(),
+            environ=_worker_environment(startup_nonce),
         )
         _LOCAL_PROCESSES[process.pid] = process
-    deadline = time.monotonic() + start_timeout_seconds
-    while time.monotonic() < deadline:
-        state = _read_state(paths.state)
-        if state is not None and state.pid == process.pid and _pid_alive(state.pid):
-            return state, paths
-        return_code = process.poll()
-        if return_code is not None:
-            _LOCAL_PROCESSES.pop(process.pid, None)
-            raise ModelProxyServiceError(
-                f"model proxy failed to start (exit {return_code}); see {paths.log}"
-            )
-        time.sleep(0.05)
-    process.terminate()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=2)
-    _LOCAL_PROCESSES.pop(process.pid, None)
-    raise ModelProxyServiceError(f"model proxy did not become ready; see {paths.log}")
+        deadline = time.monotonic() + start_timeout_seconds
+        while time.monotonic() < deadline:
+            state = _read_state(paths.state)
+            if (
+                state is not None
+                and state.startup_nonce == startup_nonce
+                and state.pid == process.pid
+                and state.config.resolve() == config_path
+                and state.host == host
+                and state.port == port
+                and _pid_alive(state.pid)
+                and process_identity(state.pid) == state.process_identity
+            ):
+                return state, paths
+            return_code = process.poll()
+            if return_code is not None:
+                _LOCAL_PROCESSES.pop(process.pid, None)
+                raise ModelProxyServiceError(
+                    f"model proxy failed to start (exit {return_code}); see {paths.log}"
+                )
+            time.sleep(0.05)
+        process.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=2)
+        _LOCAL_PROCESSES.pop(process.pid, None)
+        raise ModelProxyServiceError(
+            f"model proxy did not become ready; see {paths.log}"
+        )
+    finally:
+        log_handle.close()
 
 
 def start_model_proxy(

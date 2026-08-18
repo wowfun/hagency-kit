@@ -12,6 +12,7 @@ from aiohttp import web
 
 from .config import load_proxy_config, validate_loopback_host
 from .daemon import (
+    STARTUP_NONCE_ENV,
     ServicePaths,
     ServiceState,
     process_identity,
@@ -28,6 +29,7 @@ async def serve(
     paths: ServicePaths,
     host: str,
     port: int,
+    startup_nonce: str,
 ) -> None:
     validate_loopback_host(host)
     runner = web.AppRunner(
@@ -50,6 +52,7 @@ async def serve(
             port=port,
             started_at=time.time(),
             process_identity=identity,
+            startup_nonce=startup_nonce,
         ),
     )
     stopping = asyncio.Event()
@@ -78,9 +81,12 @@ def main() -> None:
     )
     validate_loopback_host(args.host)
     config_path = args.config.resolve()
+    startup_nonce = os.environ.get(STARTUP_NONCE_ENV)
+    if not startup_nonce:
+        raise RuntimeError("missing model proxy startup nonce")
     paths = service_paths(config_path)
     app = create_model_proxy_app(load_proxy_config(config_path))
-    asyncio.run(serve(app, config_path, paths, args.host, args.port))
+    asyncio.run(serve(app, config_path, paths, args.host, args.port, startup_nonce))
 
 
 if __name__ == "__main__":

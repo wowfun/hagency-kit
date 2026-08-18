@@ -48,6 +48,7 @@ class HookInit:
     provider: str
     upstream_protocol: str
     options: Mapping[str, Any]
+    env: Mapping[str, str]
     logger: SafeHookLogger
 
 
@@ -173,6 +174,7 @@ class HookRuntime:
     prepare_request: Callable[..., Awaitable[RequestPatch | None]] | None
     authenticate: Callable[..., Awaitable[AuthPatch | None]] | None
     process_response: Callable[..., Awaitable[ResponsePatch | None]] | None
+    fetch_models: Callable[..., Awaitable[list[str] | None]] | None
     timeout_seconds: float
 
     async def call(
@@ -197,7 +199,10 @@ def _method(
 
 
 def load_hook(
-    provider: ProviderConfig, config_path: Path, logger: logging.Logger
+    provider: ProviderConfig,
+    config_path: Path,
+    env: Mapping[str, str],
+    logger: logging.Logger,
 ) -> HookRuntime | None:
     if provider.hook is None:
         return None
@@ -227,6 +232,7 @@ def load_hook(
                 provider=provider.name,
                 upstream_protocol=provider.protocol,
                 options=MappingProxyType(dict(provider.hook_options)),
+                env=env,
                 logger=SafeHookLogger(logger, provider.name),
             )
         )
@@ -235,6 +241,7 @@ def load_hook(
             prepare_request=_method(instance, "prepare_request", provider.name),
             authenticate=_method(instance, "authenticate", provider.name),
             process_response=_method(instance, "process_response", provider.name),
+            fetch_models=_method(instance, "fetch_models", provider.name),
             timeout_seconds=provider.hook_timeout_seconds,
         )
     except ModelProxyConfigError:

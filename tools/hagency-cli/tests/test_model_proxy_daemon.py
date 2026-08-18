@@ -73,6 +73,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
                         "port": 8765,
                         "started_at": True,
                         "process_identity": "linux:1",
+                        "startup_nonce": "attempt-1",
                     }
                 ),
                 encoding="utf-8",
@@ -128,6 +129,72 @@ class ModelProxyDaemonTests(unittest.TestCase):
             linux_options = popen.call_args.kwargs
             self.assertTrue(linux_options["start_new_session"])
             self.assertNotIn("creationflags", linux_options)
+
+    def test_worker_command_preserves_non_cpython_interpreter_environment(self) -> None:
+        with (
+            mock.patch.object(daemon.sys, "executable", "/opt/venv/bin/pypy3"),
+            mock.patch.object(daemon.sys, "frozen", False, create=True),
+            mock.patch("shutil.which", return_value="/usr/bin/python") as which,
+        ):
+            command = daemon._worker_command(self.config, "127.0.0.1", 8765)
+
+        self.assertEqual(command[0], "/opt/venv/bin/pypy3")
+        which.assert_not_called()
+
+    def test_start_ignores_delayed_state_from_a_previous_attempt(self) -> None:
+        paths = daemon.service_paths(
+            self.config,
+            environ={"HAGENCY_STATE_HOME": str(self.root / "state")},
+        )
+        paths.directory.mkdir(parents=True)
+        stale = daemon.ServiceState(
+            pid=111,
+            config=self.config,
+            host="127.0.0.1",
+            port=8001,
+            started_at=1,
+            process_identity="linux:stale",
+            startup_nonce="old-attempt",
+        )
+        ready = daemon.ServiceState(
+            pid=222,
+            config=self.config,
+            host="127.0.0.1",
+            port=8002,
+            started_at=2,
+            process_identity="linux:ready",
+            startup_nonce="new-attempt",
+        )
+        process = mock.Mock(pid=222)
+        process.poll.return_value = None
+        try:
+            with (
+                mock.patch.object(
+                    daemon, "_read_state", side_effect=(None, stale, ready)
+                ),
+                mock.patch.object(daemon, "_spawn_worker", return_value=process),
+                mock.patch.object(daemon, "_worker_command", return_value=["worker"]),
+                mock.patch.object(daemon, "_worker_environment", return_value={}),
+                mock.patch.object(daemon, "_pid_alive", return_value=True),
+                mock.patch.object(
+                    daemon, "process_identity", return_value="linux:ready"
+                ),
+                mock.patch.object(daemon.time, "sleep"),
+                mock.patch.object(
+                    daemon.secrets, "token_hex", return_value="new-attempt"
+                ),
+            ):
+                state, _returned_paths = daemon._start_model_proxy_locked(
+                    self.config,
+                    paths,
+                    host="127.0.0.1",
+                    port=8002,
+                    start_timeout_seconds=1,
+                )
+        finally:
+            daemon._LOCAL_PROCESSES.pop(process.pid, None)
+
+        self.assertEqual(state, ready)
 
     def test_public_lifecycle_rejects_non_loopback_bind_before_spawning(self) -> None:
         with mock.patch.object(daemon, "_spawn_worker") as spawn:
@@ -286,6 +353,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
                         port=8765,
                         started_at=0,
                         process_identity="stale-instance",
+                        startup_nonce="stale-attempt",
                     ),
                 )
                 stopped, _paths = daemon.stop_model_proxy(

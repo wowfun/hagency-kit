@@ -11,6 +11,8 @@ from types import MappingProxyType
 from typing import Any, Mapping, Never
 from urllib.parse import urlsplit
 
+from dotenv import dotenv_values
+
 from .providers import ProviderAdapter, ProviderAdapterError, load_provider_adapter
 
 PROVIDER_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*\Z")
@@ -71,6 +73,7 @@ class ProxyConfig:
     path: Path
     default_provider: str
     providers: Mapping[str, ProviderConfig]
+    env: Mapping[str, str]
 
 
 def _fail(path: str, message: str) -> Never:
@@ -172,7 +175,7 @@ def _base_url(raw: Any, path: str) -> str:
     if parsed.query or parsed.fragment:
         _fail(path, "must not contain query or fragment")
     segments = [segment for segment in parsed.path.rstrip("/").split("/") if segment]
-    if (segments and segments[-1] == "responses") or segments[-2:] == [
+    if (segments and segments[-1] in {"models", "responses"}) or segments[-2:] == [
         "chat",
         "completions",
     ]:
@@ -198,10 +201,26 @@ def _freeze(value: Any) -> Any:
     return value
 
 
+def _workspace_environment(
+    path: Path, environ: Mapping[str, str] | None
+) -> Mapping[str, str]:
+    dotenv_path = path.resolve().parent / ".env"
+    try:
+        workspace_values = dotenv_values(dotenv_path)
+    except (OSError, UnicodeError) as exc:
+        raise ModelProxyConfigError(
+            f"could not read environment file: {dotenv_path}"
+        ) from exc
+    merged = {
+        name: value for name, value in workspace_values.items() if value is not None
+    }
+    merged.update(os.environ if environ is None else environ)
+    return MappingProxyType(merged)
+
+
 def load_proxy_config(
     path: Path, *, environ: Mapping[str, str] | None = None
 ) -> ProxyConfig:
-    environ = os.environ if environ is None else environ
     try:
         with path.open("rb") as handle:
             raw = tomllib.load(handle)
@@ -209,6 +228,8 @@ def load_proxy_config(
         raise ModelProxyConfigError(f"missing config: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ModelProxyConfigError(f"invalid TOML in {path}: {exc}") from exc
+
+    resolved_environ = _workspace_environment(path, environ)
 
     _reject_unknown(raw, {"version", "default_provider", "providers"}, "config")
     if raw.get("version") != 1:
@@ -273,14 +294,14 @@ def load_proxy_config(
         headers = _resolved_pairs(
             mapping.get("headers"),
             f"{provider_path}.headers",
-            environ,
+            resolved_environ,
             headers=True,
         )
         api_key_raw = mapping.get("api_key")
         if api_key_raw is not None:
             api_key_path = f"{provider_path}.api_key"
             api_key = _safe_value(
-                _value_source(api_key_raw, api_key_path).resolve(environ),
+                _value_source(api_key_raw, api_key_path).resolve(resolved_environ),
                 api_key_path,
             )
             try:
@@ -308,7 +329,10 @@ def load_proxy_config(
             base_url=_base_url(base_url, f"{provider_path}.base_url"),
             headers=headers,
             query=_resolved_pairs(
-                mapping.get("query"), f"{provider_path}.query", environ, headers=False
+                mapping.get("query"),
+                f"{provider_path}.query",
+                resolved_environ,
+                headers=False,
             ),
             forward_credential_headers=_forward_headers(
                 mapping.get("forward_credential_headers"),
@@ -339,4 +363,5 @@ def load_proxy_config(
         path=path.resolve(),
         default_provider=default_provider,
         providers=MappingProxyType(providers),
+        env=resolved_environ,
     )

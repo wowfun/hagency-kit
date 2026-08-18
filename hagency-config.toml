@@ -42,3 +42,9 @@ url = "https://github.com/anthropics/skills"
 
 [source."mattpocock/skills".remote]
 url = "https://github.com/mattpocock/skills.git"
+
+[source.ljg-skills]
+
+[source.ljg-skills.remote]
+url = "https://github.com/lijigang/ljg-skills"
+ref = "md"

@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import os
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -17,6 +19,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from hagency_cli.model_proxy import (
     ModelProxyConfigError,
+    ProviderAdapter,
+    ProviderAdapterError,
     create_model_proxy_app,
     load_proxy_config,
 )
@@ -28,7 +32,10 @@ from hagency_cli.model_proxy.conversion import (
     convert_request,
     convert_response,
 )
-from hagency_cli.model_proxy.providers import PROTOCOL_CHAT, PROTOCOL_RESPONSES
+from hagency_cli.model_proxy.providers import (
+    PROTOCOL_CHAT,
+    PROTOCOL_RESPONSES,
+)
 from hagency_cli.model_proxy.sse import SseDecoder, SseEvent, encode_event, json_event
 
 
@@ -77,6 +84,87 @@ class ModelProxyConfigTests(unittest.TestCase):
         self.assertEqual(
             provider.forward_credential_headers, frozenset({"authorization"})
         )
+
+    def test_loads_workspace_dotenv_with_process_environment_precedence(self) -> None:
+        path = self.write_config(
+            """
+            version = 1
+            default_provider = "corp"
+
+            [providers.corp]
+            adapter = "openai_compatible"
+            protocol = "openai_chat_completions"
+            base_url = "https://llm.example.invalid/v1"
+            api_key = { env = "CORP_TOKEN" }
+            """
+        )
+        (self.root / ".env").write_text(
+            "CORP_TOKEN=workspace-secret\nHOOK_TOKEN=hook-secret\n",
+            encoding="utf-8",
+        )
+
+        workspace_config = load_proxy_config(path, environ={})
+        process_config = load_proxy_config(
+            path, environ={"CORP_TOKEN": "process-secret"}
+        )
+
+        self.assertEqual(
+            dict(workspace_config.providers["corp"].headers)["Authorization"],
+            "Bearer workspace-secret",
+        )
+        self.assertEqual(workspace_config.env["HOOK_TOKEN"], "hook-secret")
+        self.assertEqual(
+            dict(process_config.providers["corp"].headers)["Authorization"],
+            "Bearer process-secret",
+        )
+
+    def test_process_environment_overrides_dotenv_without_explicit_mapping(
+        self,
+    ) -> None:
+        path = self.write_config(
+            """
+            version = 1
+            default_provider = "corp"
+
+            [providers.corp]
+            adapter = "openai_compatible"
+            protocol = "openai_chat_completions"
+            base_url = "https://llm.example.invalid/v1"
+            api_key = { env = "HAGENCY_TEST_CORP_TOKEN" }
+            """
+        )
+        (self.root / ".env").write_text(
+            "HAGENCY_TEST_CORP_TOKEN=workspace-secret\n", encoding="utf-8"
+        )
+
+        with mock.patch.dict(
+            os.environ, {"HAGENCY_TEST_CORP_TOKEN": "process-secret"}, clear=False
+        ):
+            config = load_proxy_config(path)
+
+        self.assertEqual(
+            dict(config.providers["corp"].headers)["Authorization"],
+            "Bearer process-secret",
+        )
+
+    def test_rejects_dotenv_with_invalid_encoding(self) -> None:
+        path = self.write_config(
+            """
+            version = 1
+            default_provider = "corp"
+
+            [providers.corp]
+            adapter = "openai_compatible"
+            protocol = "openai_chat_completions"
+            base_url = "https://llm.example.invalid/v1"
+            """
+        )
+        (self.root / ".env").write_bytes(b"\xff")
+
+        with self.assertRaisesRegex(
+            ModelProxyConfigError, "could not read environment file"
+        ):
+            load_proxy_config(path, environ={})
 
     def test_openai_adapter_supplies_protocol_url_and_api_key_format(self) -> None:
         path = self.write_config(
@@ -175,6 +263,7 @@ class ModelProxyConfigTests(unittest.TestCase):
                 "https://example.invalid/v1/chat/completions",
                 "API root",
             ),
+            ("corp", "https://example.invalid/v1/models", "API root"),
         )
         for name, base_url, message in cases:
             with self.subTest(name=name, base_url=base_url):
@@ -262,6 +351,14 @@ class ModelProxyConfigTests(unittest.TestCase):
         )
 
         create_model_proxy_app(load_proxy_config(path))
+
+    def test_models_path_validation_rejects_invalid_values(self) -> None:
+        for path in ("", "/", "/models", "../models", "models/../other", "."):
+            with self.subTest(path=path):
+                with self.assertRaises(ProviderAdapterError):
+                    ProviderAdapter(name="t", models_path=path).validate()
+        ProviderAdapter(name="t", models_path=None).validate()
+        ProviderAdapter(name="t", models_path="models").validate()
 
 
 class ConversionTests(unittest.TestCase):
@@ -828,6 +925,15 @@ class ModelProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             headers={"Content-Type": "application/json", "X-Upstream": "yes"},
         )
 
+    async def models_behavior(
+        self, _request: web.Request, _body: bytes
+    ) -> web.Response:
+        return web.Response(
+            status=200,
+            body=json.dumps({"data": [{"id": "upstream-model"}]}).encode(),
+            content_type="application/json",
+        )
+
     def write_config(
         self, protocol: str, *, hook: bool = False, forward: str = ""
     ) -> Path:
@@ -1240,6 +1346,41 @@ class ModelProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-hook-detail", "\n".join(captured.output))
         self.assertEqual(self.requests, [])
 
+    async def test_provider_hook_can_read_workspace_dotenv(self) -> None:
+        (self.root / ".env").write_text(
+            "CORP_HOOK_TOKEN=workspace-hook-secret\n", encoding="utf-8"
+        )
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                from hagency_cli.model_proxy import AuthPatch, HeaderPatch
+
+                class Hook:
+                    def __init__(self, init):
+                        self.token = init.env["CORP_HOOK_TOKEN"]
+
+                    async def authenticate(self, ctx, request):
+                        return AuthPatch(
+                            headers=HeaderPatch(set=(("X-Corp-Token", self.token),))
+                        )
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        await self.start_proxy(PROTOCOL_RESPONSES, hook=True)
+        response = await self.proxy_client.post(
+            "/v1/responses", json={"model": "m", "input": "hi"}
+        )
+        await response.read()
+
+        self.assertEqual(response.status, 201)
+        self.assertEqual(
+            self.requests[0]["headers"]["X-Corp-Token"], "workspace-hook-secret"
+        )
+
     async def test_credential_forwarding_requires_provider_whitelist(self) -> None:
         await self.start_proxy(
             PROTOCOL_RESPONSES,
@@ -1262,6 +1403,170 @@ class ModelProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0]["headers"]["X-Api-Key"], "forward-me")
         self.assertNotIn("Ocp-Apim-Subscription-Key", self.requests[0]["headers"])
         self.assertNotIn("X-Amz-Security-Token", self.requests[0]["headers"])
+
+    async def test_models_route_with_hook_fetch_models(self) -> None:
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                class Hook:
+                    def __init__(self, init): pass
+                    async def fetch_models(self, ctx):
+                        return ["model-a", "model-b"]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        await self.start_proxy(PROTOCOL_CHAT, hook=True)
+        response = await self.proxy_client.get("/v1/models")
+        body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["object"], "list")
+        self.assertEqual([m["id"] for m in body["data"]], ["model-a", "model-b"])
+        self.assertEqual(body["data"][0]["object"], "model")
+        self.assertEqual(body["data"][0]["owned_by"], "corp")
+        self.assertTrue(all(model["created"] == 0 for model in body["data"]))
+        self.assertEqual(self.requests, [])
+
+    async def test_models_route_fetch_models_none_reports_no_model_list(self) -> None:
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                class Hook:
+                    def __init__(self, init): pass
+                    async def fetch_models(self, ctx):
+                        return None
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        await self.start_proxy(PROTOCOL_CHAT, hook=True)
+
+        response = await self.proxy_client.get("/v1/models")
+        body = await response.json()
+
+        self.assertEqual(response.status, 404)
+        self.assertEqual(body["error"]["code"], "unsupported_operation")
+        self.assertEqual(
+            body["error"]["message"], "provider hook returned no model list"
+        )
+
+    async def test_models_route_rejects_invalid_hook_model_ids(self) -> None:
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                class Hook:
+                    def __init__(self, init): pass
+                    async def fetch_models(self, ctx):
+                        return [123]
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        await self.start_proxy(PROTOCOL_CHAT, hook=True)
+
+        response = await self.proxy_client.get("/v1/models")
+        body = await response.json()
+
+        self.assertEqual(response.status, 502)
+        self.assertEqual(body["error"]["code"], "provider_hook_error")
+
+    async def test_models_route_hook_reject_maps_to_4xx(self) -> None:
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                from hagency_cli.model_proxy import HookReject
+
+                class Hook:
+                    def __init__(self, init): pass
+                    async def fetch_models(self, ctx):
+                        raise HookReject(
+                            status=401,
+                            code="credential_invalid",
+                            public_message="bad creds",
+                        )
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        await self.start_proxy(PROTOCOL_CHAT, hook=True)
+        response = await self.proxy_client.get("/v1/models")
+        body = await response.json()
+        self.assertEqual(response.status, 401)
+        self.assertEqual(body["error"]["code"], "credential_invalid")
+        self.assertEqual(body["error"]["message"], "bad creds")
+
+    async def test_models_route_proxies_get_without_hook(self) -> None:
+        self.behavior = self.models_behavior
+        await self.start_proxy(PROTOCOL_CHAT)
+        response = await self.proxy_client.get("/v1/models")
+        await response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.requests[0]["method"], "GET")
+        self.assertTrue(self.requests[0]["path"].endswith("/models"))
+
+    async def test_models_route_runs_the_full_hook_pipeline(self) -> None:
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        (hooks / "corp.py").write_text(
+            textwrap.dedent(
+                """
+                from hagency_cli.model_proxy import (
+                    AuthPatch,
+                    HeaderPatch,
+                    QueryPatch,
+                    RequestPatch,
+                    ResponsePatch,
+                )
+
+                class Hook:
+                    def __init__(self, init): pass
+
+                    async def prepare_request(self, ctx, request):
+                        ctx.state["prepared"] = True
+                        return RequestPatch(
+                            headers=HeaderPatch(set=(("X-Prepared", "yes"),)),
+                            query=QueryPatch(set=(("prepared", "yes"),)),
+                        )
+
+                    async def authenticate(self, ctx, request):
+                        if not ctx.state.get("prepared"):
+                            raise RuntimeError("prepare_request was skipped")
+                        return AuthPatch(
+                            headers=HeaderPatch(set=(("X-Auth-Token", "injected"),))
+                        )
+
+                    async def process_response(self, ctx, response):
+                        body = response.json()
+                        body["hooked"] = ctx.state.get("prepared")
+                        return ResponsePatch(json_body=body)
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        self.behavior = self.models_behavior
+        await self.start_proxy(PROTOCOL_CHAT, hook=True)
+        response = await self.proxy_client.get("/v1/models")
+        body = await response.json()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.requests[0]["query"], "prepared=yes")
+        self.assertEqual(self.requests[0]["headers"]["X-Prepared"], "yes")
+        self.assertEqual(self.requests[0]["headers"]["X-Auth-Token"], "injected")
+        self.assertTrue(body["hooked"])
+
+    async def test_models_route_405_on_post(self) -> None:
+        await self.start_proxy(PROTOCOL_CHAT)
+        for path in ("/v1/models", "/corp/v1/models"):
+            with self.subTest(path=path):
+                response = await self.proxy_client.post(path)
+                self.assertEqual(response.status, 405)
 
 
 if __name__ == "__main__":

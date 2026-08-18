@@ -127,9 +127,11 @@ adapter = "openai"
 api_key = { env = "OPENAI_API_KEY" }
 ```
 
+Environment-backed values load from `.env` beside `hagency-model-proxy.toml`; process environment values override the file. Hooks receive the merged values through the read-only `init.env` mapping. Do not commit `.env`.
+
 The `openai` adapter supplies the Responses protocol and API root. Use `openai_compatible` with a `base_url` for compatible providers; it defaults to Chat Completions. Override `protocol` only at provider level. New built-in provider families belong in `tools/hagency-cli/src/hagency_cli/model_proxy/providers/<adapter>.py` and export one `ProviderAdapter` value named `ADAPTER`; the filename is discovered directly, so no registry edit is required. Keep deployment secrets and tenant-specific values in config, and keep model routing out of adapters.
 
-Use `http://127.0.0.1:8765/v1` for the default provider and `http://127.0.0.1:8765/<provider>/v1` for an explicit provider. Both base URLs expose `/responses` and `/chat/completions`. Matching protocol traffic keeps request/response entity bytes intact except where an explicitly configured body or SSE hook changes them; cross-protocol traffic uses the built-in bridge. Native resource subpaths are passed through only to a matching provider protocol.
+Use `http://127.0.0.1:8765/v1` for the default provider and `http://127.0.0.1:8765/<provider>/v1` for an explicit provider. Both base URLs expose `/responses`, `/chat/completions`, and `GET /models`. Matching protocol traffic keeps request/response entity bytes intact except where an explicitly configured body or SSE hook changes them; cross-protocol traffic uses the built-in bridge. `/models` proxies the adapter's model-list path through the normal Hook pipeline. Native resource subpaths are passed through only to a matching provider protocol.
 
 Credential-like downstream headers are removed unless named in `forward_credential_headers`. Prefer static or environment-backed provider headers. For custom provider authentication or wire-shape adjustments, set `hook = "name.py"` and place the file under `<config-dir>/hooks/`. It must export `Hook`, accept `HookInit`, and may define these async methods:
 
@@ -140,13 +142,14 @@ from hagency_cli.model_proxy import AuthPatch, HeaderPatch
 class Hook:
     def __init__(self, init):
         self.options = init.options
+        self.token = init.env["CORP_TOKEN"]
 
     async def authenticate(self, ctx, request):
-        token = await obtain_provider_token(self.options, request.body)
+        token = await obtain_provider_token(self.options, self.token, request.body)
         return AuthPatch(headers=HeaderPatch(set=(("Authorization", f"Bearer {token}"),)))
 ```
 
-`prepare_request` and `process_response` see provider-native data; `authenticate` sees the final body and may return only header/query patches. Missing methods preserve the relevant raw path. Defining `process_response` buffers each non-SSE response before the hook runs and applies a 64 MiB response limit, so omit it for authentication-only Hooks. Hook loading and contract validation happen before listening, hook failures are fail-closed, and files are not hot-reloaded. Treat Hook files as trusted in-process code.
+`prepare_request` and `process_response` see provider-native data; `authenticate` sees the final body and may return only header/query patches. A Hook may implement `fetch_models(ctx)` and return `list[str]` when the provider does not expose a standard model-list operation; synthesized records use `created = 0` because this compact contract has no creation metadata. Missing methods preserve the relevant raw path. Defining `process_response` buffers each non-SSE response before the hook runs and applies a 64 MiB response limit, so omit it for authentication-only Hooks. Hook loading and contract validation happen before listening, hook failures are fail-closed, and files are not hot-reloaded. Treat Hook files as trusted in-process code.
 
 ## Safety and Boundaries
 

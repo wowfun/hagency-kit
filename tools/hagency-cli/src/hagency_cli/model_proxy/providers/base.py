@@ -32,6 +32,7 @@ class ProviderAdapter:
     api_key_header: str | None = "Authorization"
     api_key_prefix: str = "Bearer "
     operation_paths: Mapping[str, str] = field(default_factory=_default_operation_paths)
+    models_path: str | None = "models"
 
     def validate(self) -> None:
         if not self.name:
@@ -76,6 +77,16 @@ class ProviderAdapter:
             raise ProviderAdapterError(
                 f"adapter {self.name} has an invalid API key prefix"
             )
+        if self.models_path is not None:
+            if (
+                not isinstance(self.models_path, str)
+                or not self.models_path
+                or self.models_path.startswith("/")
+                or any(part in {"", ".", ".."} for part in self.models_path.split("/"))
+            ):
+                raise ProviderAdapterError(
+                    f"adapter {self.name} has an invalid models path"
+                )
 
     def resolve_protocol(self, configured: str | None) -> str:
         protocol = self.default_protocol if configured is None else configured

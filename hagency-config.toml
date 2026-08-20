@@ -48,3 +48,8 @@ url = "https://github.com/mattpocock/skills.git"
 [source.ljg-skills.remote]
 url = "https://github.com/lijigang/ljg-skills"
 ref = "md"
+
+[source.archify]
+
+[source.archify.remote]
+url = "https://github.com/tt-a1i/archify"

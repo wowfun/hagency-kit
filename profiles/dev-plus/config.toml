@@ -1,4 +1,0 @@
-name = "dev-plus"
-
-[skill."mattpocock/skills"]
-include = ["domain-modeling"]

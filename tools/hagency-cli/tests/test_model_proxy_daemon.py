@@ -103,7 +103,18 @@ class ModelProxyDaemonTests(unittest.TestCase):
     def test_spawn_uses_detached_flags_on_windows_and_new_session_on_linux(
         self,
     ) -> None:
-        with mock.patch.object(subprocess, "Popen") as popen:
+        startupinfo = mock.Mock(dwFlags=0)
+        with (
+            mock.patch.object(subprocess, "Popen") as popen,
+            mock.patch.object(
+                subprocess,
+                "STARTUPINFO",
+                return_value=startupinfo,
+                create=True,
+            ),
+            mock.patch.object(subprocess, "STARTF_USESHOWWINDOW", 0x01, create=True),
+            mock.patch.object(subprocess, "SW_HIDE", 0, create=True),
+        ):
             daemon._spawn_worker(
                 ["python", "worker"],
                 mock.sentinel.log,
@@ -118,6 +129,9 @@ class ModelProxyDaemonTests(unittest.TestCase):
                 | daemon.WINDOWS_CREATE_NO_WINDOW,
             )
             self.assertNotIn("start_new_session", windows_options)
+            self.assertIs(windows_options["startupinfo"], startupinfo)
+            self.assertEqual(startupinfo.dwFlags, 0x01)
+            self.assertEqual(startupinfo.wShowWindow, 0)
 
             popen.reset_mock()
             daemon._spawn_worker(

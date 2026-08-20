@@ -332,6 +332,13 @@ def _worker_command(config_path: Path, host: str, port: int) -> list[str]:
     else:
         python_exe = sys.executable
 
+    # On Windows, prefer pythonw.exe (windowless Python) to avoid creating
+    # a visible console window when spawning the worker.
+    if os.name == "nt":
+        pythonw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+        if os.path.isfile(pythonw):
+            python_exe = pythonw
+
     return [
         python_exe,
         "-m",
@@ -372,6 +379,12 @@ def _spawn_worker(
         "env": dict(environ),
     }
     if platform == "nt":
+        # STARTUPINFO with SW_HIDE ensures no visible window even when
+        # Python launchers (e.g. uv-managed venvs) spawn child processes.
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        options["startupinfo"] = startupinfo
         options["creationflags"] = (
             WINDOWS_CREATE_NEW_PROCESS_GROUP
             | WINDOWS_DETACHED_PROCESS
@@ -447,7 +460,6 @@ def _start_model_proxy_locked(
             if (
                 state is not None
                 and state.startup_nonce == startup_nonce
-                and state.pid == process.pid
                 and state.config.resolve() == config_path
                 and state.host == host
                 and state.port == port

@@ -6,7 +6,7 @@
 
 ## Hagency CLI
 
-`hgc` CLI 用于管理 Hagency workspace、source、skill discovery 和安装、profile，以及生成的 profile skill 输出。Source registry 位于 [`hagency-config.toml`](hagency-config.toml)，profile config 位于 `profiles/<name>/config.toml`。
+`hgc` CLI 用于管理 Hagency workspace、source、skill discovery 和安装、profile、生成的 profile skill 输出，以及项目构建产物清理。Source registry 位于 [`hagency-config.toml`](hagency-config.toml)，profile config 位于 `profiles/<name>/config.toml`。
 
 ```sh
 uv tool install -e tools/hagency-cli
@@ -19,6 +19,7 @@ hgc skill add <source>:<selector> -d <workspace>
 hgc skill add <source>:<selector> --global
 hgc p init -p <xxx>/skills <profile>
 hgc p init -d <workspace> <profile>
+hgc space purge --dry-run
 hgc serve start --model-proxy
 ```
 
@@ -30,6 +31,27 @@ hgc --show-completion bash
 ```
 
 补全覆盖命令、别名、选项、目录，以及本地可用的 source、profile、skill 和 selector 值。它会尊重当前目录、`--root` 和 `--checkout-dir`；workspace 缺失、配置损坏、目录不可读或 source 未同步时会静默省略动态候选。
+
+### 项目构建产物清理
+
+`hgc space purge` 会查找可重建的项目产物，例如依赖目录、构建输出、测试与工具缓存，以及带有有效 `CACHEDIR.TAG` 的目录。先用预览模式检查候选项：
+
+```sh
+hgc space purge --dry-run
+hgc space purge
+hgc space purge ~/Work/client-a ~/scratch/project-b
+hgc space purge --paths
+```
+
+位置参数 `PATH...` 只作为本次调用的临时扫描根目录，并会取代已保存的路径列表和自动发现结果。未传位置参数时，非空的用户路径文件会取代自动发现；文件缺失或只包含空白和注释时，命令恢复使用自动根目录。单独运行 `--paths` 可创建或编辑该文件，显示已配置根目录的存在状态，并在编辑器退出后重新显示生效列表。编辑器按 `$VISUAL`、`$EDITOR`、Windows 上的 `notepad.exe`、macOS 上的 `open -W -t` 或其他平台上的 `vi` 依次选择。空行和 `#` 注释会被忽略，每行必须是绝对路径或 `~` 路径。
+
+路径文件在 Linux 和 WSL 上位于 `${XDG_CONFIG_HOME:-~/.config}/hagency/space-purge-paths`，在 macOS 上位于 `~/Library/Application Support/Hagency/space-purge-paths`，在 Windows 上位于 `%APPDATA%\Hagency\space-purge-paths`。`APPDATA` 不可用时，Windows 回退到 `~/.config/hagency/space-purge-paths`。
+
+自动发现会检查已存在的 `~/www`、`~/dev`、`~/Projects`、`~/GitHub`、`~/Code`、`~/Workspace`、`~/Repos`、`~/Development`、`~/.codex/worktrees` 和 `~/.claude/worktrees`，也会扫描主目录的直接子目录，只纳入两层深度内存在项目标记的容器。系统目录和云存储根目录不会被自动发现。
+
+交互式 TTY 中，Questionary 会显示多选列表。产物目录及其后代文件的最后活动时间严格超过 7 天时，候选项默认选中；较新或无法确定时间的候选项保留在列表中，但不会预选。常规清理会输出每个已选项的绝对路径，再请求二次确认，且默认回答为否。使用 `--dry-run` 时仍会打开多选列表，但只预览已选项，并跳过破坏性的二次确认。非 TTY 环境会跳过交互界面，预览所有候选项及其默认选中状态，即使没有传入 `--dry-run` 也不会删除文件。
+
+该命令会永久删除已选产物，不会将它们移到废纸篓或回收站。Git 已跟踪的候选项（包括内部嵌套 Git 仓库含有 tracked 文件时的整个候选项）、符号链接、junction、reparse path、挂载点、大小为零的候选项、Xcode 的全局 `DerivedData` 目录、非 Composer 项目中的 `vendor` 目录，以及非 `.NET` 项目中的 `bin` 目录都会被排除。通用产物名只在有项目标记支持时才会成为候选项。如果永久删除因权限、文件系统变化或其他 I/O 错误而中途失败，部分内容可能已经被删除；命令会报告失败、继续处理后续选项，并以状态码 1 退出。
 
 ### 本地模型代理
 
@@ -104,7 +126,7 @@ Checkout 目录的优先级是 `--checkout-dir`，然后是原生 Windows 上的
 | --- | --- | --- |
 | [`analyze-diff`](skills/analyze-diff/SKILL.md) | 解释 git diff、提交范围、分支对比或粘贴的变更集 | 把原始变更证据整理成面向发布的摘要、功能变更列表、风险说明、测试缺口和发布说明草稿。 |
 | [`diagnose-ai-workflow`](skills/diagnose-ai-workflow/SKILL.md) | 审计 prompt、Agent 工作流、工具链、多 Agent 系统或生产就绪度 | 基于现有证据，从 prompt、上下文、工具、架构、安全、可靠性和系统性能等维度评估工作流健康度。 |
-| [`hagency-cli`](skills/hagency-cli/SKILL.md) | 使用 Hagency Kit CLI 管理 source、profile、skill、profile 初始化或本地模型代理 | 帮助 Agent 管理 Hagency workspace 内容，并运行 provider 级 Responses/Chat 代理接口。 |
+| [`hagency-cli`](skills/hagency-cli/SKILL.md) | 使用 Hagency Kit CLI 管理 source、profile、skill、项目构建产物清理、profile 初始化或本地模型代理 | 帮助 Agent 管理 Hagency workspace 内容，安全预览项目构建产物清理，并运行 provider 级 Responses/Chat 代理接口。 |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | 调查应用、服务器、JSON、CI 或轮转 gzip 日志 | 通过采样和分析日志解释故障、错误峰值、慢请求、流量模式和事故信号，同时控制证据范围并做脱敏处理。 |
 
 ## Profiles

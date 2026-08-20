@@ -68,6 +68,8 @@ from .sources import (
     SourceSyncError,
     sync_source,
 )
+from .space.purge import PurgeRequest, edit_purge_paths, purge_space
+from .space.render import render_paths_edit_report, render_purge_report
 from .workspace import init_workspace, resolve_workspace_root, workspace_config_path
 
 
@@ -921,7 +923,7 @@ def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
 
 
 app = make_app(
-    help_text="Manage Hagency workspaces, profiles, sources, and local services.",
+    help_text="Manage Hagency workspaces, profiles, sources, local services, and disk space.",
     add_completion=True,
 )
 source_app = make_app(help_text="Manage workspace sources.", add_completion=False)
@@ -930,6 +932,7 @@ skill_app = make_app(
 )
 profile_app = make_app(help_text="Manage profiles.", add_completion=False)
 serve_app = make_app(help_text="Manage local Hagency services.", add_completion=False)
+space_app = make_app(help_text="Inspect and reclaim disk space.", add_completion=False)
 
 app.add_typer(source_app, name="source")
 app.add_typer(source_app, name="s", help="Alias for source.")
@@ -937,6 +940,7 @@ app.add_typer(skill_app, name="skill")
 app.add_typer(profile_app, name="profile")
 app.add_typer(profile_app, name="p", help="Alias for profile.")
 app.add_typer(serve_app, name="serve")
+app.add_typer(space_app, name="space")
 
 
 @app.command("init", help="Initialize a Hagency workspace.")
@@ -959,6 +963,56 @@ def init_cli(
     ] = False,
 ) -> None:
     init_workspace_command(root=root, force=force, dry_run=dry_run)
+
+
+@space_app.command("purge", help="Find and remove rebuildable project artifacts.")
+def space_purge_cli(
+    paths: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Optional directories to scan instead of configured roots",
+            metavar="PATH...",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Preview selected removals without changing files"
+        ),
+    ] = False,
+    edit_paths: Annotated[
+        bool,
+        typer.Option("--paths", help="Edit the configured purge scan directories"),
+    ] = False,
+) -> None:
+    selected_paths = list(paths or [])
+    if edit_paths and (selected_paths or dry_run):
+        raise typer.BadParameter(
+            "--paths cannot be combined with PATH or --dry-run", param_hint="--paths"
+        )
+
+    try:
+        if edit_paths:
+            report = edit_purge_paths()
+            render_paths_edit_report(report)
+        else:
+            from .space.questionary_ui import QuestionaryPurgeUI
+
+            request = PurgeRequest(
+                paths=tuple(
+                    Path(os.path.abspath(expand_path(value, Path.cwd())))
+                    for value in selected_paths
+                ),
+                dry_run=dry_run,
+            )
+            report = purge_space(request, ui=QuestionaryPurgeUI())
+            render_purge_report(report)
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+
+    if report.exit_code:
+        raise typer.Exit(report.exit_code)
 
 
 @serve_app.command("start", help="Start a service in the background.")

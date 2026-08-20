@@ -21,6 +21,9 @@ from hagency_cli import cli
 from hagency_cli import common as common_module
 from hagency_cli import profiles as profile_module
 from hagency_cli import sources as source_module
+from hagency_cli.space import purge as purge_module
+from hagency_cli.space import questionary_ui as questionary_ui_module
+from hagency_cli.space import render as space_render_module
 
 
 class CliTests(unittest.TestCase):
@@ -254,6 +257,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(project["scripts"], {"hgc": "hagency_cli.cli:main"})
         self.assertIn("multidict>=6,<7", project["dependencies"])
+        self.assertIn("questionary>=2.1,<3", project["dependencies"])
 
     def test_help_and_usage_errors_are_plain_text_with_completion_enabled(self) -> None:
         stdout, stderr = self.run_cli("--help", color=True)
@@ -277,6 +281,8 @@ class CliTests(unittest.TestCase):
             ("-h",),
             ("serve", "-h"),
             ("serve", "start", "-h"),
+            ("space", "-h"),
+            ("space", "purge", "-h"),
             ("source", "-h"),
             ("source", "show", "-h"),
             ("p", "init", "-h"),
@@ -363,11 +369,19 @@ class CliTests(unittest.TestCase):
         values, stderr = self.complete_bash("hgc ", 1)
         self.assertEqual(stderr, "")
         self.assertEqual(
-            values, ["init", "source", "s", "skill", "profile", "p", "serve"]
+            values,
+            ["init", "source", "s", "skill", "profile", "p", "serve", "space"],
         )
 
         values, _stderr = self.complete_bash("hgc serve ", 2)
         self.assertEqual(values, ["start", "stop", "restart"])
+
+        values, _stderr = self.complete_bash("hgc space ", 2)
+        self.assertEqual(values, ["purge"])
+
+        values, _stderr = self.complete_bash("hgc space purge --", 3)
+        self.assertIn("--dry-run", values)
+        self.assertIn("--paths", values)
 
         values, _stderr = self.complete_bash("hgc source ", 2)
         self.assertEqual(values, ["list", "ls", "show", "add", "remove", "rm", "sync"])
@@ -376,6 +390,236 @@ class CliTests(unittest.TestCase):
         self.assertIn("--profile", values)
         self.assertIn("--reanchor", values)
         self.assertIn("--checkout-dir", values)
+
+    def test_space_purge_help_and_argument_constraints(self) -> None:
+        stdout, stderr = self.run_cli("space", "purge", "--help")
+        self.assertEqual(stderr, "")
+        self.assertIn("PATH", stdout)
+        self.assertIn("--dry-run", stdout)
+        self.assertIn("--paths", stdout)
+
+        _stdout, stderr = self.run_cli("space", "purge", ".", "--paths", expected=2)
+        self.assertIn("--paths cannot be combined", stderr)
+
+        _stdout, stderr = self.run_cli(
+            "space", "purge", "--dry-run", "--paths", expected=2
+        )
+        self.assertIn("--paths cannot be combined", stderr)
+
+    def test_cli_import_does_not_eagerly_load_questionary(self) -> None:
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import hagency_cli.cli; print('questionary' in sys.modules)",
+            ],
+            capture_output=True,
+            check=True,
+            env=environment,
+            text=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_space_purge_dispatches_normalized_paths_and_dry_run(self) -> None:
+        report = mock.Mock(exit_code=0)
+        ui = mock.sentinel.purge_ui
+        with (
+            mock.patch.object(
+                questionary_ui_module, "QuestionaryPurgeUI", return_value=ui
+            ),
+            mock.patch.object(cli, "purge_space", return_value=report) as purge_mock,
+            mock.patch.object(cli, "render_purge_report") as render_mock,
+        ):
+            self.run_cli("space", "purge", ".", "nested/..", "--dry-run")
+
+        request = purge_mock.call_args.args[0]
+        self.assertEqual(request.paths, (self.root.resolve(), self.root.resolve()))
+        self.assertTrue(request.dry_run)
+        self.assertEqual(purge_mock.call_args.kwargs, {"ui": ui})
+        render_mock.assert_called_once_with(report)
+
+    def test_space_purge_preserves_symlink_path_for_core_validation(self) -> None:
+        scan_link = self.root / "scan-link"
+        try:
+            scan_link.symlink_to(self.root / "local-source", target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"could not create symlink: {exc}")
+
+        with (
+            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(
+                cli, "purge_space", return_value=mock.Mock(exit_code=0)
+            ) as purge_mock,
+            mock.patch.object(cli, "render_purge_report"),
+        ):
+            self.run_cli("space", "purge", "scan-link")
+
+        request = purge_mock.call_args.args[0]
+        self.assertEqual(request.paths, (scan_link.absolute(),))
+
+    def test_space_purge_questionary_prompts_preserve_safe_defaults(self) -> None:
+        choice = mock.Mock(label="project | target | 1 KiB", id="choice-id")
+        choice.preselected = True
+        choice.project_path = self.root / "project"
+        checkbox_prompt = mock.Mock()
+        checkbox_prompt.unsafe_ask.return_value = ["choice-id"]
+        with mock.patch.object(
+            questionary_ui_module.questionary,
+            "checkbox",
+            return_value=checkbox_prompt,
+        ) as checkbox_mock:
+            selected = questionary_ui_module.QuestionaryPurgeUI().select((choice,))
+
+        self.assertEqual(selected, ("choice-id",))
+        checkbox_choices = checkbox_mock.call_args.kwargs["choices"]
+        self.assertIsInstance(
+            checkbox_choices[0], questionary_ui_module.questionary.Separator
+        )
+        self.assertEqual(checkbox_choices[0].title, str(choice.project_path))
+        checkbox_choice = checkbox_choices[1]
+        self.assertEqual(checkbox_choice.title, choice.label)
+        self.assertEqual(checkbox_choice.value, choice.id)
+        self.assertTrue(checkbox_choice.checked)
+        checkbox_prompt.unsafe_ask.assert_called_once_with()
+
+        confirm_prompt = mock.Mock()
+        confirm_prompt.unsafe_ask.return_value = True
+        exact_path = self.root / "project" / "target"
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                questionary_ui_module.questionary,
+                "confirm",
+                return_value=confirm_prompt,
+            ) as confirm_mock,
+            contextlib.redirect_stdout(output),
+        ):
+            confirmed = questionary_ui_module.QuestionaryPurgeUI().confirm_exact(
+                (exact_path,), 1024
+            )
+
+        self.assertTrue(confirmed)
+        self.assertIn(str(exact_path), output.getvalue())
+        self.assertEqual(confirm_mock.call_args.kwargs["default"], False)
+        confirm_prompt.unsafe_ask.assert_called_once_with()
+
+    def test_space_purge_rendering_shows_exact_plan_results_and_path_edits(
+        self,
+    ) -> None:
+        selected_path = self.root / "old-project" / "node_modules"
+        recent_path = self.root / "active-project" / "target"
+        choices = (
+            purge_module.PurgeChoice(
+                id="old",
+                exact_path=selected_path,
+                project_path=selected_path.parent,
+                artifact_kind="node_modules",
+                size_bytes=1024,
+                activity=purge_module.Activity.OLD,
+                preselected=True,
+            ),
+            purge_module.PurgeChoice(
+                id="recent",
+                exact_path=recent_path,
+                project_path=recent_path.parent,
+                artifact_kind="target",
+                size_bytes=None,
+                activity=purge_module.Activity.RECENT,
+                preselected=False,
+            ),
+        )
+        preview = purge_module.PurgeReport(
+            disposition=purge_module.PurgeDisposition.PREVIEW,
+            roots=(self.root,),
+            choices=choices,
+            selected_paths=(selected_path,),
+            results=(
+                purge_module.PurgeItemResult(
+                    exact_path=selected_path,
+                    disposition=purge_module.ItemDisposition.WOULD_REMOVE,
+                    size_bytes=1024,
+                ),
+            ),
+            issues=(
+                purge_module.PurgeIssue(
+                    "scan_notice",
+                    self.root,
+                    "one directory was unreadable",
+                    is_failure=False,
+                ),
+            ),
+            known_bytes=1024,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            space_render_module.render_purge_report(preview)
+
+        rendered = stdout.getvalue()
+        self.assertIn(
+            f"[selected] old | node_modules | 1.0 KiB | {selected_path}", rendered
+        )
+        self.assertIn(f"[ ] recent | target | size unknown | {recent_path}", rendered)
+        self.assertIn(f"Would remove: {selected_path}", rendered)
+        self.assertIn("Preview complete: 1 artifact(s), known size 1.0 KiB.", rendered)
+        self.assertIn("Warning [scan_notice]", stderr.getvalue())
+
+        edit_report = purge_module.PathsEditReport(
+            config_path=self.root / "space-purge-paths",
+            before_roots=(self.root / "before",),
+            after_roots=(self.root / "after",),
+            editor="vi",
+            issues=(),
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            space_render_module.render_paths_edit_report(edit_report)
+        rendered = stdout.getvalue()
+        self.assertIn("Before:\n", rendered)
+        self.assertIn(str(self.root / "before"), rendered)
+        self.assertIn("After:\n", rendered)
+        self.assertIn(str(self.root / "after"), rendered)
+
+    def test_space_purge_paths_dispatch_and_exit_mapping(self) -> None:
+        paths_report = mock.Mock(exit_code=0)
+        with (
+            mock.patch.object(
+                cli, "edit_purge_paths", return_value=paths_report
+            ) as edit_mock,
+            mock.patch.object(cli, "render_paths_edit_report") as render_mock,
+        ):
+            self.run_cli("space", "purge", "--paths")
+        edit_mock.assert_called_once_with()
+        render_mock.assert_called_once_with(paths_report)
+
+        failed_paths_report = mock.Mock(exit_code=5)
+        with (
+            mock.patch.object(
+                cli, "edit_purge_paths", return_value=failed_paths_report
+            ),
+            mock.patch.object(cli, "render_paths_edit_report"),
+        ):
+            self.run_cli("space", "purge", "--paths", expected=5)
+
+        purge_report = mock.Mock(exit_code=7)
+        with (
+            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(cli, "purge_space", return_value=purge_report),
+            mock.patch.object(cli, "render_purge_report"),
+        ):
+            self.run_cli("space", "purge", expected=7)
+
+        with (
+            mock.patch.object(questionary_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(cli, "purge_space", side_effect=KeyboardInterrupt),
+        ):
+            self.run_cli("space", "purge", expected=130)
 
     def test_bash_completion_includes_workspace_catalog_values(self) -> None:
         values, _stderr = self.complete_bash("hgc source show ", 3)

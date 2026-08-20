@@ -1,11 +1,11 @@
 ---
 name: hagency-cli
-description: Use the Hagency Kit CLI for workspace, source, skill, profile, and local model-proxy workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, `hagency-config.toml`, `hagency-model-proxy.toml`, provider-level OpenAI Responses or Chat Completions proxying, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
+description: Use the Hagency Kit CLI for workspace, source, skill, profile, project artifact purge, and local model-proxy workflows. Trigger for `hgc`, source syncs, skill discovery or installation, profile skill edits, profile initialization, project artifact cleanup, `hagency-config.toml`, `hagency-model-proxy.toml`, provider-level OpenAI Responses or Chat Completions proxying, generated profile skill outputs, and updates to `skills/hagency-cli/SKILL.md`.
 ---
 
 # Hagency CLI
 
-Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, generated profile skill links, and the loopback model proxy. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
+Use the repo-local `hgc` CLI to inspect and manage Hagency workspaces, sources, skills, profiles, generated profile skill links, rebuildable project artifacts, and the loopback model proxy. If the CLI cannot satisfy the user's request, explain the gap and ask whether to improve `hagency-cli`.
 
 ## Workspace Context
 
@@ -104,6 +104,25 @@ This is a breaking change to `-p`: migrate `hgc p init -p <root> <profile>` to `
 
 Use `hgc --install-completion` to install completion for the current shell, or `hgc --show-completion <shell>` to inspect the generated script. Completion includes command aliases and local source, profile, skill, selector, and directory values. It is read-only and silently returns no dynamic candidates when workspace data is missing, invalid, unreadable, or unsynced.
 
+## Purge Project Artifacts
+
+Use `hgc space purge` to remove rebuildable dependency directories, build output, tool caches, and valid `CACHEDIR.TAG` directories from projects. Always preview first because selected artifacts are permanently deleted rather than moved to Trash or the Recycle Bin.
+
+```sh
+hgc space purge --dry-run
+hgc space purge
+hgc space purge <path>...
+hgc space purge --paths
+```
+
+Positional paths are temporary scan roots and replace both the saved path list and automatic discovery for that invocation. With no positional paths, a nonempty per-user `space-purge-paths` file replaces automatic discovery; a missing or effectively empty file restores it. `--paths` is an exclusive configuration mode: it creates the commented path file when needed, reports current root status, opens `$VISUAL`, `$EDITOR`, `notepad.exe` on Windows, `open -W -t` on macOS, or `vi` elsewhere, then reloads the result. Entries must be absolute or `~` paths, one per line; blanks and `#` comments are ignored.
+
+The config file is `${XDG_CONFIG_HOME:-~/.config}/hagency/space-purge-paths` on Linux and WSL, `~/Library/Application Support/Hagency/space-purge-paths` on macOS, and `%APPDATA%\Hagency\space-purge-paths` on Windows, with `~/.config/hagency/space-purge-paths` as the Windows fallback. Automatic discovery uses the standard home project roots, `~/.codex/worktrees`, `~/.claude/worktrees`, and eligible direct home-directory project containers. It does not automatically enter system or cloud-storage roots.
+
+In an interactive TTY, Questionary preselects only candidates whose last artifact activity is strictly more than seven days old. Recent and uncertain candidates remain unselected. A normal purge prints the selected absolute paths and requires a final confirmation that defaults to No. `--dry-run` still opens the multi-select, then previews the selected entries without the destructive confirmation. A non-TTY invocation skips the TUI and previews all candidates with their default selection status, even without `--dry-run`.
+
+The scanner excludes Git-tracked candidates, including an entire candidate containing a nested Git repository with tracked files, plus symlinks, junctions, reparse paths, mount points, zero-size candidates, global Xcode `DerivedData`, non-Composer `vendor`, and `bin` outside `.NET` projects. Generic artifact names require enclosing project evidence. Never infer that an agent worktree itself is disposable; only discovered artifact directories inside it are candidates. Permanent deletion is best-effort: if it fails partway through, some contents may already be gone; report the failure, continue with later selections, and treat exit status 1 as incomplete cleanup.
+
 ## Serve a Local Model Proxy
 
 Use `hgc serve start --model-proxy` when a local client needs both OpenAI Responses and Chat Completions interfaces backed by provider-level configuration. The default config path is `<workspace>/hagency-model-proxy.toml`; use `--config` instead of `--root` for an explicit file. Only loopback IP addresses are accepted.
@@ -154,5 +173,6 @@ class Hook:
 ## Safety and Boundaries
 
 - Prefer `--dry-run` before commands that mutate checkouts, profile configs, source configs, files, symlinks, or copied skill directories.
+- Treat `space purge` as permanent deletion: inspect its preview and exact absolute-path confirmation before approving cleanup.
 - Do not expose the model proxy through a separate port forward or public listener without adding an appropriate downstream authentication layer.
 - Do not create `agents/openai.yaml` for this repo-local skill unless the user explicitly asks for it.

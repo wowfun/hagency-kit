@@ -6,7 +6,7 @@ Practical agent skills for reviewing, diagnosing, and operating AI-assisted engi
 
 ## Hagency CLI
 
-The `hgc` CLI manages Hagency workspaces, sources, skill discovery and installation, profiles, and generated profile skill outputs. Source registry entries live in [`hagency-config.toml`](hagency-config.toml), and profile configs live under `profiles/<name>/config.toml`.
+The `hgc` CLI manages Hagency workspaces, sources, skill discovery and installation, profiles, generated profile skill outputs, and project artifact cleanup. Source registry entries live in [`hagency-config.toml`](hagency-config.toml), and profile configs live under `profiles/<name>/config.toml`.
 
 ```sh
 uv tool install -e tools/hagency-cli
@@ -19,6 +19,7 @@ hgc skill add <source>:<selector> -d <workspace>
 hgc skill add <source>:<selector> --global
 hgc p init -p <xxx>/skills <profile>
 hgc p init -d <workspace> <profile>
+hgc space purge --dry-run
 hgc serve start --model-proxy
 ```
 
@@ -30,6 +31,27 @@ hgc --show-completion bash
 ```
 
 Completion covers commands, aliases, options, directories, and locally available source, profile, skill, and selector values. It respects the current directory, `--root`, and `--checkout-dir`; missing, invalid, unreadable, or unsynced workspace data is silently omitted.
+
+### Project artifact purge
+
+`hgc space purge` finds rebuildable project artifacts such as dependency directories, build output, test and tool caches, and directories carrying a valid `CACHEDIR.TAG`. Start with a preview:
+
+```sh
+hgc space purge --dry-run
+hgc space purge
+hgc space purge ~/Work/client-a ~/scratch/project-b
+hgc space purge --paths
+```
+
+Positional `PATH...` values are temporary scan roots for that invocation and replace both the saved path list and automatic discovery. Without positional paths, a nonempty per-user path file replaces automatic discovery; a missing or effectively empty file restores the automatic roots. Use `--paths` by itself to create or edit this file, show which configured roots exist, and reopen the effective list after the editor exits. It uses `$VISUAL`, then `$EDITOR`, then `notepad.exe` on Windows, `open -W -t` on macOS, or `vi` elsewhere. Blank lines and `#` comments are ignored, and each entry must be an absolute or `~` path.
+
+The path file is `${XDG_CONFIG_HOME:-~/.config}/hagency/space-purge-paths` on Linux and WSL, `~/Library/Application Support/Hagency/space-purge-paths` on macOS, and `%APPDATA%\Hagency\space-purge-paths` on Windows. Windows falls back to `~/.config/hagency/space-purge-paths` when `APPDATA` is unavailable.
+
+Automatic discovery checks existing `~/www`, `~/dev`, `~/Projects`, `~/GitHub`, `~/Code`, `~/Workspace`, `~/Repos`, `~/Development`, `~/.codex/worktrees`, and `~/.claude/worktrees`, plus direct children of the home directory that contain project markers within two levels. It does not automatically search system or cloud-storage roots.
+
+In a TTY, Questionary presents a multi-select list. Candidates whose last artifact activity is strictly more than seven days old are selected by default; recent or uncertain candidates remain unselected. A normal purge then prints every selected absolute path and asks for a second confirmation that defaults to No. With `--dry-run`, the multi-select still opens, but the selected entries are only previewed and the destructive confirmation is skipped. A non-TTY run skips the TUI and previews all candidates with their default selection status, even when `--dry-run` is omitted.
+
+Purge deletes selected artifacts permanently rather than moving them to Trash or the Recycle Bin. It excludes Git-tracked candidates, including an entire candidate that contains a nested Git repository with tracked files, plus symlinks, junctions, reparse paths, mount points, zero-size candidates, the global Xcode `DerivedData` directory, non-Composer `vendor` directories, and `bin` directories outside `.NET` projects. Generic artifact names are accepted only with project evidence. If permanent deletion fails partway through because of permissions, a filesystem change, or another I/O error, some contents may already be gone; the command reports the failure, continues with later selections, and exits with status 1.
 
 ### Local model proxy
 
@@ -104,7 +126,7 @@ Normal sync refuses non-fast-forward updates. If an upstream source rewrites his
 | --- | --- | --- |
 | [`analyze-diff`](skills/analyze-diff/SKILL.md) | Explaining git diffs, commit ranges, branch comparisons, or pasted changesets | Turns raw change evidence into release-oriented summaries, feature change lists, risk notes, testing gaps, and draft release notes. |
 | [`diagnose-ai-workflow`](skills/diagnose-ai-workflow/SKILL.md) | Auditing prompts, agent workflows, toolchains, multi-agent systems, or production readiness | Scores workflow health across prompts, context, tools, architecture, safety, reliability, and system performance using available evidence. |
-| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skills, profile initialization, or the local model proxy | Helps agents manage Hagency workspace content and run provider-level Responses/Chat proxy endpoints. |
+| [`hagency-cli`](skills/hagency-cli/SKILL.md) | Using the Hagency Kit CLI for sources, profiles, skills, project artifact cleanup, profile initialization, or the local model proxy | Helps agents manage Hagency workspace content, safely preview project artifact cleanup, and run provider-level Responses/Chat proxy endpoints. |
 | [`log-analyzer`](skills/log-analyzer/SKILL.md) | Investigating application, server, JSON, CI, or rotated gzip logs | Samples and analyzes logs to explain failures, error spikes, slow requests, traffic patterns, and incident signals while keeping evidence bounded and redacted. |
 
 ## Profiles

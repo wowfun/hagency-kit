@@ -20,8 +20,8 @@ from hagency_cli.commands import file as file_commands
 from hagency_cli.commands.shared import CommandGroup
 from hagency_cli.files.sync.models import SyncDirection
 from hagency_cli.workspace.discovery import init_workspace
-from hagency_cli.workspace.git import run
 from hagency_cli.workspace.errors import WorkspaceError
+from hagency_cli.workspace.git import run
 from hagency_cli.workspace.operations.profiles import (
     add_profile,
     apply_profile_to_directory,
@@ -115,12 +115,24 @@ class ArchitectureTests(unittest.TestCase):
                     (name, imports),
                 )
 
-    def test_workspace_import_graph_has_no_cycles(self):
+    def test_business_import_graph_has_no_cycles(self):
+        class RuntimeImports(ast.NodeTransformer):
+            def visit_If(self, node):
+                if isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING":
+                    return [self.visit(child) for child in node.orelse]
+                return self.generic_visit(node)
+
         graph = {}
-        for path in (PACKAGE / "workspace").rglob("*.py"):
+        for path in [
+            p
+            for package in ("workspace", "files")
+            for p in (PACKAGE / package).rglob("*.py")
+        ]:
             parts = path.relative_to(PACKAGE.parent).with_suffix("").parts
             name = ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
-            graph[name] = imported_modules(path, ast.parse(path.read_text()))
+            graph[name] = imported_modules(
+                path, RuntimeImports().visit(ast.parse(path.read_text()))
+            )
         visited = set()
 
         def visit(name, trail):
@@ -324,7 +336,7 @@ class CommandTreeTests(unittest.TestCase):
                 "rm",
                 "apply",
             },
-            "file": {"init", "push", "pull", "sync", "pack", "apply", "purge"},
+            "file": {"init", "push", "pull", "sync", "pack", "apply", "purge", "clean"},
             "service": {"model-proxy"},
         }
         for name, commands in expected.items():

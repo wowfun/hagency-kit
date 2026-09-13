@@ -8,9 +8,6 @@ from typing import Protocol
 MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 
 
-MIN_SCAN_DEPTH = 1
-
-
 MAX_SCAN_DEPTH = 6
 
 
@@ -18,46 +15,6 @@ CACHEDIR_TAG_NAME = "CACHEDIR.TAG"
 
 
 CACHEDIR_TAG_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
-
-
-PURGE_TARGETS = frozenset(
-    {
-        "node_modules",
-        "target",
-        "build",
-        "dist",
-        "venv",
-        ".venv",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".tox",
-        ".nox",
-        ".ruff_cache",
-        ".gradle",
-        ".terragrunt-cache",
-        "__pycache__",
-        ".next",
-        ".nuxt",
-        ".output",
-        "vendor",
-        "bin",
-        "obj",
-        ".turbo",
-        ".parcel-cache",
-        ".dart_tool",
-        ".zig-cache",
-        "zig-out",
-        ".angular",
-        ".svelte-kit",
-        ".astro",
-        "coverage",
-        "DerivedData",
-        "Pods",
-        ".cxx",
-        ".expo",
-        ".build",
-    }
-)
 
 
 MONOREPO_INDICATORS = (
@@ -147,13 +104,27 @@ SCAN_PRUNE_NAMES = frozenset(
 SCAN_PRUNE_NAMES_CASEFOLD = frozenset(name.casefold() for name in SCAN_PRUNE_NAMES)
 
 
+def _unsafe_text(value: str) -> bool:
+    return any(
+        ord(c) < 32
+        or ord(c) == 127
+        or c
+        in "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+        for c in value
+    )
+
+
+def _display_text(value: object) -> str:
+    return "".join(f"\\u{ord(c):04x}" if _unsafe_text(c) else c for c in str(value))
+
+
 class Activity(str, Enum):
     OLD = "old"
     RECENT = "recent"
     UNCERTAIN = "uncertain"
 
 
-class PurgeDisposition(str, Enum):
+class CleanupDisposition(str, Enum):
     PREVIEW = "preview"
     CANCELLED = "cancelled"
     COMPLETED = "completed"
@@ -171,10 +142,51 @@ class ItemDisposition(str, Enum):
 class PurgeRequest:
     paths: tuple[Path, ...] = ()
     dry_run: bool = False
+    recursive: bool = False
+    config: Path | None = None
+    include_unverified: bool = False
 
 
 @dataclass(frozen=True)
-class PurgeChoice:
+class CleanRequest:
+    agents: tuple[str, ...] = ()
+    dry_run: bool = False
+    config: Path | None = None
+
+
+@dataclass(frozen=True)
+class CleanupRule:
+    id: str
+    command: str
+    source: str
+    include: tuple[str, ...]
+    exclude: tuple[str, ...] = ()
+    enabled: bool = True
+    root: Path | None = None
+    min_age_days: int = 0
+    preselect_after_days: int = 0
+    keep_previous: int = 1
+    origin: str = "builtin"
+
+    @property
+    def agent(self) -> str | None:
+        return self.source.split(".")[0] if "." in self.source else None
+
+
+@dataclass(frozen=True)
+class RuleScope:
+    rule: CleanupRule
+    root: Path
+
+
+@dataclass(frozen=True)
+class RulesSnapshot:
+    rules: tuple[CleanupRule, ...]
+    files: tuple[tuple[Path, str | None], ...]
+
+
+@dataclass(frozen=True)
+class CleanupCandidate:
     id: str
     exact_path: Path
     project_path: Path
@@ -182,6 +194,23 @@ class PurgeChoice:
     size_bytes: int | None
     activity: Activity
     preselected: bool
+    rule_ids: tuple[str, ...] = ()
+    rule_origins: tuple[str, ...] = ()
+    entry_kind: str = "directory"
+    group: str = ""
+    project_verified: bool = True
+    artifact_unverified_reason: str | None = None
+
+    @property
+    def verification_note(self) -> str:
+        notes = []
+        if not self.project_verified:
+            notes.append("project context unverified")
+        if self.artifact_unverified_reason:
+            notes.append(
+                f"artifact purpose unverified: {self.artifact_unverified_reason}"
+            )
+        return " | ".join(notes)
 
     @property
     def label(self) -> str:
@@ -189,21 +218,27 @@ class PurgeChoice:
             _format_bytes(self.size_bytes) if self.size_bytes is not None else "unknown"
         )
         return (
-            f"{self.project_path.name} | {self.artifact_kind} | {size} | "
-            f"{self.activity.value} | {self.exact_path}"
+            f"{self.project_path.name} | {self.artifact_kind} | {self.entry_kind} | {size} | "
+            f"{self.activity.value} | {self.exact_path} | "
+            f"rules: {', '.join(self.rule_ids)} | config: {', '.join(self.rule_origins)}"
+            + (f" | {self.verification_note}" if self.verification_note else "")
         )
 
 
-class PurgeUI(Protocol):
+class CleanupUI(Protocol):
     def is_interactive(self) -> bool: ...
 
-    def select(self, choices: tuple[PurgeChoice, ...]) -> tuple[str, ...] | None: ...
+    def select(
+        self, choices: tuple[CleanupCandidate, ...]
+    ) -> tuple[str, ...] | None: ...
 
     def confirm_exact(self, paths: tuple[Path, ...], known_bytes: int) -> bool: ...
 
+    def present_plan(self, plan: CleanupPlan) -> None: ...
+
 
 @dataclass(frozen=True)
-class PurgeIssue:
+class CleanupIssue:
     code: str
     path: Path | None
     message: str
@@ -211,7 +246,7 @@ class PurgeIssue:
 
 
 @dataclass(frozen=True)
-class PurgeItemResult:
+class CleanupItemResult:
     exact_path: Path
     disposition: ItemDisposition
     size_bytes: int | None
@@ -219,14 +254,16 @@ class PurgeItemResult:
 
 
 @dataclass(frozen=True)
-class PurgeReport:
-    disposition: PurgeDisposition
+class CleanupReport:
+    disposition: CleanupDisposition
     roots: tuple[Path, ...]
-    choices: tuple[PurgeChoice, ...]
+    choices: tuple[CleanupCandidate, ...]
     selected_paths: tuple[Path, ...]
-    results: tuple[PurgeItemResult, ...]
-    issues: tuple[PurgeIssue, ...]
+    results: tuple[CleanupItemResult, ...]
+    issues: tuple[CleanupIssue, ...]
     known_bytes: int = 0
+    command: str = "purge"
+    config_files: tuple[Path, ...] = ()
 
     @property
     def failed(self) -> bool:
@@ -237,7 +274,9 @@ class PurgeReport:
 
     @property
     def exit_code(self) -> int:
-        return 1 if self.failed else 0
+        return (
+            0 if self.disposition is CleanupDisposition.CANCELLED else int(self.failed)
+        )
 
 
 @dataclass(frozen=True)
@@ -246,7 +285,7 @@ class PathsEditReport:
     before_roots: tuple[Path, ...]
     after_roots: tuple[Path, ...]
     editor: str
-    issues: tuple[PurgeIssue, ...]
+    issues: tuple[CleanupIssue, ...]
 
     @property
     def failed(self) -> bool:
@@ -277,34 +316,51 @@ class _HardlinkEntry:
 
 
 @dataclass(frozen=True)
-class _PlannedCandidate:
-    choice: PurgeChoice
+class _TreeEntry:
+    relative_path: str
+    identity: _Identity
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    owner_uid: int | None = None
+
+
+@dataclass(frozen=True)
+class _BoundCandidate:
+    choice: CleanupCandidate
     root: Path
     root_identity: _Identity
     parent_identity: _Identity
     target_identity: _Identity
     git_contexts: tuple[_GitContext, ...]
     hardlink_entries: tuple[_HardlinkEntry, ...]
+    scopes: tuple[RuleScope, ...] = ()
+    exclusions: tuple[RuleScope, ...] = ()
+    agent: str | None = None
+    tree: tuple[_TreeEntry, ...] = ()
+    removed_links: frozenset[tuple[int, int]] = frozenset()
 
 
 @dataclass(frozen=True)
-class _PurgePlan:
+class CleanupPlan:
     roots: tuple[Path, ...]
-    candidates: tuple[_PlannedCandidate, ...]
-    issues: tuple[PurgeIssue, ...]
+    candidates: tuple[_BoundCandidate, ...]
+    issues: tuple[CleanupIssue, ...]
+    snapshot: RulesSnapshot | None = None
+    command: str = "purge"
 
 
 @dataclass(frozen=True)
 class _ConfiguredPaths:
     paths: tuple[Path, ...]
     has_entries: bool
-    issues: tuple[PurgeIssue, ...]
+    issues: tuple[CleanupIssue, ...]
 
 
 @dataclass(frozen=True)
 class _DiscoveredRoots:
     paths: tuple[Path, ...]
-    issues: tuple[PurgeIssue, ...]
+    issues: tuple[CleanupIssue, ...]
 
 
 def _format_bytes(value: int | None) -> str:

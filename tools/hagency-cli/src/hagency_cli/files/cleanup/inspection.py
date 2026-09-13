@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
+import sys
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
-from hagency_cli.files.purge.models import (
+from hagency_cli.files.cleanup.models import (
     CACHEDIR_TAG_NAME,
     CACHEDIR_TAG_SIGNATURE,
     MIN_AGE_SECONDS,
@@ -13,11 +19,71 @@ from hagency_cli.files.purge.models import (
     PROJECT_INDICATORS,
     SCAN_PRUNE_NAMES_CASEFOLD,
     Activity,
-    PurgeIssue,
+    CleanupIssue,
     _GitContext,
     _HardlinkEntry,
     _Identity,
+    _TreeEntry,
 )
+
+_DEADLINE: ContextVar[float | None] = ContextVar("cleanup_deadline", default=None)
+_MOUNTS: ContextVar[frozenset[Path] | None] = ContextVar("cleanup_mounts", default=None)
+
+
+def _mount_points() -> frozenset[Path]:
+    if not sys.platform.startswith("linux"):
+        return frozenset()
+    points = set()
+    with Path("/proc/self/mountinfo").open(
+        encoding="utf-8", errors="surrogateescape"
+    ) as stream:
+        for line in stream:
+            checkpoint()
+            fields = line.split()
+            if len(fields) < 10 or "-" not in fields:
+                raise OSError("could not verify Linux mount table")
+            decoded = re.sub(
+                r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4]
+            )
+            points.add(Path(decoded))
+    if not points:
+        raise OSError("could not verify Linux mount table")
+    return frozenset(points)
+
+
+@contextmanager
+def mount_check_scope() -> Iterator[None]:
+    token = _MOUNTS.set(_mount_points())
+    try:
+        yield
+    finally:
+        _MOUNTS.reset(token)
+
+
+def _is_mount(path: Path | str) -> bool:
+    if os.path.ismount(path):
+        return True
+    # ismount() alone misses bind mounts on the same filesystem.
+    points = _MOUNTS.get()
+    if points is None:
+        points = _mount_points()
+    return Path(os.path.realpath(path)) in points
+
+
+def checkpoint(deadline: float | None = None) -> None:
+    deadline = _DEADLINE.get() if deadline is None else deadline
+    if deadline is not None and time.monotonic() >= deadline:
+        raise OSError("cleanup source scan exceeded 60 seconds")
+
+
+@contextmanager
+def scan_budget(seconds: float = 60) -> Iterator[None]:
+    token = _DEADLINE.set(time.monotonic() + seconds)
+    try:
+        with mount_check_scope():
+            yield
+    finally:
+        _DEADLINE.reset(token)
 
 
 def _identity(path: Path) -> _Identity:
@@ -57,12 +123,22 @@ def _same_identity(path: Path, expected: _Identity) -> bool:
 
 
 def _canonical_key(path: Path) -> str:
-    return os.path.normcase(str(path.resolve()))
+    return os.path.normcase(str(_resolve_path(path)))
+
+
+def _resolve_path(path: Path, *, strict: bool = False) -> Path:
+    try:
+        return path.resolve(strict=strict)
+    except RuntimeError as exc:
+        # Python 3.11 reports symlink loops as RuntimeError instead of OSError.
+        raise OSError(f"cannot resolve path {path}: {exc}") from exc
 
 
 def _is_within(path: Path, root: Path, *, allow_equal: bool = False) -> bool:
+    # Links must be resolved or rejected by the caller; normalize lexical '..'
+    # before comparing containment so it cannot masquerade as a descendant.
     try:
-        relative = path.relative_to(root)
+        relative = Path(os.path.abspath(path)).relative_to(os.path.abspath(root))
     except ValueError:
         return False
     return allow_equal or bool(relative.parts)
@@ -80,8 +156,8 @@ def _has_project_marker(directory: Path) -> bool:
     return any((directory / marker).exists() for marker in PROJECT_INDICATORS)
 
 
-def _project_marker_state(directory: Path) -> tuple[bool, list[PurgeIssue]]:
-    issues: list[PurgeIssue] = []
+def _project_marker_state(directory: Path) -> tuple[bool, list[CleanupIssue]]:
+    issues: list[CleanupIssue] = []
     for marker in PROJECT_INDICATORS:
         marker_path = directory / marker
         try:
@@ -90,7 +166,7 @@ def _project_marker_state(directory: Path) -> tuple[bool, list[PurgeIssue]]:
             continue
         except OSError as exc:
             issues.append(
-                PurgeIssue(
+                CleanupIssue(
                     "discovery_stat_failed",
                     marker_path,
                     f"could not inspect project marker: {exc}",
@@ -103,8 +179,8 @@ def _project_marker_state(directory: Path) -> tuple[bool, list[PurgeIssue]]:
 
 def _contains_project_marker(
     root: Path, max_depth: int = 2
-) -> tuple[bool, list[PurgeIssue]]:
-    issues: list[PurgeIssue] = []
+) -> tuple[bool, list[CleanupIssue]]:
+    issues: list[CleanupIssue] = []
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         directory, depth = stack.pop()
@@ -129,7 +205,7 @@ def _contains_project_marker(
                             stack.append((Path(entry.path), depth + 1))
                     except OSError as exc:
                         issues.append(
-                            PurgeIssue(
+                            CleanupIssue(
                                 "discovery_stat_failed",
                                 Path(entry.path),
                                 f"could not inspect potential project directory: {exc}",
@@ -138,7 +214,7 @@ def _contains_project_marker(
                         continue
         except OSError as exc:
             issues.append(
-                PurgeIssue(
+                CleanupIssue(
                     "discovery_scan_failed",
                     directory,
                     f"could not scan potential project container: {exc}",
@@ -186,11 +262,15 @@ def _is_dotnet_bin(path: Path) -> bool:
     return has_project and ((path / "Debug").is_dir() or (path / "Release").is_dir())
 
 
-def _context_allows(path: Path, project_root: Path) -> bool:
+def _artifact_verification_reason(path: Path) -> str | None:
     if path.name == "vendor" and not (path.parent / "composer.json").is_file():
-        return False
+        return "vendor has no adjacent composer.json confirming Composer dependencies"
     if path.name == "bin" and not _is_dotnet_bin(path):
-        return False
+        return "bin lacks a .NET project with Debug or Release output"
+    return None
+
+
+def _context_protection_reason(path: Path, project_root: Path) -> str | None:
     if path.name == "DerivedData":
         parts = path.parts
         for index in range(len(parts) - 3):
@@ -200,8 +280,10 @@ def _context_allows(path: Path, project_root: Path) -> bool:
                 "Xcode",
                 "DerivedData",
             ):
-                return False
-    return _is_within(path, project_root)
+                return "global Xcode DerivedData is protected"
+    if not _is_within(path, project_root):
+        return "candidate is outside its project context"
+    return None
 
 
 def _git_context_from_marker(marker: Path) -> tuple[_GitContext | None, str | None]:
@@ -221,7 +303,7 @@ def _git_context_from_marker(marker: Path) -> tuple[_GitContext | None, str | No
         return None, f"stable Git marker identity is unavailable: {marker}"
     return (
         _GitContext(
-            root=marker.parent.resolve(),
+            root=_resolve_path(marker.parent),
             marker_identity=_Identity(
                 info.st_dev,
                 info.st_ino,
@@ -236,7 +318,7 @@ def _discover_git_contexts(
     path: Path,
 ) -> tuple[tuple[_GitContext, ...], str | None]:
     contexts: dict[str, _GitContext] = {}
-    current = path
+    current = path if path.is_dir() else path.parent
     while True:
         context, error = _git_context_from_marker(current / ".git")
         if error is not None:
@@ -247,8 +329,9 @@ def _discover_git_contexts(
             break
         current = current.parent
 
-    stack = [path]
+    stack = [path] if path.is_dir() else []
     while stack:
+        checkpoint()
         directory = stack.pop()
         try:
             with os.scandir(directory) as entries:
@@ -279,6 +362,8 @@ def _discover_git_contexts(
                 and not stat.S_ISLNK(info.st_mode)
                 and not _is_reparse_stat(info)
             ):
+                if _is_mount(entry_path):
+                    return (), f"mount point inside candidate: {entry_path}"
                 stack.append(entry_path)
 
     return tuple(contexts[key] for key in sorted(contexts)), None
@@ -286,6 +371,8 @@ def _discover_git_contexts(
 
 def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | None]:
     try:
+        checkpoint()
+        deadline = _DEADLINE.get()
         relative = path.relative_to(git_root).as_posix()
         git_environment = {
             key: value
@@ -307,7 +394,9 @@ def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | N
             capture_output=True,
             check=False,
             env=git_environment,
-            timeout=10,
+            timeout=min(10, max(0.001, deadline - time.monotonic()))
+            if deadline
+            else 10,
         )
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
@@ -319,25 +408,58 @@ def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | N
 
 def _measure_candidate(
     path: Path,
-    now: float,
+    now_ns: int,
+    *,
+    inspect_entry: Callable[[Path, os.stat_result], str | None] | None = None,
+    tree: list[_TreeEntry] | None = None,
 ) -> tuple[int | None, Activity, str | None, tuple[_HardlinkEntry, ...]]:
     seen: set[tuple[int, int]] = set()
     hardlink_entries: list[_HardlinkEntry] = []
     total = 0
-    newest = 0.0
+    newest = 0
     stack = [path]
     try:
         while stack:
+            checkpoint()
             current = stack.pop()
             info = current.stat(follow_symlinks=False)
+            if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
+                return (
+                    None,
+                    Activity.UNCERTAIN,
+                    f"protected: foreign owner uid {info.st_uid} at {current}",
+                    (),
+                )
+            if inspect_entry is not None:
+                reason = inspect_entry(current, info)
+                if reason:
+                    return None, Activity.UNCERTAIN, reason, ()
+            if tree is not None:
+                tree.append(
+                    _TreeEntry(
+                        current.relative_to(path).as_posix(),
+                        _Identity(info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)),
+                        info.st_size,
+                        info.st_mtime_ns,
+                        info.st_ctime_ns,
+                        info.st_uid if hasattr(os, "geteuid") else None,
+                    )
+                )
             if stat.S_ISLNK(info.st_mode) or _is_reparse_stat(info):
-                newest = max(newest, info.st_mtime)
+                newest = max(newest, info.st_mtime_ns)
                 continue
-            if stat.S_ISDIR(info.st_mode) and os.path.ismount(current):
+            if _is_mount(current):
                 return (
                     None,
                     Activity.UNCERTAIN,
                     f"refusing to measure mount point at {current}",
+                    (),
+                )
+            if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
+                return (
+                    None,
+                    Activity.UNCERTAIN,
+                    f"unsupported filesystem entry: {current}",
                     (),
                 )
             identity = (info.st_dev, info.st_ino)
@@ -353,7 +475,7 @@ def _measure_candidate(
                 total += allocated
                 if info.st_ino and info.st_nlink > 1 and not stat.S_ISDIR(info.st_mode):
                     hardlink_entries.append(_HardlinkEntry(identity, allocated))
-            newest = max(newest, info.st_mtime)
+            newest = max(newest, info.st_mtime_ns)
             if not stat.S_ISDIR(info.st_mode):
                 continue
             with os.scandir(current) as entries:
@@ -366,5 +488,11 @@ def _measure_candidate(
             (),
         )
 
-    activity = Activity.OLD if newest < now - MIN_AGE_SECONDS else Activity.RECENT
+    if tree is not None:
+        tree.sort(key=lambda entry: entry.relative_path)
+    activity = (
+        Activity.OLD
+        if newest < now_ns - MIN_AGE_SECONDS * 1_000_000_000
+        else Activity.RECENT
+    )
     return total, activity, None, tuple(hardlink_entries)

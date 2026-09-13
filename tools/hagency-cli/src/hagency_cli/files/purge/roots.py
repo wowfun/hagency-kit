@@ -8,24 +8,26 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from hagency_cli.files.purge.inspection import (
+from hagency_cli.files.cleanup.inspection import (
     _canonical_key,
     _contains_project_marker,
     _expand_config_path,
     _has_link_or_reparse_component,
     _identity,
     _is_reparse_stat,
+    _resolve_path,
 )
-from hagency_cli.files.purge.models import (
+from hagency_cli.files.cleanup.models import (
     CLOUD_HOME_CHILD_PREFIXES,
     DEFAULT_ROOT_NAMES,
     EXCLUDED_HOME_CHILDREN,
     EXPLICIT_HIDDEN_ROOTS,
+    CleanupIssue,
     PathsEditReport,
-    PurgeIssue,
     PurgeRequest,
     _ConfiguredPaths,
     _DiscoveredRoots,
+    _unsafe_text,
 )
 
 
@@ -64,7 +66,7 @@ def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
             (),
             True,
             (
-                PurgeIssue(
+                CleanupIssue(
                     "config_read_failed",
                     config_path,
                     f"could not inspect path config: {exc}",
@@ -80,7 +82,7 @@ def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
             (),
             True,
             (
-                PurgeIssue(
+                CleanupIssue(
                     "config_read_failed",
                     config_path,
                     "path config must be a regular file, not a link or reparse point",
@@ -94,7 +96,7 @@ def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
             (),
             True,
             (
-                PurgeIssue(
+                CleanupIssue(
                     "config_read_failed",
                     config_path,
                     f"could not read path config: {exc}",
@@ -103,7 +105,7 @@ def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
         )
 
     paths: list[Path] = []
-    issues: list[PurgeIssue] = []
+    issues: list[CleanupIssue] = []
     has_entries = False
     for number, raw_line in enumerate(lines, start=1):
         line = raw_line.strip()
@@ -113,7 +115,7 @@ def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
         path = _expand_config_path(line, home)
         if not path.is_absolute():
             issues.append(
-                PurgeIssue(
+                CleanupIssue(
                     "config_path_not_absolute",
                     config_path,
                     f"line {number} must be an absolute or ~ path: {line}",
@@ -130,7 +132,7 @@ def _autodiscover_roots(
     environ = os.environ if environ is None else environ
     candidates = [home / name for name in DEFAULT_ROOT_NAMES]
     candidates.extend(home / relative for relative in EXPLICIT_HIDDEN_ROOTS)
-    issues: list[PurgeIssue] = []
+    issues: list[CleanupIssue] = []
     excluded_names = {name.casefold() for name in EXCLUDED_HOME_CHILDREN}
     explicit_cloud_roots = {
         _canonical_key(Path(value).expanduser())
@@ -159,7 +161,7 @@ def _autodiscover_roots(
                         continue
                 except OSError as exc:
                     issues.append(
-                        PurgeIssue(
+                        CleanupIssue(
                             "discovery_stat_failed",
                             path,
                             f"could not inspect home directory entry: {exc}",
@@ -174,7 +176,7 @@ def _autodiscover_roots(
         return _DiscoveredRoots(
             (),
             (
-                PurgeIssue(
+                CleanupIssue(
                     "discovery_scan_failed",
                     home,
                     f"could not scan home directory: {exc}",
@@ -189,13 +191,13 @@ def _autodiscover_roots(
             info = path.stat(follow_symlinks=False)
             if not stat.S_ISDIR(info.st_mode) or _is_reparse_stat(info):
                 continue
-            resolved = path.resolve()
+            resolved = _resolve_path(path)
             key = _canonical_key(resolved)
         except FileNotFoundError:
             continue
         except OSError as exc:
             issues.append(
-                PurgeIssue(
+                CleanupIssue(
                     "discovery_stat_failed",
                     path,
                     f"could not inspect automatic purge root: {exc}",
@@ -210,22 +212,20 @@ def _autodiscover_roots(
 
 def _validate_roots(
     raw_paths: tuple[Path, ...], home: Path
-) -> tuple[tuple[Path, ...], tuple[PurgeIssue, ...]]:
+) -> tuple[tuple[Path, ...], tuple[CleanupIssue, ...]]:
     roots: list[Path] = []
-    issues: list[PurgeIssue] = []
+    issues: list[CleanupIssue] = []
     seen: set[tuple[int, int] | str] = set()
-    resolved_home = home.resolve()
+    resolved_home = _resolve_path(home)
 
     for raw_path in raw_paths:
         path = raw_path if raw_path.is_absolute() else (Path.cwd() / raw_path)
         try:
-            if any(
-                ord(character) < 32 or ord(character) == 127 for character in str(path)
-            ):
+            if _unsafe_text(str(path)):
                 raise ValueError("control characters are not allowed in purge roots")
             if _has_link_or_reparse_component(path):
                 raise ValueError("symlink, junction, or reparse roots are not allowed")
-            resolved = path.resolve(strict=True)
+            resolved = _resolve_path(path, strict=True)
             if not resolved.is_dir():
                 raise ValueError("not a directory")
             if resolved.parent == resolved or resolved == resolved_home:
@@ -238,7 +238,7 @@ def _validate_roots(
             )
         except (OSError, ValueError) as exc:
             issues.append(
-                PurgeIssue("invalid_root", path, f"invalid purge root: {exc}")
+                CleanupIssue("invalid_root", path, f"invalid purge root: {exc}")
             )
             continue
         if key in seen:
@@ -250,7 +250,7 @@ def _validate_roots(
 
 def _resolve_roots(
     request: PurgeRequest,
-) -> tuple[tuple[Path, ...], tuple[PurgeIssue, ...]]:
+) -> tuple[tuple[Path, ...], tuple[CleanupIssue, ...]]:
     home = Path.home()
     if request.paths:
         return _validate_roots(request.paths, home)
@@ -285,7 +285,7 @@ def _write_config_template(config_path: Path) -> None:
 
 def _effective_config_roots(
     config_path: Path, home: Path
-) -> tuple[tuple[Path, ...], tuple[PurgeIssue, ...]]:
+) -> tuple[tuple[Path, ...], tuple[CleanupIssue, ...]]:
     configured = _read_configured_paths(config_path, home)
     discovered = (
         _DiscoveredRoots(configured.paths, ())
@@ -330,7 +330,7 @@ def edit_purge_paths() -> PathsEditReport:
         result = subprocess.run([*editor_command, str(config_path)], check=False)
         if result.returncode != 0:
             issues.append(
-                PurgeIssue(
+                CleanupIssue(
                     "editor_failed",
                     config_path,
                     f"editor exited with {result.returncode}",
@@ -338,7 +338,7 @@ def edit_purge_paths() -> PathsEditReport:
             )
     except (OSError, ValueError) as exc:
         issues.append(
-            PurgeIssue(
+            CleanupIssue(
                 "editor_failed", config_path, f"could not edit path config: {exc}"
             )
         )

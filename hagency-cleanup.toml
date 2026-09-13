@@ -1,0 +1,46 @@
+# Repository cleanup policy. These active overrides intentionally pin today's
+# builtin retention defaults as the repository baseline. Other fields inherit
+# builtin rules unless overridden here.
+schema_version = 1
+
+[[rules]]
+id = "purge.artifacts"
+preselect_after_days = 7
+
+[[rules]]
+id = "purge.cachedirs"
+preselect_after_days = 7
+
+[[rules]]
+id = "clean.codex.versions"
+keep_previous = 1
+
+[[rules]]
+id = "clean.claude.versions"
+keep_previous = 1
+
+[[rules]]
+id = "clean.copilot.versions"
+keep_previous = 1
+
+[[rules]]
+id = "clean.codex.staging"
+min_age_days = 7
+
+# Optional examples; uncomment only for directories you intend to clean.
+# [[rules]]
+# id = "purge.temp-files"
+# command = "purge"
+# source = "project"
+# include = ["*.tmp"]
+# preselect_after_days = 7  # Default: recent files require manual selection.
+# exclude = ["keep.tmp"]
+#
+# [[rules]]
+# id = "clean.custom-cache"
+# command = "clean"
+# source = "paths"
+# root = ".local/cache"  # Relative to this file, independent of scan paths/CWD.
+# include = ["*.tmp", "downloads/"]
+# exclude = ["downloads/keep/"]
+# min_age_days = 7

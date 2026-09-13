@@ -5,17 +5,31 @@ from pathlib import Path
 
 import questionary
 
-from hagency_cli.commands.purge_render import format_bytes
-from hagency_cli.files.purge.models import PurgeChoice
+from hagency_cli.commands.cleanup_render import _render_issues, format_bytes
+from hagency_cli.files.cleanup.models import CleanupCandidate, CleanupPlan
 
 
-class QuestionaryPurgeUI:
-    """Interactive purge prompts backed by Questionary."""
+class QuestionaryCleanupUI:
+    """Interactive cleanup prompts backed by Questionary."""
+
+    def __init__(self) -> None:
+        self.presented_plan: CleanupPlan | None = None
 
     def is_interactive(self) -> bool:
+        self.presented_plan = None
         return sys.stdin.isatty() and sys.stdout.isatty()
 
-    def select(self, choices: tuple[PurgeChoice, ...]) -> tuple[str, ...] | None:
+    def present_plan(self, plan: CleanupPlan) -> None:
+        if plan.snapshot:
+            for path, signature in plan.snapshot.files:
+                print(
+                    f"Rules: {path}"
+                    + (" (missing; builtins apply)" if signature is None else "")
+                )
+        _render_issues(plan.issues)
+        self.presented_plan = plan
+
+    def select(self, choices: tuple[CleanupCandidate, ...]) -> tuple[str, ...] | None:
         prompt_choices: list[questionary.Choice | questionary.Separator] = []
         current_project: Path | None = None
         for choice in choices:
@@ -30,7 +44,7 @@ class QuestionaryPurgeUI:
                 )
             )
         prompt = questionary.checkbox(
-            "Select project artifacts to purge",
+            "Select files and directories to clean up",
             choices=prompt_choices,
         )
         try:
@@ -46,7 +60,7 @@ class QuestionaryPurgeUI:
         for path in paths:
             print(f"  {path}")
         prompt = questionary.confirm(
-            f"Remove {len(paths)} selected artifact(s) "
+            f"Remove {len(paths)} selected item(s) "
             f"({format_bytes(known_bytes)} known size)?",
             default=False,
         )
@@ -57,4 +71,4 @@ class QuestionaryPurgeUI:
         return bool(confirmed)
 
 
-__all__ = ["QuestionaryPurgeUI"]
+__all__ = ["QuestionaryCleanupUI"]

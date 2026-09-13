@@ -4,7 +4,12 @@ import sys
 from collections.abc import Iterable
 from typing import Any
 
-from hagency_cli.files.purge.models import PathsEditReport, PurgeReport
+from hagency_cli.files.cleanup.models import (
+    CleanupPlan,
+    CleanupReport,
+    PathsEditReport,
+    _display_text,
+)
 
 
 def format_bytes(value: int) -> str:
@@ -28,10 +33,10 @@ def _render_issues(issues: Iterable[Any]) -> None:
         level = "Error" if issue.is_failure else "Warning"
         code = f" [{issue.code}]" if issue.code else ""
         path = f" ({issue.path})" if issue.path is not None else ""
-        print(f"{level}{code}{path}: {issue.message}", file=sys.stderr)
+        print(_display_text(f"{level}{code}{path}: {issue.message}"), file=sys.stderr)
 
 
-def _selected_unknown_count(report: PurgeReport) -> int:
+def _selected_unknown_count(report: CleanupReport) -> int:
     selected = set(report.selected_paths)
     return sum(
         choice.exact_path in selected and choice.size_bytes is None
@@ -47,7 +52,7 @@ def _size_summary(known_bytes: int, unknown_count: int) -> str:
     return summary
 
 
-def _render_choices(report: PurgeReport) -> None:
+def _render_choices(report: CleanupReport) -> None:
     selected = set(report.selected_paths)
     for choice in report.choices:
         marker = "[selected]" if choice.exact_path in selected else "[ ]"
@@ -58,8 +63,9 @@ def _render_choices(report: PurgeReport) -> None:
             else "size unknown"
         )
         print(
-            f"{marker} {activity} | {choice.artifact_kind} | {size} | "
-            f"{choice.exact_path}"
+            f"{marker} {choice.group} | {activity} | {choice.entry_kind} | {choice.artifact_kind} | {size} | "
+            f"{choice.exact_path} | rules: {', '.join(choice.rule_ids)} | config: {', '.join(choice.rule_origins)}"
+            + (f" | {choice.verification_note}" if choice.verification_note else "")
         )
 
 
@@ -74,7 +80,7 @@ def _result_prefix(disposition: Any) -> str:
     return "failed"
 
 
-def _render_results(report: PurgeReport) -> None:
+def _render_results(report: CleanupReport) -> None:
     for result in report.results:
         prefix = _result_prefix(result.disposition)
         size = (
@@ -84,11 +90,25 @@ def _render_results(report: PurgeReport) -> None:
         )
         message = f" - {result.message}" if result.message else ""
         output = sys.stderr if prefix == "failed" else sys.stdout
-        print(f"{prefix}: {result.exact_path}{size}{message}", file=output)
+        print(
+            _display_text(f"{prefix}: {result.exact_path}{size}{message}"), file=output
+        )
 
 
-def render_purge_report(report: PurgeReport) -> None:
-    _render_issues(report.issues)
+def render_cleanup_report(
+    report: CleanupReport, *, presented_plan: CleanupPlan | None = None
+) -> None:
+    shown_issues = presented_plan.issues if presented_plan else ()
+    shown_files = (
+        {path for path, _signature in presented_plan.snapshot.files}
+        if presented_plan and presented_plan.snapshot
+        else set()
+    )
+    _render_issues(issue for issue in report.issues if issue not in shown_issues)
+    action = report.command.capitalize()
+    for path in report.config_files:
+        if path not in shown_files:
+            print(f"Rules: {path}")
 
     if report.choices:
         _render_choices(report)
@@ -96,10 +116,13 @@ def render_purge_report(report: PurgeReport) -> None:
 
     disposition = _value(report.disposition)
     if disposition in {"cancelled", "canceled"}:
-        print("Purge cancelled.")
+        print(f"{action} cancelled.")
         return
     if not report.choices:
-        print("No purge candidates found.")
+        if report.failed:
+            print(f"{action} incomplete; see reported errors.", file=sys.stderr)
+        else:
+            print(f"No {report.command} candidates found.")
         return
 
     selected_count = len(report.selected_paths)
@@ -109,10 +132,10 @@ def render_purge_report(report: PurgeReport) -> None:
         print(f"Preview {state}: {selected_count} artifact(s), {size}.")
     elif disposition == "partial":
         print(
-            f"Purge partially completed: {selected_count} selected artifact(s), {size}."
+            f"{action} partially completed: {selected_count} selected artifact(s), {size}."
         )
     else:
-        print(f"Purge complete: {selected_count} selected artifact(s), {size}.")
+        print(f"{action} complete: {selected_count} selected artifact(s), {size}.")
 
 
 def render_paths_edit_report(report: PathsEditReport) -> None:
@@ -136,4 +159,4 @@ def render_paths_edit_report(report: PathsEditReport) -> None:
             print(f"  {root}")
 
 
-__all__ = ["render_paths_edit_report", "render_purge_report"]
+__all__ = ["render_cleanup_report", "render_paths_edit_report"]

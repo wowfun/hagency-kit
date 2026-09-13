@@ -18,12 +18,12 @@ import tomllib
 
 from typer.testing import CliRunner
 
+import hagency_cli.commands.cleanup_render as commands_purge_render_module
+import hagency_cli.commands.cleanup_ui as commands_purge_ui_module
 import hagency_cli.commands.file as commands_file_module
-import hagency_cli.commands.purge_render as commands_purge_render_module
-import hagency_cli.commands.purge_ui as commands_purge_ui_module
 import hagency_cli.commands.service as commands_service_module
 import hagency_cli.commands.skill_ui as commands_skill_ui_module
-import hagency_cli.files.purge.models as files_purge_models_module
+import hagency_cli.files.cleanup.models as files_purge_models_module
 import hagency_cli.paths as paths_module
 import hagency_cli.workspace.discovery as workspace_discovery_module
 import hagency_cli.workspace.git as workspace_git_module
@@ -410,6 +410,7 @@ class CliTests(unittest.TestCase):
                 "pack",
                 "apply",
                 "purge",
+                "clean",
             ],
         )
 
@@ -481,7 +482,7 @@ class CliTests(unittest.TestCase):
 
         values, _stderr = self.complete_bash("hgc file ", 2)
         self.assertEqual(
-            values, ["push", "pull", "sync", "init", "pack", "apply", "purge"]
+            values, ["push", "pull", "sync", "init", "pack", "apply", "purge", "clean"]
         )
 
         values, _stderr = self.complete_bash("hgc file purge --", 3)
@@ -530,16 +531,16 @@ class CliTests(unittest.TestCase):
 
     def test_space_purge_dispatches_normalized_paths_and_dry_run(self) -> None:
         report = mock.Mock(exit_code=0)
-        ui = mock.sentinel.purge_ui
+        ui = commands_purge_ui_module.QuestionaryCleanupUI()
         with (
             mock.patch.object(
-                commands_purge_ui_module, "QuestionaryPurgeUI", return_value=ui
+                commands_purge_ui_module, "QuestionaryCleanupUI", return_value=ui
             ),
             mock.patch.object(
                 commands_file_module, "purge_space", return_value=report
             ) as purge_mock,
             mock.patch.object(
-                commands_file_module, "render_purge_report"
+                commands_file_module, "render_cleanup_report"
             ) as render_mock,
         ):
             self.run_cli("file", "purge", ".", "nested/..", "--dry-run")
@@ -548,7 +549,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(request.paths, (self.root.resolve(), self.root.resolve()))
         self.assertTrue(request.dry_run)
         self.assertEqual(purge_mock.call_args.kwargs, {"ui": ui})
-        render_mock.assert_called_once_with(report)
+        render_mock.assert_called_once_with(report, presented_plan=None)
 
     def test_space_purge_preserves_symlink_path_for_core_validation(self) -> None:
         scan_link = self.root / "scan-link"
@@ -558,11 +559,11 @@ class CliTests(unittest.TestCase):
             self.skipTest(f"could not create symlink: {exc}")
 
         with (
-            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryCleanupUI"),
             mock.patch.object(
                 commands_file_module, "purge_space", return_value=mock.Mock(exit_code=0)
             ) as purge_mock,
-            mock.patch.object(commands_file_module, "render_purge_report"),
+            mock.patch.object(commands_file_module, "render_cleanup_report"),
         ):
             self.run_cli("file", "purge", "scan-link")
 
@@ -580,7 +581,7 @@ class CliTests(unittest.TestCase):
             "checkbox",
             return_value=checkbox_prompt,
         ) as checkbox_mock:
-            selected = commands_purge_ui_module.QuestionaryPurgeUI().select((choice,))
+            selected = commands_purge_ui_module.QuestionaryCleanupUI().select((choice,))
 
         self.assertEqual(selected, ("choice-id",))
         checkbox_choices = checkbox_mock.call_args.kwargs["choices"]
@@ -606,7 +607,7 @@ class CliTests(unittest.TestCase):
             ) as confirm_mock,
             contextlib.redirect_stdout(output),
         ):
-            confirmed = commands_purge_ui_module.QuestionaryPurgeUI().confirm_exact(
+            confirmed = commands_purge_ui_module.QuestionaryCleanupUI().confirm_exact(
                 (exact_path,), 1024
             )
 
@@ -621,7 +622,7 @@ class CliTests(unittest.TestCase):
         selected_path = self.root / "old-project" / "node_modules"
         recent_path = self.root / "active-project" / "target"
         choices = (
-            files_purge_models_module.PurgeChoice(
+            files_purge_models_module.CleanupCandidate(
                 id="old",
                 exact_path=selected_path,
                 project_path=selected_path.parent,
@@ -630,7 +631,7 @@ class CliTests(unittest.TestCase):
                 activity=files_purge_models_module.Activity.OLD,
                 preselected=True,
             ),
-            files_purge_models_module.PurgeChoice(
+            files_purge_models_module.CleanupCandidate(
                 id="recent",
                 exact_path=recent_path,
                 project_path=recent_path.parent,
@@ -640,20 +641,20 @@ class CliTests(unittest.TestCase):
                 preselected=False,
             ),
         )
-        preview = files_purge_models_module.PurgeReport(
-            disposition=files_purge_models_module.PurgeDisposition.PREVIEW,
+        preview = files_purge_models_module.CleanupReport(
+            disposition=files_purge_models_module.CleanupDisposition.PREVIEW,
             roots=(self.root,),
             choices=choices,
             selected_paths=(selected_path,),
             results=(
-                files_purge_models_module.PurgeItemResult(
+                files_purge_models_module.CleanupItemResult(
                     exact_path=selected_path,
                     disposition=files_purge_models_module.ItemDisposition.WOULD_REMOVE,
                     size_bytes=1024,
                 ),
             ),
             issues=(
-                files_purge_models_module.PurgeIssue(
+                files_purge_models_module.CleanupIssue(
                     "scan_notice",
                     self.root,
                     "one directory was unreadable",
@@ -668,13 +669,17 @@ class CliTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            commands_purge_render_module.render_purge_report(preview)
+            commands_purge_render_module.render_cleanup_report(preview)
 
         rendered = stdout.getvalue()
         self.assertIn(
-            f"[selected] old | node_modules | 1.0 KiB | {selected_path}", rendered
+            f"[selected]  | old | directory | node_modules | 1.0 KiB | {selected_path}",
+            rendered,
         )
-        self.assertIn(f"[ ] recent | target | size unknown | {recent_path}", rendered)
+        self.assertIn(
+            f"[ ]  | recent | directory | target | size unknown | {recent_path}",
+            rendered,
+        )
         self.assertIn(f"Would remove: {selected_path}", rendered)
         self.assertIn("Preview complete: 1 artifact(s), known size 1.0 KiB.", rendered)
         self.assertIn("Warning [scan_notice]", stderr.getvalue())
@@ -722,16 +727,16 @@ class CliTests(unittest.TestCase):
 
         purge_report = mock.Mock(exit_code=7)
         with (
-            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryCleanupUI"),
             mock.patch.object(
                 commands_file_module, "purge_space", return_value=purge_report
             ),
-            mock.patch.object(commands_file_module, "render_purge_report"),
+            mock.patch.object(commands_file_module, "render_cleanup_report"),
         ):
             self.run_cli("file", "purge", expected=7)
 
         with (
-            mock.patch.object(commands_purge_ui_module, "QuestionaryPurgeUI"),
+            mock.patch.object(commands_purge_ui_module, "QuestionaryCleanupUI"),
             mock.patch.object(
                 commands_file_module, "purge_space", side_effect=KeyboardInterrupt
             ),

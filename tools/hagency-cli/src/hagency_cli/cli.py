@@ -18,12 +18,15 @@ app = make_app(
     Sources are local skill directories or persistent Git checkouts. Discover
     skills, install them directly, or select them through reusable profiles.
     File commands sync project trees over SFTP, transfer offline ZIP bundles,
-    and purge rebuildable artifacts. Services run the local model proxy.
+    purge project artifacts, and clean obsolete Agent versions and caches.
+    Services run the local model proxy.
 
     Workspace commands find hagency-config.toml using their --root option,
     then the current directory and its parents, then the editable-installed
     Hagency Kit checkout. A wheel installation has no checkout fallback.
     File commands use their own project roots; purge has separate scan roots.
+    Purge and clean load hagency-cleanup.toml from the selected Hagency checkout
+    or --config, independently of their cleanup targets.
     Installation destinations resolve from the invocation directory.
 
     Use hgc COMMAND --help, then hgc COMMAND SUBCOMMAND --help for prerequisites,

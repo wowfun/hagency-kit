@@ -6,14 +6,14 @@ from typing import Annotated
 
 import typer
 
-from hagency_cli.commands.completion import complete_directory
-from hagency_cli.commands.purge_render import (
+from hagency_cli.commands.cleanup_render import (
+    render_cleanup_report,
     render_paths_edit_report,
-    render_purge_report,
 )
+from hagency_cli.commands.completion import complete_directory
 from hagency_cli.commands.shared import command_errors, die, make_app
-from hagency_cli.files.purge.models import PurgeRequest
-from hagency_cli.files.purge.operations import purge_space
+from hagency_cli.files.cleanup.models import CleanRequest, PurgeRequest
+from hagency_cli.files.cleanup.operations import clean_files, purge_space
 from hagency_cli.files.purge.roots import edit_purge_paths
 from hagency_cli.files.sync.bundle.apply import apply_sync_bundle
 from hagency_cli.files.sync.bundle.pack import pack_sync_bundle
@@ -34,11 +34,13 @@ file_app = make_app(
     push uploads, pull downloads, and sync transfers in both directions over
     SFTP. A temporary [user@]host:path endpoint bypasses that configuration.
     pack and apply transfer offline ZIP bundles without a network connection.
-    purge finds rebuildable artifacts and confirms permanent deletion in a TTY.
+    purge finds project artifacts; clean finds obsolete Agent installations and caches.
+    Both confirm permanent deletion in a TTY and preview in non-TTY invocations.
 
     Sync and bundle commands use the invocation directory or their --root.
     They do not discover a Hagency workspace. Purge uses explicit paths, a saved
-    path list, or automatic project roots. Online --dry-run still connects and
+    path list, or automatic project roots. Cleanup rules come from the selected
+    Hagency repository or --config. Online --dry-run still connects and
     reads both sides; offline dry runs read local data only.
 
     \b
@@ -732,6 +734,28 @@ def space_purge_cli(
             "--dry-run", help="Preview selected removals without changing files"
         ),
     ] = False,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "--recursive",
+            "-r",
+            help="Discover candidates without the default depth limit of 6",
+        ),
+    ] = False,
+    include_unverified: Annotated[
+        bool,
+        typer.Option(
+            "--include-unverified",
+            help="Include rule-matched artifacts with unverified project context or purpose",
+        ),
+    ] = False,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Explicit cleanup TOML; otherwise use Hagency repository rules",
+        ),
+    ] = None,
     edit_paths: Annotated[
         bool,
         typer.Option("--paths", help="Edit the configured purge scan directories"),
@@ -743,20 +767,35 @@ def space_purge_cli(
     directories. Explicit PATH values replace saved and automatic roots for this
     invocation. Otherwise a nonempty per-user space-purge-paths file wins; missing
     or empty files restore automatic home project roots and agent worktrees.
-    Purge does not discover a Hagency workspace. A worktree location alone does
-    not qualify a directory: candidates must match an artifact name or valid
-    CACHEDIR.TAG and pass project and Git checks. Git-tracked artifacts and
-    linked directories are excluded.
+    Scan depth defaults to 6 (root is depth 0); -r/--recursive removes that limit.
+    Rules combine builtins with hagency-cleanup.toml from the nearest ancestor
+    Hagency workspace or editable source repository. --config overrides this
+    discovery; scan paths never choose the rules file. A missing automatic file
+    uses builtins; invalid or missing explicit configs stop the operation.
+    Configured project rules can match files and directories. Git-tracked data,
+    linked candidates and child mount points remain protected. Excluded descendants
+    protect whole directory candidates across rules. Foreign-owned entries on
+    systems with effective user IDs protect their entire candidate directory.
+    Scan roots containing the home directory disable all default selections.
+
+    --include-unverified also lists rule-matched artifacts without enclosing
+    project markers, non-Composer vendor directories and bins without confirmed
+    .NET output. Each unverified reason is shown; these candidates are never
+    preselected. Patterns use the project root when known, otherwise the scan root.
+    Global Xcode DerivedData, Git, filesystem, Agent and retention protections
+    still apply. Changed project or artifact verification requires a new preview.
 
     --paths is an exclusive mode: create/edit the saved roots with VISUAL, EDITOR,
-    or the platform editor, then reload. It cannot accompany PATH or --dry-run.
+    or the platform editor, then reload. It cannot accompany PATH, --dry-run,
+    --recursive, --include-unverified or --config.
     Entries are absolute or ~ paths, one per line; blanks and # comments are ignored.
     The file lives under XDG_CONFIG_HOME/hagency or ~/.config/hagency on Linux/WSL,
     ~/Library/Application Support/Hagency on macOS, or APPDATA/Hagency on Windows
     (with ~/.config/hagency as fallback).
 
     In a TTY, select candidates; only artifacts inactive for strictly more than
-    seven days are preselected. Permanent deletion then requires confirmation,
+    seven days are preselected by default; recent candidates may be selected.
+    Permanent deletion then requires confirmation,
     which defaults to No. --dry-run still opens the selection UI but only previews.
     Non-TTY invocations always preview, even without --dry-run. Partial deletion
     may leave some contents removed; other selections continue and exit status 1
@@ -766,12 +805,22 @@ def space_purge_cli(
     Examples:
       hgc file purge ./project --dry-run
       hgc file purge ./project
+      hgc file purge ./cache --include-unverified --dry-run
       hgc file purge --paths
     """
     selected_paths = list(paths or [])
-    if edit_paths and (selected_paths or dry_run):
+    if any(not value.strip() for value in selected_paths):
+        raise typer.BadParameter("scan paths must not be empty", param_hint="PATH")
+    if edit_paths and (
+        selected_paths
+        or dry_run
+        or recursive
+        or include_unverified
+        or config is not None
+    ):
         raise typer.BadParameter(
-            "--paths cannot be combined with PATH or --dry-run", param_hint="--paths"
+            "--paths cannot be combined with PATH, --dry-run, --recursive, --include-unverified or --config",
+            param_hint="--paths",
         )
 
     try:
@@ -779,7 +828,7 @@ def space_purge_cli(
             report = edit_purge_paths()
             render_paths_edit_report(report)
         else:
-            from hagency_cli.commands.purge_ui import QuestionaryPurgeUI
+            from hagency_cli.commands.cleanup_ui import QuestionaryCleanupUI
 
             request = PurgeRequest(
                 paths=tuple(
@@ -787,13 +836,98 @@ def space_purge_cli(
                     for value in selected_paths
                 ),
                 dry_run=dry_run,
+                recursive=recursive,
+                include_unverified=include_unverified,
+                config=config,
             )
-            report = purge_space(request, ui=QuestionaryPurgeUI())
-            render_purge_report(report)
+            ui = QuestionaryCleanupUI()
+            report = purge_space(request, ui=ui)
+            render_cleanup_report(report, presented_plan=ui.presented_plan)
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except OSError as exc:
         die(f"could not complete file purge: {exc}")
 
+    if report.exit_code:
+        raise typer.Exit(report.exit_code)
+
+
+@file_app.command(
+    "clean", short_help="Remove obsolete Agent versions and configured cache files."
+)
+@command_errors
+def clean_files_cli(
+    agent: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--agent",
+            help="Agent to inspect: codex, claude or copilot; repeat to select several",
+        ),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="Explicit cleanup TOML; otherwise use Hagency repository rules",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Preview selected removals without changing files"
+        ),
+    ] = False,
+) -> None:
+    """Inspect obsolete Agent versions and configured caches on Linux/WSL.
+
+    Defaults to Codex standalone releases and staging, Claude native versions,
+    Copilot universal packages, plus configured paths rules. Repeated --agent
+    filters Agent sources; configured paths rules still apply.
+    Keeps current, one rollback and pending newer versions by default. Unknown
+    layouts and prereleases stay protected. Staging must be inactive for strictly
+    more than seven days. Running tools and uncertain state are skipped.
+    Each source has a 60-second scan budget. Inspection never launches an Agent,
+    installer or network request. Sessions, authentication, configuration, plugin
+    installations, worktree bodies and Desktop data stay protected.
+
+    Rules combine builtins with hagency-cleanup.toml in the nearest Hagency
+    workspace or editable source repository. --config selects an explicit file.
+    Relative rule roots resolve against that file; ~ means the current home.
+    Custom paths rules default to preselecting only files older than seven days;
+    recent eligible files remain manually selectable. Foreign-owned entries protect
+    their containing candidates on systems with effective user IDs.
+    A missing automatic config uses builtins; invalid or missing explicit files
+    stop before scanning. See the CLI README for fields and matching semantics.
+
+    TTY: select exact paths, then confirm permanent deletion (default No).
+    --dry-run and non-TTY invocations never delete. Config or filesystem changes
+    after review require a new preview; revalidation never adds candidates.
+    Exit codes: 0 success/cancel, 1 invalid config or incomplete cleanup,
+    2 invalid CLI arguments, 130 interrupted.
+
+    \b
+    Examples:
+      hgc file clean --dry-run
+      hgc file clean --agent codex --agent claude
+      hgc file clean --config ./hagency-cleanup.toml --dry-run
+    """
+    selected = tuple(dict.fromkeys(agent or []))
+    if any(value not in {"codex", "claude", "copilot"} for value in selected):
+        raise typer.BadParameter(
+            "choose codex, claude or copilot", param_hint="--agent"
+        )
+    try:
+        from hagency_cli.commands.cleanup_ui import QuestionaryCleanupUI
+
+        ui = QuestionaryCleanupUI()
+        report = clean_files(
+            CleanRequest(agents=selected, dry_run=dry_run, config=config),
+            ui=ui,
+        )
+        render_cleanup_report(report, presented_plan=ui.presented_plan)
+    except KeyboardInterrupt:
+        raise typer.Exit(130) from None
+    except OSError as exc:
+        die(f"could not complete file clean: {exc}")
     if report.exit_code:
         raise typer.Exit(report.exit_code)

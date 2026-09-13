@@ -15,19 +15,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 
-import hagency_cli.files.purge.models as files_purge_models_module
-import hagency_cli.files.purge.operations as files_purge_operations_module
-import hagency_cli.files.purge.removal as files_purge_removal_module
+import hagency_cli.files.cleanup.models as files_purge_models_module
+import hagency_cli.files.cleanup.operations as files_purge_operations_module
+import hagency_cli.files.cleanup.removal as files_purge_removal_module
+import hagency_cli.files.cleanup.scan as files_purge_scan_module
 import hagency_cli.files.purge.roots as files_purge_roots_module
-import hagency_cli.files.purge.scan as files_purge_scan_module
-from hagency_cli.files.purge.models import (
+from hagency_cli.files.cleanup.config import load_rules
+from hagency_cli.files.cleanup.models import (
     Activity,
+    CleanupCandidate,
+    CleanupDisposition,
     ItemDisposition,
-    PurgeChoice,
-    PurgeDisposition,
     PurgeRequest,
 )
-from hagency_cli.files.purge.operations import purge_space
+from hagency_cli.files.cleanup.operations import purge_space
 from hagency_cli.files.purge.roots import purge_config_path
 
 
@@ -36,7 +37,7 @@ class FakePurgeUI:
         self,
         *,
         interactive: bool,
-        select: Callable[[tuple[PurgeChoice, ...]], tuple[str, ...] | None]
+        select: Callable[[tuple[CleanupCandidate, ...]], tuple[str, ...] | None]
         | None = None,
         confirm: bool = False,
         confirm_hook: Callable[[tuple[Path, ...], int], bool] | None = None,
@@ -45,13 +46,13 @@ class FakePurgeUI:
         self.select_hook = select
         self.confirm = confirm
         self.confirm_hook = confirm_hook
-        self.select_calls: list[tuple[PurgeChoice, ...]] = []
+        self.select_calls: list[tuple[CleanupCandidate, ...]] = []
         self.confirm_calls: list[tuple[tuple[Path, ...], int]] = []
 
     def is_interactive(self) -> bool:
         return self.interactive
 
-    def select(self, choices: tuple[PurgeChoice, ...]) -> tuple[str, ...] | None:
+    def select(self, choices: tuple[CleanupCandidate, ...]) -> tuple[str, ...] | None:
         self.select_calls.append(choices)
         if self.select_hook is None:
             return tuple(choice.id for choice in choices if choice.preselected)
@@ -102,7 +103,7 @@ class SpacePurgeTests(unittest.TestCase):
             os.utime(child, (timestamp, timestamp), follow_symlinks=False)
         os.utime(path, (timestamp, timestamp), follow_symlinks=False)
 
-    def all_choice_ids(self, choices: tuple[PurgeChoice, ...]) -> tuple[str, ...]:
+    def all_choice_ids(self, choices: tuple[CleanupCandidate, ...]) -> tuple[str, ...]:
         return tuple(choice.id for choice in choices)
 
     def test_platform_config_paths_and_fallbacks(self) -> None:
@@ -182,7 +183,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         report = purge_space(PurgeRequest(paths=(root,), dry_run=True), ui=ui)
 
-        self.assertEqual(report.disposition, PurgeDisposition.PREVIEW)
+        self.assertEqual(report.disposition, CleanupDisposition.PREVIEW)
         self.assertEqual(set(report.selected_paths), {old.resolve(), recent.resolve()})
         self.assertEqual(
             {result.disposition for result in report.results},
@@ -203,7 +204,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         cancelled = purge_space(PurgeRequest(paths=(root,)), ui=rejecting_ui)
 
-        self.assertEqual(cancelled.disposition, PurgeDisposition.CANCELLED)
+        self.assertEqual(cancelled.disposition, CleanupDisposition.CANCELLED)
         self.assertTrue(artifact.exists())
         self.assertEqual(rejecting_ui.confirm_calls[0][0], (artifact.resolve(),))
         self.assertGreater(rejecting_ui.confirm_calls[0][1], 0)
@@ -213,7 +214,7 @@ class SpacePurgeTests(unittest.TestCase):
         )
         completed = purge_space(PurgeRequest(paths=(root,)), ui=accepting_ui)
 
-        self.assertEqual(completed.disposition, PurgeDisposition.COMPLETED)
+        self.assertEqual(completed.disposition, CleanupDisposition.COMPLETED)
         self.assertEqual(completed.exit_code, 0)
         self.assertEqual(completed.results[0].disposition, ItemDisposition.REMOVED)
         self.assertFalse(artifact.exists())
@@ -227,7 +228,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         report = purge_space(PurgeRequest(paths=(root,), dry_run=False), ui=ui)
 
-        self.assertEqual(report.disposition, PurgeDisposition.PREVIEW)
+        self.assertEqual(report.disposition, CleanupDisposition.PREVIEW)
         self.assertEqual(report.selected_paths, (old.resolve(),))
         self.assertEqual(
             [result.exact_path for result in report.results], [old.resolve()]
@@ -258,7 +259,12 @@ class SpacePurgeTests(unittest.TestCase):
         )
 
         self.assertEqual(report.choices, ())
-        self.assertEqual(report.issues, ())
+        self.assertTrue(
+            all(
+                issue.code == "protected" and not issue.is_failure
+                for issue in report.issues
+            )
+        )
         self.assertEqual(report.exit_code, 0)
         self.assertTrue(artifact.exists())
 
@@ -281,7 +287,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         self.assertEqual(report.choices, ())
         self.assertEqual([issue.code for issue in report.issues], ["git_check_failed"])
-        self.assertEqual(report.disposition, PurgeDisposition.PREVIEW)
+        self.assertEqual(report.disposition, CleanupDisposition.PREVIEW)
         self.assertEqual(report.exit_code, 1)
         self.assertTrue(artifact.exists())
 
@@ -328,7 +334,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         report = purge_space(PurgeRequest(paths=(root,)), ui=ui)
 
-        self.assertEqual(report.disposition, PurgeDisposition.PARTIAL)
+        self.assertEqual(report.disposition, CleanupDisposition.PARTIAL)
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.results[0].disposition, ItemDisposition.SKIPPED)
         self.assertIn("changed", report.results[0].message)
@@ -579,7 +585,12 @@ class SpacePurgeTests(unittest.TestCase):
             )
 
         self.assertEqual(report.choices, ())
-        self.assertEqual(report.issues, ())
+        self.assertTrue(
+            all(
+                issue.code == "protected" and not issue.is_failure
+                for issue in report.issues
+            )
+        )
         self.assertTrue(tracked_artifact.exists())
         self.assertTrue(nested_repo.exists())
 
@@ -619,7 +630,13 @@ class SpacePurgeTests(unittest.TestCase):
         (project / "composer.json").write_text("{}\n", encoding="utf-8")
         (project / "app.csproj").write_text("<Project />\n", encoding="utf-8")
 
-        for name in sorted(files_purge_models_module.PURGE_TARGETS):
+        artifact_names = {
+            pattern.removesuffix("/")
+            for rule in load_rules().rules
+            if rule.id == "purge.artifacts"
+            for pattern in rule.include
+        }
+        for name in sorted(artifact_names):
             artifact = project / name
             if name == "bin":
                 (artifact / "Debug").mkdir(parents=True)
@@ -655,7 +672,7 @@ class SpacePurgeTests(unittest.TestCase):
             for choice in report.choices
             if choice.artifact_kind != files_purge_models_module.CACHEDIR_TAG_NAME
         }
-        self.assertEqual(named, set(files_purge_models_module.PURGE_TARGETS))
+        self.assertEqual(named, artifact_names)
         paths = [choice.exact_path for choice in report.choices]
         self.assertEqual(paths.count((project / "node_modules").resolve()), 1)
         self.assertIn(deep_six.resolve(), paths)
@@ -693,7 +710,7 @@ class SpacePurgeTests(unittest.TestCase):
 
         shared = files_purge_models_module._HardlinkEntry((99, 101), 100)
 
-        def measured(path: Path, _now: float):
+        def measured(path: Path, _now: float, **kwargs):
             if path.parent.name in {"a", "b"}:
                 return 100, Activity.OLD, None, (shared,)
             return 60, Activity.OLD, None, ()
@@ -749,7 +766,7 @@ class SpacePurgeTests(unittest.TestCase):
                 PurgeRequest(dry_run=True), ui=FakePurgeUI(interactive=False)
             )
 
-        self.assertEqual(discovery.disposition, PurgeDisposition.PREVIEW)
+        self.assertEqual(discovery.disposition, CleanupDisposition.PREVIEW)
         self.assertEqual(discovery.exit_code, 1)
         self.assertEqual(
             [issue.code for issue in discovery.issues], ["discovery_scan_failed"]
@@ -817,7 +834,7 @@ class SpacePurgeTests(unittest.TestCase):
             )
 
         self.assertEqual(partial.exit_code, 1)
-        self.assertEqual(partial.disposition, PurgeDisposition.PARTIAL)
+        self.assertEqual(partial.disposition, CleanupDisposition.PARTIAL)
         self.assertEqual(
             {result.disposition for result in partial.results},
             {ItemDisposition.FAILED, ItemDisposition.REMOVED},
@@ -1003,8 +1020,8 @@ class SpacePurgeTests(unittest.TestCase):
             )
 
         self.assertEqual(report.exit_code, 1)
-        self.assertEqual(report.results[0].disposition, ItemDisposition.SKIPPED)
-        self.assertIn("mount point", report.results[0].message)
+        self.assertEqual(report.choices, ())
+        self.assertTrue(any("mount point" in issue.message for issue in report.issues))
         self.assertTrue((nested_mount / "keep.txt").exists())
 
     def test_deep_artifact_tree_deletes_without_python_recursion(self) -> None:

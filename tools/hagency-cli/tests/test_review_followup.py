@@ -18,9 +18,10 @@ from typer.testing import CliRunner
 
 from hagency_cli import cli
 from hagency_cli.commands import completion
-from hagency_cli.files.purge import removal, roots
-from hagency_cli.files.purge.models import PurgeRequest
-from hagency_cli.files.purge.operations import purge_space
+from hagency_cli.files.cleanup import removal
+from hagency_cli.files.cleanup.models import PurgeRequest
+from hagency_cli.files.cleanup.operations import purge_space
+from hagency_cli.files.purge import roots
 from hagency_cli.files.sync.config import build_temporary_sftp_config
 from hagency_cli.files.sync.models import FileSyncError, SyncDirection
 from hagency_cli.files.sync.operations import sync_workspace_files
@@ -29,8 +30,8 @@ from hagency_cli.workspace import git
 from hagency_cli.workspace.catalog import list_profile_selected_links
 from hagency_cli.workspace.config import read_toml, write_toml
 from hagency_cli.workspace.errors import SourceBatchError, WorkspaceError
-from hagency_cli.workspace.operations.sources import sync_sources_with_progress
 from hagency_cli.workspace.operations.skills import add_skills
+from hagency_cli.workspace.operations.sources import sync_sources_with_progress
 from hagency_cli.workspace.sources import Remote, Source, validate_git_url
 
 if __package__:
@@ -320,7 +321,7 @@ class ReviewFollowupTests(unittest.TestCase):
 
             def replace_at_final_rmdir(name, *, dir_fd=None):
                 if dir_fd is not None and (
-                    name == "node_modules" or str(name).startswith(".hagency-purge-")
+                    name == "node_modules" or str(name).startswith(".hagency-cleanup-")
                 ):
                     if artifact.exists():
                         artifact.rename(project / "original-empty")
@@ -372,7 +373,8 @@ class ReviewFollowupTests(unittest.TestCase):
                 )
                 getattr(ui, stage).side_effect = KeyboardInterrupt
                 with mock.patch(
-                    "hagency_cli.commands.purge_ui.QuestionaryPurgeUI", return_value=ui
+                    "hagency_cli.commands.cleanup_ui.QuestionaryCleanupUI",
+                    return_value=ui,
                 ):
                     result = CliRunner().invoke(
                         cli.app, ["file", "purge", str(project)]
@@ -403,7 +405,7 @@ class ReviewFollowupTests(unittest.TestCase):
                 return real_rename(source, destination, **kwargs)
 
             def fail_final_removal(name, *, dir_fd=None):
-                if str(name).startswith(".hagency-purge-"):
+                if str(name).startswith(".hagency-cleanup-"):
                     quarantine_paths.append(project / name)
                     (project / name / "new").write_text("retained")
                     raise PermissionError("injected final removal failure")

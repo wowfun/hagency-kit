@@ -10,6 +10,8 @@
 - [SFTP file sync](#sftp-file-sync)
 - [Offline sync bundles](#offline-sync-bundles)
 - [Project artifact purge](#project-artifact-purge)
+- [Agent and cache cleanup](#agent-and-cache-cleanup)
+- [Cleanup rules](#cleanup-rules)
 - [Local model proxy](#local-model-proxy)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -43,7 +45,7 @@ hgc init
 hgc source  list|show|add|remove|sync
 hgc skill   list|add
 hgc profile list|show|add|update|remove|apply
-hgc file    init|push|pull|sync|pack|apply|purge
+hgc file    init|push|pull|sync|pack|apply|purge|clean
 hgc service model-proxy start|stop|restart
 ```
 
@@ -79,7 +81,7 @@ hgc init --root ./kit
 
 Initialization writes checkout and depth defaults. An existing config requires `--force`, which replaces it rather than merging. `--dry-run` prints the proposed configuration without writing.
 
-File sync and bundle commands use the invocation directory or their project `--root` directly. They need no Hagency workspace. Purge uses its own [scan roots](#project-artifact-purge). The model proxy accepts an explicit `--config` without a workspace; otherwise its config is resolved under the Hagency root.
+File sync and bundle commands use the invocation directory or their project `--root` directly. They need no Hagency workspace. Purge uses its own [scan roots](#project-artifact-purge). Purge and clean discover [cleanup rules](#cleanup-rules) independently from those roots. The model proxy accepts an explicit `--config` without a workspace; otherwise its config is resolved under the Hagency root.
 
 ### Workspace and profile configuration
 
@@ -315,18 +317,118 @@ Before reading payloads, bundle verification rejects entries and deletion marker
 hgc file purge --dry-run
 hgc file purge
 hgc file purge ~/Work/client-a ~/scratch/project-b
+hgc file purge ./project --recursive --dry-run
+hgc file purge ./cache --include-unverified --dry-run
 hgc file purge --paths
 ```
 
-Positional `PATH...` values are temporary scan roots for that invocation and replace both the saved path list and automatic discovery. Without positional paths, a nonempty per-user path file replaces automatic discovery; a missing or effectively empty file restores the automatic roots. Use `--paths` by itself to create or edit this file, show which configured roots exist, and reopen the effective list after the editor exits. It uses `$VISUAL`, then `$EDITOR`, then `notepad.exe` on Windows, `open -W -t` on macOS, or `vi` elsewhere. Blank lines and `#` comments are ignored, and each entry must be an absolute or `~` path.
+Candidate discovery defaults to **depth 6**, with each scan root at depth 0. `-r` / `--recursive` removes this limit. Discovery uses an explicit stack, deduplicates directory identities, prunes child mount points (including Linux bind mounts), and never descends into whole artifact candidates, even when they are protected. Automatic home-root discovery still checks project markers within two levels.
+
+Positional `PATH...` values are temporary scan roots for that invocation and replace both the saved path list and automatic discovery. Without positional paths, a nonempty per-user path file replaces automatic discovery; a missing or effectively empty file restores the automatic roots. `--paths` is exclusive with positional paths, `--dry-run`, `--recursive`, `--include-unverified`, and `--config`. Use it by itself to create or edit this file, show which configured roots exist, and reopen the effective list after the editor exits. It uses `$VISUAL`, then `$EDITOR`, then `notepad.exe` on Windows, `open -W -t` on macOS, or `vi` elsewhere. Blank lines and `#` comments are ignored, and each entry must be an absolute or `~` path.
 
 The path file is `${XDG_CONFIG_HOME:-~/.config}/hagency/space-purge-paths` on Linux and WSL, `~/Library/Application Support/Hagency/space-purge-paths` on macOS, and `%APPDATA%\Hagency\space-purge-paths` on Windows. Windows falls back to `~/.config/hagency/space-purge-paths` when `APPDATA` is unavailable.
 
-Automatic discovery checks existing `~/www`, `~/dev`, `~/Projects`, `~/GitHub`, `~/Code`, `~/Workspace`, `~/Repos`, `~/Development`, `~/.codex/worktrees`, and `~/.claude/worktrees`, plus direct children of the home directory that contain project markers within two levels. It does not automatically search system or cloud-storage roots. A worktree location alone does not qualify a directory for deletion: candidates must match a supported artifact name or a valid `CACHEDIR.TAG`, have enclosing project evidence, and pass Git and filesystem checks. Being a Git worktree is not a blanket exclusion; Git protection excludes candidates containing tracked files. Inspect the exact candidate paths in the preview.
+Automatic discovery checks existing `~/www`, `~/dev`, `~/Projects`, `~/GitHub`, `~/Code`, `~/Workspace`, `~/Repos`, `~/Development`, `~/.codex/worktrees`, and `~/.claude/worktrees`, plus direct children of the home directory that contain project markers within two levels. It does not automatically search system or cloud-storage roots. A worktree location alone does not qualify a directory for deletion: by default, candidates must match an active project rule or a valid `CACHEDIR.TAG`, have enclosing project evidence, and pass Git and filesystem checks. Configured rules can also select ordinary files. Being a Git worktree is not a blanket exclusion; Git protection excludes candidates containing tracked files. Inspect the exact candidate paths in the preview.
 
-In a TTY, Questionary presents a multi-select list. Candidates whose last artifact activity is strictly more than seven days old are selected by default; recent or uncertain candidates remain unselected. A normal purge then prints every selected absolute path and asks for a second confirmation that defaults to No. With `--dry-run`, the multi-select still opens, but the selected entries are only previewed and the destructive confirmation is skipped. A non-TTY run skips the TUI and previews all candidates with their default selection status, even when `--dry-run` is omitted.
+`--include-unverified` additionally admits rule-matched files and directories without enclosing project markers, non-Composer `vendor` directories, and `bin` directories without confirmed .NET output. Preview labels each reason: `project context unverified` and/or `artifact purpose unverified`, including missing Composer or .NET evidence. These candidates are never preselected, regardless of age; select them manually in a TTY, then confirm deletion. Without this option, protection messages state the missing evidence. Global Xcode `DerivedData`, Git/link/mount/Agent protections, exclusions and age gates still apply. It changes neither automatic root discovery nor the depth limit; use explicit `PATH...` and `-r` as needed. It cannot accompany `--paths`.
 
-Purge deletes selected artifacts permanently rather than moving them to Trash or the Recycle Bin. It excludes Git-tracked candidates, including an entire candidate that contains a nested Git repository with tracked files, plus symlinks, junctions, reparse paths, mount points, zero-size candidates, the global Xcode `DerivedData` directory, non-Composer `vendor` directories, and `bin` directories outside `.NET` projects. Generic artifact names are accepted only with project evidence. If permanent deletion fails partway through because of permissions, a filesystem change, or another I/O error, some contents may already be gone; the command reports the failure, continues with later selections, and exits with status 1.
+In a TTY, Questionary presents a multi-select list. Verified candidates whose last artifact activity is strictly more than seven days old are selected by default; recent or uncertain candidates remain unselected. A normal purge then prints every selected absolute path and asks for a second confirmation that defaults to No. With `--dry-run`, the multi-select still opens, but the selected entries are only previewed and the destructive confirmation is skipped. A non-TTY run skips the TUI and previews all candidates with their default selection status, even when `--dry-run` is omitted.
+
+Purge deletes selected artifacts permanently rather than moving them to Trash or the Recycle Bin. It excludes Git-tracked candidates, including an entire candidate that contains a nested Git repository with tracked files, plus symlinks, junctions, reparse paths, mount points, zero-size directories selected by builtin project rules, and the global Xcode `DerivedData` directory. Missing project evidence, non-Composer `vendor` directories and `bin` directories outside `.NET` projects require an explicit `--include-unverified`. If permanent deletion fails partway through because of permissions, a filesystem change, or another I/O error, some contents may already be gone; the command reports the failure, continues with later selections, and exits with status 1.
+
+## Agent and cache cleanup
+
+`hgc file clean` supports **Linux/WSL**. It checks Codex, Claude Code, and Copilot by default, plus any configured `paths` rules:
+
+```sh
+hgc file clean --dry-run
+hgc file clean --agent codex --agent claude
+hgc file clean --config ./hagency-cleanup.toml --dry-run
+```
+
+Repeat `--agent codex|claude|copilot` to select Agent sources. This does not disable custom `paths` rules. Inspection reads local files and same-user `/proc` state; it never starts an Agent or installer and never connects to the network. If an eligible version disappears after a complete inventory, only that candidate is skipped; an incomplete inventory or uncertain source state prevents cleanup of that source. Each source has a 60-second scan budget, checked during traversal, process inspection and bounded Git queries. Operating-system filesystem calls can still block independently of these checkpoints.
+
+| Builtin rule | Recognized source and protection |
+| --- | --- |
+| `clean.codex.versions` | `$CODEX_HOME/packages/standalone/releases` (`CODEX_HOME` defaults to `~/.codex`). Recognizes stable Linux package manifests and legacy standalone layouts. Preserves `current`, `codex` and `codex-code-mode-host` launcher references, and `auto-update-version` references. Launchers use `CODEX_INSTALL_DIR` (default `~/.local/bin`) and `PATH`. Versions for another platform remain protected. |
+| `clean.claude.versions` | Native version files in `~/.local/share/claude/versions`; `~/.local/bin/claude` must identify the current version. Unverifiable custom launchers stop this source. `CLAUDE_CONFIG_DIR` changes protected configuration data, not the native installation location. |
+| `clean.copilot.versions` | Complete `pkg/universal/<version>/app.js` packages under `COPILOT_CACHE_HOME`, `${XDG_CACHE_HOME:-~/.cache}/copilot`, `COPILOT_HOME`, and `~/.copilot`. Retention is calculated across all roots, including duplicate versions. Direct version references and recognizable `@github/copilot` package launchers are supported; unknown launchers are retained without probing them. |
+| `clean.codex.staging` | Direct `.staging.*` directories under standalone `releases`; `openai-bundled.staging-*` under `$CODEX_HOME/.tmp/bundled-marketplaces`; `marketplace-add-*` / `marketplace-upgrade-*` under `$CODEX_HOME/.tmp/marketplaces/.staging`. Other names and plugin installations are untouched. |
+
+Version rules retain current/referenced versions, **one earlier fallback version**, and pending newer versions by default. Prereleases, incomplete releases and unknown layouts are protected. `keep_previous` controls the number of distinct fallback versions; active version rules for the same source use the largest value. Codex fallback versions must match the current platform. Copilot conservatively protects the highest complete stable cache version and launcher references across both cache layouts.
+
+Only Codex standalone uses a verified installer-lock protocol. Claude and Copilot rely on repeated version/launcher, process/occupancy and frozen-file checks; these are not a transaction with every external installer.
+
+Staging directories and **all of their contents** must have modification times strictly more than seven days old. Configuration can increase this threshold but cannot reduce it. Running tools, open files, active working directories and uncertain process state prevent cleanup. Standalone Codex cleanup checks the existing installer lock during planning, then holds it across revalidation and deletion; it never creates or removes installer locks. A missing lock file prevents standalone cleanup because the command cannot synchronize with the installer. The [Codex installer](https://github.com/openai/codex/blob/main/scripts/install/install.sh) leaves the lock file in place after releasing its `flock`; installations using only its directory-lock fallback are conservatively skipped.
+
+Sessions, authentication, configuration, plugin installations, worktree bodies and known Desktop data remain protected. Generic rules cannot bypass these protections by naming Agent directories, their contents or a containing directory. Purge can still remove qualifying project artifacts inside Agent worktrees. `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `COPILOT_HOME` also identify protected data locations; tool path overrides must be absolute and free of linked components; existing parent traversal is normalized before matching. Symlinked default data locations also protect their real destinations from generic rules.
+
+## Cleanup rules
+
+Purge and clean share `CleanupRule`, `CleanupCandidate`, `CleanupPlan`, `CleanupReport` and `CleanupUI` through `files/cleanup`. Rules combine [packaged defaults](src/hagency_cli/files/cleanup/defaults.toml) with **one repository file** named [`hagency-cleanup.toml`](../../hagency-cleanup.toml), beside `hagency-config.toml` and intended for Git tracking.
+
+Both commands accept `--config PATH`. Without it, the nearest current-directory ancestor containing `hagency-config.toml` selects the workspace; otherwise an editable installation may select its source repository. Only that repository's `hagency-cleanup.toml` is read. A wheel outside a workspace uses builtins. A missing automatic rules file also uses builtins; a missing explicit file or an invalid discovered file stops before scanning. Workspace discovery does not parse `hagency-config.toml` business contents. The selected TOML is trusted configuration and may be a symlink; its target identity and contents are checked again before deletion. Relative rule roots use the selected file's containing directory, including when the file is a symlink.
+
+Cleanup rule discovery is independent of `purge PATH...` and the saved `space-purge-paths` list. The commands never search scan targets for rules and never read a user configuration directory for cleanup rules. Paths declared by custom rules resolve against the selected TOML's directory; `~` expands to the current home. Explicit scan roots and custom rule roots may be outside the home directory, including a parent such as `/home`; they are not restricted to the invoking user's projects. Choose roots that describe the intended scope. A scan root that contains the home directory (such as `/home`) disables preselection for all of its candidates. On systems with effective user IDs, a foreign-owned entry protects the entire candidate containing it. Filesystem roots, home itself and linked roots remain rejected; blank CLI scan paths are argument errors.
+
+A minimal repository override:
+
+```toml
+schema_version = 1
+
+[[rules]]
+id = "purge.artifacts"
+exclude = ["**/build/keep.json", "**/dist/local/"]
+
+[[rules]]
+id = "clean.codex.versions"
+keep_previous = 2
+```
+
+Rules with an existing `id` override individual fields; arrays replace the entire previous array. New IDs add rules. `enabled = false` disables a rule. Builtin command/source pairs cannot be changed. An empty TOML file or `rules = []` supplies no overrides and leaves builtins active; use `enabled = false` on the relevant IDs to disable them. The repository file intentionally pins the current builtin retention defaults with active overrides; custom deletion examples are commented out.
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Unique nonempty rule ID within this file. |
+| `command` | `purge` or `clean`; required for a new rule. |
+| `source` | `project` / `cachedir-tag` for purge; `paths`, `codex.versions`, `claude.versions`, `copilot.versions`, or `codex.staging` for clean. Required for a new rule. Agent adapters restrict targets to their recognized layouts. |
+| `include` | Ordered Git-style candidate patterns; required for a new rule. An empty list selects nothing for that rule. |
+| `exclude` | Ordered Git-style protection patterns; defaults to empty. Applies even when that rule's `include` does not select the candidate. |
+| `enabled` | Boolean, defaults to `true`. |
+| `root` | Required only for `paths`; the root itself is not selected. Relative paths resolve against the TOML file, not CWD. Filesystem roots, home itself and linked roots are rejected. Missing cache roots are skipped. |
+| `min_age_days` | Nonnegative 64-bit integer; hard eligibility threshold using the newest modification time in the candidate tree. Default `0` means no age gate; Codex staging always enforces at least 7 days. |
+| `preselect_after_days` | Nonnegative 64-bit integer; default-selection threshold, separate from eligibility. Defaults to `7` for new `project`, `cachedir-tag` and `paths` rules, and `0` for Agent sources. Recent eligible files remain manually selectable. Explicit `0` permits preselection as soon as modification time precedes the scan time; `min_age_days` still controls eligibility independently. |
+| `keep_previous` | Nonnegative 64-bit integer supported only by version sources; defaults to 1. Current/referenced and pending newer versions cannot be disabled. |
+
+For example, these **additional** rules select project temporary files and an explicitly named repository cache:
+
+```toml
+[[rules]]
+id = "purge.temp-files"
+command = "purge"
+source = "project"
+include = ["*.tmp", "!keep.tmp"]
+preselect_after_days = 7
+
+[[rules]]
+id = "clean.custom-cache"
+command = "clean"
+source = "paths"
+root = ".local/cache"
+include = ["*.tmp", "downloads/"]
+exclude = ["downloads/keep/"]
+min_age_days = 7
+```
+
+`include` and `exclude` each use `GitIgnoreSpec` ordered matching: `*`, `**`, rooted paths, directory suffix `/`, and `!` negation. Project patterns are relative to the discovered project root, or to the selected scan root for unverified candidates admitted with `--include-unverified`; paths rules use their declared root; Agent rules use their source's installation/staging roots. Within a list, later matches override earlier ones. Final exclusion wins across all enabled rules for the command. Negating an include controls candidate selection; use `exclude` to preserve contents of a selected directory.
+
+Directories are whole candidates: **one excluded descendant preserves the entire directory**. Another rule or an overlapping scan root cannot bypass that exclusion. Overlapping age/retention requirements take the stricter result, including requirements on descendants of a whole-directory candidate. Duplicate paths and nested candidates are coalesced; distinct hard-link paths remain removable while allocated space is counted once. Invalid TOML, duplicate IDs, unsupported fields/sources, malformed patterns and invalid parameter types stop before scanning.
+
+Preview shows exact paths, file/directory type, grouping, allocated size, matched rule IDs, configuration sources and protection reasons as observed during planning. Deletion revalidates that snapshot after confirmation. Control and bidirectional formatting characters are rejected in candidate paths, rule IDs and custom roots, and escaped in error output. In a TTY, select entries and confirm permanent deletion; confirmation defaults to No. `--dry-run` keeps selection but skips deletion and destructive confirmation. Non-TTY invocations always preview.
+
+After confirmation, the frozen plan is revalidated. File/directory identities, ancestor links, Git state, contents/metadata, Agent references, process occupancy and installer locks are checked again. Changed candidates are skipped and newly discovered targets are never added. `--include-unverified` does not allow a verified candidate to lose its project context after preview; an unverified candidate gaining project evidence also requires a fresh preview because pattern ownership may have changed. Changes to Composer/.NET artifact verification likewise require a fresh preview. If the rules file changes, disappears or appears after an initially missing file, deletion stops and a fresh preview is required. Safety checks are enforced by code and cannot be disabled in TOML. An I/O failure can leave a partly deleted directory; the report identifies failures and any retained `.hagency-cleanup-*` quarantine path. Retained quarantines are protected from subsequent automatic cleanup and require manual inspection. Deletion requires a nonempty frozen manifest including the candidate itself, also on the fallback filesystem path.
+
+Exit status is `0` for success or cancellation, `1` for invalid configuration or incomplete execution, `2` for invalid CLI arguments, and `130` for interruption.
 
 ## Local model proxy
 
@@ -427,7 +529,7 @@ Dry-run semantics depend on the operation:
 | `skill add` / `profile apply` | Preview without target writes or network access; conflicts never prompt. Missing checkouts can make a skill-install preview provisional. |
 | Online `file push/pull/sync` | Connect and read both sides, including content comparisons, without writes/deletes. A clean Git-filtered upload skips connection. |
 | `file pack/apply` | Read, hash, or verify local data without creating the ZIP or changing the destination. |
-| `file purge` | TTY selection still opens, followed by preview; non-TTY runs preview with or without the flag. |
+| `file purge`, `file clean` | TTY selection still opens, followed by preview; non-TTY runs preview with or without the flag. |
 
 The model-proxy lifecycle and `file purge --paths` have no dry-run mode. Invalid CLI syntax or option combinations generally exit with status 2; operation failures generally use status 1. A failed batch may have completed earlier work: source sync continues other sources, skill acquisition retains registration/checkouts, and purge or file transfers can leave partial results. Inspect the progress report before retrying.
 
@@ -448,13 +550,14 @@ The CLI is organized around workspace content, project files, and the model prox
 | `workspace/catalog.py` | Discoverable skill queries shared by commands and completion |
 | `workspace/operations` | Source, profile, and skill workflows |
 | `files/sync` | Configuration, selection/scanning, planning, content comparison, SFTP and offline bundles |
-| `files/purge` | Scan roots, inspection/identity, scanning, safe deletion, workflow |
+| `files/purge` | Purge scan-root discovery and the saved paths editor |
+| `files/cleanup` | Rule loading/matching, project and Agent inspection, frozen plans, statistics, revalidation and deletion |
 | `model_proxy` | Existing protocol, provider, hook, daemon and worker contracts |
 | `paths.py` | Shared path expansion and platform normalization |
 
-Dependencies flow from command adapters to operations and business modules. Profiles use skill discovery and installation; skills use source definitions. The source module does not read profiles: the source removal operation asks the profile module for references before removing a source. File sync and purge remain independent; neither depends on the Hagency workspace schema.
+Dependencies flow from command adapters to operations and business modules. Profiles use skill discovery and installation; skills use source definitions. The source module does not read profiles: the source removal operation asks the profile module for references before removing a source. File sync and cleanup remain independent. Cleanup reuses Hagency workspace location but does not parse its source/profile schema.
 
-Workspace operations return results or reports and raise `WorkspaceError` subclasses. They emit optional `OperationEvent` callbacks rather than printing. Command adapters render progress and contextual retry commands. File operations retain their reports, error types, and progress callbacks. `RemoteFileSystem`, `PurgeUI`, and `SkillConflictUI` remain focused interfaces; shortcut multiselect extends the skill interaction contract with `SkillSelectionUI`.
+Workspace operations return results or reports and raise `WorkspaceError` subclasses. They emit optional `OperationEvent` callbacks rather than printing. Command adapters render progress and contextual retry commands. File operations retain their reports, error types, and progress callbacks. `RemoteFileSystem`, `CleanupUI`, and `SkillConflictUI` remain focused interfaces; shortcut multiselect extends the skill interaction contract with `SkillSelectionUI`.
 
 Questionary imports happen when interactive adapters are used. SFTP imports Paramiko when connecting. The CLI can load lightweight proxy daemon/configuration code; ordinary commands and help do not import the HTTP server. The worker remains `hagency_cli.model_proxy.worker`, with unchanged hook contracts and service state locations. Python consumers import the owning modules directly. Importing `hagency_cli.model_proxy.server` loads the HTTP implementation. Hook-facing types such as `AuthPatch` and `HeaderPatch` are exported from `hagency_cli.model_proxy`.
 
@@ -468,7 +571,7 @@ When changing a command, update its help and the matching user-guide section tog
 
 Explicit SFTP agents belong to individual connections; connecting does not modify `SSH_AUTH_SOCK`. Unix agent sockets use the connection timeout. Native Windows retains Paramiko's Pageant/OpenSSH discovery. The adapter's small integration with Paramiko's existing agent authentication is tested with Paramiko 3.5.1 and 4.0.0, including signing through a temporary local OpenSSH agent. Online sync preserves symlink targets, including absolute and dangling links, without scanning through them. Offline bundles continue to skip symlinks.
 
-Purge's descriptor-based removal claims a unique temporary name for the emptied artifact, checks its identity while retaining the open descriptor, and removes that name. This preserves directories concurrently recreated at the original path. If the final identity check or removal fails, the report identifies the quarantine path where remaining contents are retained.
+Cleanup's descriptor-based directory removal claims a unique temporary name for the emptied artifact, checks its identity while retaining the open descriptor, and removes that name. This preserves directories concurrently recreated at the original path. If the final identity check or removal fails, the report identifies the quarantine path where remaining contents are retained.
 
 ### Validation
 
@@ -480,6 +583,6 @@ uv build --out-dir /tmp/hagency-cli-dist
 git diff --check
 ```
 
-The suite includes command and alias help, CLI `main()` parsing and command removal, dependency and lazy-import boundaries, workspace discovery, local Git acquisition/update behavior, selection/cancellation, dry runs, installation modes, SFTP credential/Git protection, bundle validation before writes, purge revalidation, and proxy lifecycle coverage. Mocks target the module that owns each dependency.
+The suite includes command and alias help, CLI `main()` parsing and command removal, dependency and lazy-import boundaries, workspace discovery, local Git acquisition/update behavior, selection/cancellation, dry runs, installation modes, SFTP credential/Git protection, bundle validation before writes, cleanup configuration discovery, rule matching, Agent version retention/occupancy, frozen-plan revalidation, and proxy lifecycle coverage. Mocks target the module that owns each dependency.
 
 Release validation also installs the wheel in an isolated environment outside a Hagency workspace and tests an isolated editable installation. Native filesystem behavior is established only for the host platform; mocked Windows/macOS branches do not establish native execution, and local/fake transports do not establish live SFTP or upstream provider behavior.

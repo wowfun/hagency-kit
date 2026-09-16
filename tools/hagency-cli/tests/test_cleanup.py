@@ -16,6 +16,11 @@ from unittest import mock
 from typer.testing import CliRunner
 
 from hagency_cli.cli import app
+from hagency_cli.files.cleanup.conditions import (
+    Condition,
+    entries,
+    parse_condition,
+)
 from hagency_cli.files.cleanup import (
     agents,
     config,
@@ -28,6 +33,7 @@ from hagency_cli.files.cleanup.models import (
     Activity,
     CleanRequest,
     CleanupDisposition,
+    CleanupRule,
     ItemDisposition,
     PurgeRequest,
 )
@@ -183,7 +189,10 @@ class CleanupTests(unittest.TestCase):
     def test_discovery_prefers_ancestor_without_parsing_business_config(self):
         child = self.repo / "a/b"
         child.mkdir(parents=True)
-        self.write_rules('[[rules]]\nid="purge.artifacts"\npreselect_after_days=11\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+preselect_after_days=11
+""")
         snapshot = config.load_rules(cwd=child)
         self.assertEqual(snapshot.files[-1][0], self.rules_file)
         rule = next(rule for rule in snapshot.rules if rule.id == "purge.artifacts")
@@ -200,7 +209,10 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(len(standalone.files), 1)
 
     def test_nearest_workspace_missing_file_does_not_read_outer_or_editable_rules(self):
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nenabled=false\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+enabled=false
+""")
         nested = self.repo / "nested"
         nested.mkdir()
         (nested / "hagency-config.toml").write_text("invalid = [")
@@ -228,12 +240,18 @@ class CleanupTests(unittest.TestCase):
         external = self.base / "external/rules.toml"
         self.file(
             external,
-            '[[rules]]\nid="clean.custom"\ncommand="clean"\nsource="paths"\nroot="cache"\ninclude=["*.tmp"]\n',
+            """[[rules]]
+id="clean.custom"
+auto_apply=true
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+""",
         )
         self.file(external.parent / "cache/a.tmp")
         with mock.patch.object(Path, "cwd", return_value=self.repo):
             snapshot = config.load_rules(external)
-        self.assertEqual(snapshot.rules[-1].root, external.parent / "cache")
+        self.assertEqual(
+            entries(snapshot.rules[-1].match)[0].root, external.parent / "cache"
+        )
         report = clean_files(CleanRequest(config=external), ui=CleanupUI())
         self.assertEqual(
             [choice.exact_path for choice in report.choices],
@@ -242,10 +260,14 @@ class CleanupTests(unittest.TestCase):
 
     def test_tilde_root_and_relative_explicit_config(self):
         self.write_rules(
-            '[[rules]]\nid="clean.custom"\ncommand="clean"\nsource="paths"\nroot="~/cache"\ninclude=["*.tmp"]\n'
+            """[[rules]]
+id="clean.custom"
+auto_apply=true
+match = { all = [{ within = "~/cache" }, { glob = '*.tmp' }] }
+"""
         )
         snapshot = config.load_rules(Path("hagency-cleanup.toml"), cwd=self.repo)
-        self.assertEqual(snapshot.rules[-1].root, self.home / "cache")
+        self.assertEqual(entries(snapshot.rules[-1].match)[0].root, self.home / "cache")
 
     def test_invalid_configs_fail_before_scan(self):
         cases = [
@@ -253,23 +275,71 @@ class CleanupTests(unittest.TestCase):
             "schema_version=true",
             "unknown=true",
             "rules={}",
-            '[[rules]]\nid="same"\n[[rules]]\nid="same"',
-            '[[rules]]\nid="purge.artifacts"\ncommand="clean"',
-            '[[rules]]\nid="purge.artifacts"\nsource="paths"',
-            '[[rules]]\nid="purge.artifacts"\nroot="cache"',
-            '[[rules]]\nid="purge.artifacts"\nkeep_previous=1',
-            '[[rules]]\nid="purge.artifacts"\nmin_age_days=-1',
-            '[[rules]]\nid="purge.artifacts"\nmin_age_days=' + str(10**400),
-            '[[rules]]\nid="purge.artifacts"\npreselect_after_days=1.5',
-            '[[rules]]\nid="purge.artifacts"\nenabled="false"',
-            '[[rules]]\nid="purge.artifacts"\ninclude="build/"',
-            '[[rules]]\nid="purge.artifacts"\ninclude=[1]',
-            '[[rules]]\nid="purge.artifacts"\ninclude=["\\\\"]',
-            '[[rules]]\nid="purge.artifacts"\nforce=true',
-            '[[rules]]\nid="new"\ncommand="clean"\nsource="unknown"\ninclude=[]',
-            '[[rules]]\nid="new"\ncommand="clean"\nsource=[]\ninclude=[]',
-            '[[rules]]\nid="new"\ncommand="clean"\nsource="paths"\ninclude=[]',
-            '[[rules]]\nid="new"\ncommand="clean"\nsource="paths"\nroot="cache"',
+            """[[rules]]
+id="same"
+[[rules]]
+id="same\"""",
+            """[[rules]]
+id="purge.artifacts"
+command="clean\"""",
+            """[[rules]]
+id="purge.artifacts"
+source="paths\"""",
+            """[[rules]]
+id="purge.artifacts"
+match = { within = false }
+""",
+            """[[rules]]
+id="purge.artifacts"
+keep_previous=-1""",
+            """[[rules]]
+id="purge.artifacts"
+min_age_days=-1""",
+            """[[rules]]
+id="purge.artifacts"
+min_age_days="""
+            + str(10**400),
+            """[[rules]]
+id="purge.artifacts"
+preselect_after_days=1.5""",
+            """[[rules]]
+id="purge.artifacts"
+enabled="false\"""",
+            """[[rules]]
+id="purge.artifacts"
+match = { any = [] }
+""",
+            """[[rules]]
+id="purge.artifacts"
+match = { glob = 1 }
+""",
+            """[[rules]]
+id="purge.artifacts"
+match = { glob = false }
+""",
+            """[[rules]]
+id="purge.artifacts"
+force=true""",
+            """[[rules]]
+id="clean.new"
+auto_apply=true
+match = { all = [{ source = "unknown" }, { not = { glob = "**/*" } }] }
+""",
+            """[[rules]]
+id="clean.new"
+auto_apply=true
+match = { all = [{ source = [] }, { not = { glob = "**/*" } }] }
+""",
+            """[[rules]]
+id="clean.new"
+auto_apply=true
+match = { all = [{ within = "" }, { not = { glob = "**/*" } }] }
+""",
+            """[[rules]]
+id="clean.new"
+auto_apply=true
+match = { within = false }
+""",
             "invalid = [",
         ]
         for contents in cases:
@@ -302,14 +372,21 @@ class CleanupTests(unittest.TestCase):
         build = self.artifact(root)
         dist = self.artifact(root, "dist")
         self.write_rules(
-            '[[rules]]\nid="purge.artifacts"\ninclude=["build/"]\npreselect_after_days=0\n'
+            """[[rules]]
+id="purge.artifacts"
+preselect_after_days=0
+match = { glob = 'build/' }
+"""
         )
         report = self.purge(root)
         self.assertEqual([choice.exact_path for choice in report.choices], [build])
         self.assertTrue(report.choices[0].preselected)
         self.assertEqual(report.choices[0].rule_ids, ("purge.artifacts",))
         self.assertEqual(report.choices[0].rule_origins, (str(self.rules_file),))
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nenabled=false\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+enabled=false
+""")
         self.assertEqual(self.purge(root).choices, ())
         self.assertTrue(dist.exists())
 
@@ -319,13 +396,14 @@ class CleanupTests(unittest.TestCase):
             self.file(root / name)
             for name in ("a.tmp", "keep.tmp", "important.tmp", "source.py")
         ]
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="purge.temp"
-command="purge"
-source="project"
-include=["*.tmp", "!keep.tmp", "important.tmp"]
+auto_apply=true
 exclude=["important.tmp", "!important.tmp"]
-""")
+match = { all = [{ source = "project" }, { any = [{ all = [{ glob = '*.tmp' }, { not = { glob = 'keep.tmp' } }] }, { glob = 'important.tmp' }] }] }
+"""
+        )
         report = self.purge(root, interactive=True)
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(
@@ -341,18 +419,18 @@ exclude=["important.tmp", "!important.tmp"]
         root = self.project()
         build = self.artifact(root)
         keep = self.file(build / "nested/keep.json")
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="purge.exclusions"
-command="purge"
-source="project"
-include=[]
+auto_apply=true
 exclude=["**/build/nested/keep.json"]
+match = { all = [{ source = "project" }, { not = { glob = "**/*" } }] }
 [[rules]]
 id="purge.parent"
-command="purge"
-source="project"
-include=["build/"]
-""")
+auto_apply=true
+match = { all = [{ source = "project" }, { glob = 'build/' }] }
+"""
+        )
         report = self.purge(root, interactive=True)
         self.assertEqual(report.choices, ())
         self.assertEqual(report.exit_code, 0)
@@ -364,36 +442,35 @@ include=["build/"]
     def test_another_rule_cannot_undo_exclusion(self):
         root = self.project()
         artifact = self.artifact(root)
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="purge.artifacts"
 exclude=["build/"]
 [[rules]]
 id="purge.other"
-command="purge"
-source="project"
-include=["build/"]
+auto_apply=true
 exclude=["!build/"]
-""")
+match = { all = [{ source = "project" }, { glob = 'build/' }] }
+"""
+        )
         self.assertEqual(self.purge(root).choices, ())
         self.assertTrue(artifact.exists())
 
     def test_overlapping_path_roots_cannot_bypass_excluded_descendant(self):
         keep = self.file(self.repo / "cache/downloads/keep/data")
         self.file(self.repo / "cache/downloads/remove.tmp")
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="clean.parent"
-command="clean"
-source="paths"
-root="cache"
-include=["downloads/"]
+auto_apply=true
+match = { all = [{ within = "cache" }, { glob = 'downloads/' }] }
 [[rules]]
 id="clean.child"
-command="clean"
-source="paths"
-root="cache/downloads"
-include=["*"]
+auto_apply=true
 exclude=["keep/"]
-""")
+match = { all = [{ within = "cache/downloads" }, { glob = '*' }] }
+"""
+        )
         report = self.clean(interactive=True)
         self.assertTrue(keep.exists())
         self.assertTrue((self.repo / "cache/downloads").exists())
@@ -405,7 +482,11 @@ exclude=["keep/"]
         target = self.artifact(root)
         now = 2_000_000_000
         self.write_rules(
-            '[[rules]]\nid="purge.artifacts"\nmin_age_days=7\npreselect_after_days=10\n'
+            """[[rules]]
+id="purge.artifacts"
+min_age_days=7
+preselect_after_days=10
+"""
         )
         with mock.patch.object(scan.time, "time_ns", return_value=now * 10**9):
             self.old(target, days=7, now=now)
@@ -423,13 +504,14 @@ exclude=["keep/"]
         root = self.project()
         target = self.artifact(root)
         self.old(target)
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="purge.keep-young-payload"
-command="purge"
-source="project"
-include=["build/payload"]
+auto_apply=true
 min_age_days=30
-""")
+match = { all = [{ source = "project" }, { glob = 'build/payload' }] }
+"""
+        )
         self.assertEqual(self.purge(root).choices, ())
 
     def test_recursive_removes_default_depth_limit_and_prunes_whole_artifacts(self):
@@ -502,7 +584,7 @@ id="clean.codex.versions"
 enabled=false
 [[rules]]
 id="clean.bypass"
-command="clean"
+auto_apply=true
 source="paths"
 root="{self.home / ".codex"}"
 include=["*"]
@@ -518,13 +600,17 @@ include=["*"]
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "a.tmp"], check=True)
         self.write_rules(
-            f'[[rules]]\nid="clean.custom"\ncommand="clean"\nsource="paths"\nroot="{root}"\ninclude=["*.tmp"]\n'
+            f'[[rules]]\nid="clean.custom"\nauto_apply=true\nsource="paths"\nroot="{root}"\ninclude=["*.tmp"]\n'
         )
         self.assertEqual(self.clean().choices, ())
         link = self.repo / "linked"
         link.symlink_to(root, target_is_directory=True)
         self.write_rules(
-            '[[rules]]\nid="clean.custom"\ncommand="clean"\nsource="paths"\nroot="linked"\ninclude=["*.tmp"]\n'
+            """[[rules]]
+id="clean.custom"
+auto_apply=true
+match = { all = [{ within = "linked" }, { glob = '*.tmp' }] }
+"""
         )
         self.assertEqual(self.clean().exit_code, 1)
 
@@ -646,13 +732,14 @@ include=["*"]
         versions = self.versions(
             "claude", ["2.0.0", "2.1.0", "2.2.0", "2.3.0"], "2.3.0"
         )
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="clean.keep-more"
-command="clean"
-source="claude.versions"
-include=["*"]
+auto_apply=true
 keep_previous=2
-""")
+match = { all = [{ source = "claude.versions" }, { glob = '*' }] }
+"""
+        )
         report = self.clean("claude")
         self.assertEqual([c.exact_path for c in report.choices], [versions["2.0.0"]])
         self.assertEqual(
@@ -692,7 +779,10 @@ keep_previous=2
             self.old(path, days=8, now=now)
         self.old(staging[0], days=7, now=now)
         self.old(staging[1] / "payload", days=1, now=now)
-        self.write_rules('[[rules]]\nid="clean.codex.staging"\nmin_age_days=0\n')
+        self.write_rules("""[[rules]]
+id="clean.codex.staging"
+min_age_days=0
+""")
         with mock.patch.object(scan.time, "time_ns", return_value=now * 10**9):
             report = self.clean(interactive=True)
         self.assertEqual(report.exit_code, 0)
@@ -741,7 +831,80 @@ keep_previous=2
             report = self.clean("claude", interactive=True)
         self.assertEqual(report.exit_code, 1)
         self.assertEqual(report.choices, ())
-        self.assertTrue(any("60 seconds" in issue.message for issue in report.issues))
+        self.assertTrue(
+            any("exceeded 0 seconds" in issue.message for issue in report.issues)
+        )
+
+    def test_measure_timeout_reports_the_entry_before_inspecting_it(self):
+        root = self.base / "candidate"
+        child = self.file(root / "child.bin")
+        for checks, expected in (
+            ([OSError("cleanup source scan exceeded 60 seconds")], root),
+            ([None, OSError("cleanup source scan exceeded 60 seconds")], child),
+        ):
+            with (
+                self.subTest(expected=expected),
+                inspection.mount_check_scope(),
+                mock.patch.object(inspection, "checkpoint", side_effect=checks),
+            ):
+                size, activity, error, hardlinks = inspection._measure_candidate(
+                    root, time.time_ns()
+                )
+                self.assertIsNone(size)
+                self.assertEqual(activity, Activity.UNCERTAIN)
+                self.assertEqual(
+                    error,
+                    f"could not measure {expected}: cleanup source scan exceeded 60 seconds",
+                )
+                self.assertEqual(hardlinks, ())
+
+    def test_clean_measure_entry_timeout_is_reported_by_cli_and_never_deleted(self):
+        target = self.file(self.base / "cache/file.bin")
+        self.write_rules(
+            """[[rules]]
+id="clean.non_text_or_large"
+match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10_485_761 }, { is_text = false }] }] }
+"""
+        )
+        measure = scan._measure_candidate
+
+        def expired_measure(*args, **kwargs):
+            token = inspection._DEADLINE.set(0)
+            try:
+                return measure(*args, **kwargs)
+            finally:
+                inspection._DEADLINE.reset(token)
+
+        with mock.patch.object(scan, "_measure_candidate", side_effect=expired_measure):
+            result = CliRunner().invoke(
+                app,
+                [
+                    "file",
+                    "clean",
+                    "-r",
+                    "non_text_or_large",
+                    str(target.parent),
+                    "--dry-run",
+                    "--config",
+                    str(self.rules_file),
+                ],
+            )
+            self.assertEqual(result.exit_code, 1, result.output)
+            self.assertIsInstance(result.exception, SystemExit)
+            self.assertIn("scan_timeout", result.output)
+            self.assertIn("scan incomplete", result.output)
+            report = clean_files(
+                CleanRequest(
+                    config=self.rules_file,
+                    paths=(target.parent,),
+                    rules=("non_text_or_large",),
+                ),
+                ui=CleanupUI(interactive=True),
+            )
+        self.assertEqual(report.exit_code, 1)
+        self.assertEqual(report.results, ())
+        self.assertEqual(report.choices, ())
+        self.assertTrue(target.exists())
 
     def test_clean_preview_does_not_launch_agents_or_installers(self):
         versions = self.versions("claude", ["2.0.0", "2.1.0", "2.2.0"], "2.2.0")
@@ -775,10 +938,12 @@ keep_previous=2
         self.assertEqual(
             runner.invoke(app, ["file", "clean", "--agent", "invalid"]).exit_code, 2
         )
-        for option in ("--recursive", "-r", "--config"):
+        for option in ("--recursive", "-R", "--config", "--rule"):
             args = ["file", "purge", "--paths", option]
             if option == "--config":
                 args.append(str(self.rules_file))
+            elif option == "--rule":
+                args.append("auto")
             self.assertEqual(runner.invoke(app, args).exit_code, 2)
         self.rules_file.write_text("bad = [")
         self.assertEqual(
@@ -827,7 +992,7 @@ keep_previous=2
     def test_generic_rule_retains_desktop_data(self):
         sentinel = self.file(self.home / ".config/Claude/keep")
         self.write_rules(
-            f'[[rules]]\nid="clean.desktop"\ncommand="clean"\nsource="paths"\nroot="{sentinel.parent.parent}"\ninclude=["Claude/"]\n'
+            f'[[rules]]\nid="clean.desktop"\nauto_apply=true\nsource="paths"\nroot="{sentinel.parent.parent}"\ninclude=["Claude/"]\n'
         )
         self.assertEqual(self.clean(interactive=True).choices, ())
         self.assertTrue(sentinel.exists())
@@ -838,7 +1003,11 @@ keep_previous=2
         second = root / "b.tmp"
         os.link(first, second)
         self.write_rules(
-            '[[rules]]\nid="purge.files"\ncommand="purge"\nsource="project"\ninclude=["*.tmp"]\n'
+            """[[rules]]
+id="purge.files"
+auto_apply=true
+match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+"""
         )
         report = self.purge(root, interactive=True)
         self.assertEqual(report.exit_code, 0)
@@ -852,7 +1021,10 @@ keep_previous=2
         subprocess.run(["git", "init", "-q", str(outer)], check=True)
         inner = self.project("outer/inner")
         target = self.artifact(inner)
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nexclude=["inner/build/"]\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+exclude=["inner/build/"]
+""")
         report = purge_space(
             PurgeRequest(paths=(outer, inner), config=self.rules_file),
             ui=CleanupUI(interactive=True),
@@ -945,7 +1117,11 @@ keep_previous=2
         root = self.project()
         target = self.file(root / "empty.tmp", "")
         self.write_rules(
-            '[[rules]]\nid="purge.empty"\ncommand="purge"\nsource="project"\ninclude=["*.tmp"]\n'
+            """[[rules]]
+id="purge.empty"
+auto_apply=true
+match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+"""
         )
         report = self.purge(root, interactive=True)
         self.assertEqual(len(report.choices), 1)
@@ -1098,7 +1274,13 @@ keep_previous=2
         now = 2_000_000_000
         cutoff = (now - 7 * 86400) * 10**9
         self.write_rules(
-            '[[rules]]\nid="purge.ns"\ncommand="purge"\nsource="project"\ninclude=["*.tmp"]\nmin_age_days=7\npreselect_after_days=7\n'
+            """[[rules]]
+id="purge.ns"
+auto_apply=true
+min_age_days=7
+preselect_after_days=7
+match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+"""
         )
         with (
             mock.patch.object(scan.time, "time", return_value=now),
@@ -1129,7 +1311,10 @@ keep_previous=2
 
         root = self.project()
         target = self.artifact(root)
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nexclude=["build/keep"]\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+exclude=["build/keep"]
+""")
         self.file(target / "keep")
         removable = self.artifact(root, "dist")
         with (
@@ -1187,14 +1372,15 @@ keep_previous=2
         recent = self.file(root / "temp/recent.tmp")
         self.old(old)
         self.old(keep)
-        self.write_rules("""[[rules]]
+        self.write_rules(
+            """[[rules]]
 id="purge.files"
-command="purge"
-source="project"
-include=["/temp/*.tmp"]
+auto_apply=true
 exclude=["/temp/keep.tmp"]
 min_age_days=7
-""")
+match = { all = [{ source = "project" }, { glob = '/temp/*.tmp' }] }
+"""
+        )
         report = self.purge(root, include_unverified=True, interactive=True)
         self.assertEqual([choice.exact_path for choice in report.choices], [old])
         self.assertFalse(old.exists())
@@ -1207,7 +1393,10 @@ min_age_days=7
         target = self.artifact(inner)
         self.file(target / "keep")
         self.write_rules(
-            '[[rules]]\nid="purge.artifacts"\nexclude=["/inner/build/keep"]\n'
+            """[[rules]]
+id="purge.artifacts"
+exclude=["/inner/build/keep"]
+"""
         )
         report = purge_space(
             PurgeRequest(
@@ -1360,12 +1549,18 @@ min_age_days=7
         root = self.project()
         vendor = self.artifact(root, "vendor")
         keep = self.file(vendor / "keep")
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nexclude=["/vendor/keep"]\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+exclude=["/vendor/keep"]
+""")
         self.assertEqual(
             self.purge(root, include_unverified=True, interactive=True).choices, ()
         )
         self.assertTrue(keep.exists())
-        self.write_rules('[[rules]]\nid="purge.artifacts"\nmin_age_days=7\n')
+        self.write_rules("""[[rules]]
+id="purge.artifacts"
+min_age_days=7
+""")
         self.assertEqual(
             self.purge(root, include_unverified=True, interactive=True).choices, ()
         )
@@ -1429,7 +1624,11 @@ min_age_days=7
     def test_review_new_path_rules_preselect_only_old_files(self):
         target = self.file(self.repo / "cache/fresh.tmp")
         self.write_rules(
-            '[[rules]]\nid="clean.cache"\ncommand="clean"\nsource="paths"\nroot="cache"\ninclude=["*.tmp"]\n'
+            """[[rules]]
+id="clean.cache"
+auto_apply=true
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+"""
         )
         report = self.clean()
         self.assertEqual(len(report.choices), 1)
@@ -1502,7 +1701,11 @@ min_age_days=7
         target = self.file(storage / "auth.json")
         (self.repo / "parent").mkdir()
         self.write_rules(
-            '[[rules]]\nid="clean.cache"\ncommand="clean"\nsource="paths"\nroot="data"\ninclude=["*"]\n'
+            """[[rules]]
+id="clean.cache"
+auto_apply=true
+match = { all = [{ within = "data" }, { glob = '*' }] }
+"""
         )
         with mock.patch.dict(
             os.environ, {"CODEX_HOME": str(self.repo / "parent/../data")}
@@ -1518,7 +1721,11 @@ min_age_days=7
         alias = self.home / ".codex"
         alias.symlink_to(target.parent, target_is_directory=True)
         self.write_rules(
-            '[[rules]]\nid="clean.cache"\ncommand="clean"\nsource="paths"\nroot="data"\ninclude=["*"]\n'
+            """[[rules]]
+id="clean.cache"
+auto_apply=true
+match = { all = [{ within = "data" }, { glob = '*' }] }
+"""
         )
         report = self.clean(interactive=True)
         self.assertEqual(report.choices, ())
@@ -1555,7 +1762,11 @@ min_age_days=7
 
     def test_review_config_rejects_del_in_custom_root(self):
         self.write_rules(
-            '[[rules]]\nid="clean.cache"\ncommand="clean"\nsource="paths"\nroot="cache\\u007f"\ninclude=["*"]\n'
+            """[[rules]]
+id="clean.cache"
+auto_apply=true
+match = { all = [{ within = "cache\\u007f" }, { glob = '*' }] }
+"""
         )
         with mock.patch.object(scan, "_agent_and_path_plan") as build:
             report = self.clean()
@@ -1739,7 +1950,11 @@ min_age_days=7
         root = self.project()
         target = self.artifact(root, ".hagency-cleanup-retained")
         self.write_rules(
-            '[[rules]]\nid="purge.all"\ncommand="purge"\nsource="project"\ninclude=["*/"]\n'
+            """[[rules]]
+id="purge.all"
+auto_apply=true
+match = { all = [{ source = "project" }, { glob = '*/' }] }
+"""
         )
         self.assertEqual(self.purge(root, interactive=True).choices, ())
         self.assertTrue((target / "payload").exists())
@@ -1752,6 +1967,1064 @@ min_age_days=7
         with mock.patch("sys.stdin.isatty", return_value=False):
             self.assertFalse(ui.is_interactive())
         self.assertIsNone(ui.presented_plan)
+
+    def test_rule_schema_defaults_inheritance_and_prefix_validation(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.custom"
+match = { glob = '*.tmp' }
+[[rules]]
+id="clean.codex.versions"
+keep_previous=2
+"""
+        )
+        snapshot = config.load_rules(self.rules_file)
+        custom = next(rule for rule in snapshot.rules if rule.id == "clean.custom")
+        self.assertEqual(custom.command, "clean")
+        self.assertIsNone(entries(custom.match)[0].root)
+        self.assertFalse(custom.auto_apply)
+        builtin = next(
+            rule for rule in snapshot.rules if rule.id == "clean.codex.versions"
+        )
+        self.assertTrue(builtin.auto_apply)
+        self.assertEqual(builtin.keep_previous, 2)
+        for identity in (
+            "custom",
+            "x.clean.foo",
+            "clean.",
+            "purge.",
+            "clean.auto",
+            "purge.auto",
+            "clean. foo",
+            "clean.foo ",
+            "clean.foo bar",
+            "clean..foo",
+            "clean.foo.",
+            "clean.foo..bar",
+        ):
+            with self.subTest(identity=identity):
+                self.write_rules(
+                    f'[[rules]]\nid="{identity}"\nsource="paths"\ninclude=[]\n'
+                )
+                with self.assertRaises(config.CleanupConfigError):
+                    config.load_rules(self.rules_file)
+        for contents in (
+            'id="clean.custom"\nsource="project"\ninclude=[]',
+            'id="purge.custom"\nsource="paths"\ninclude=[]',
+            'id="clean.custom"\nsource="paths"\ninclude=[]\nauto_apply="false"',
+            'id="clean.custom"\nsource="paths"\ninclude=[]\ncommand="clean"',
+            """id="clean.custom"
+source="paths"
+include=[]
+[[rules]]
+id="clean.custom\"""",
+        ):
+            with self.subTest(contents=contents):
+                self.write_rules("[[rules]]\n" + contents)
+                with self.assertRaises(config.CleanupConfigError):
+                    config.load_rules(self.rules_file)
+
+    def test_rule_selection_auto_union_and_deduplication(self):
+        from hagency_cli.files.cleanup.selection import select_rules
+
+        self.write_rules(
+            """[[rules]]
+id="clean.manual"
+match = { all = [{ glob = '*.tmp' }, { within = "cache" }] }
+[[rules]]
+id="clean.disabled"
+auto_apply=true
+enabled=false
+match = { not = { glob = "**/*" } }
+[[rules]]
+id="clean.codex.staging"
+auto_apply=false
+"""
+        )
+        snapshot = config.load_rules(self.rules_file)
+        default = select_rules(CleanRequest(), snapshot)
+        self.assertEqual(default, select_rules(CleanRequest(rules=("auto",)), snapshot))
+        self.assertEqual(
+            {rule.id for rule in default},
+            {
+                "clean.codex.versions",
+                "clean.claude.versions",
+                "clean.copilot.versions",
+            },
+        )
+        selected = select_rules(
+            CleanRequest(rules=("manual", "clean.manual")), snapshot
+        )
+        self.assertEqual([rule.id for rule in selected], ["clean.manual"])
+        union = select_rules(CleanRequest(rules=("manual", "auto", "auto")), snapshot)
+        self.assertEqual(
+            {rule.id for rule in union},
+            {rule.id for rule in default} | {"clean.manual"},
+        )
+        self.assertEqual(len(union), 4)
+        filtered = select_rules(CleanRequest(agents=("claude",)), snapshot)
+        self.assertEqual([rule.id for rule in filtered], ["clean.claude.versions"])
+
+    def test_review_rule_selection_order_is_independent_of_cli_order(self):
+        from hagency_cli.files.cleanup.selection import select_rules
+
+        target = self.file(self.repo / "cache/item.tmp")
+        self.write_rules(
+            """[[rules]]
+id="clean.automatic"
+auto_apply=true
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+[[rules]]
+id="clean.manual"
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+"""
+        )
+        snapshot = config.load_rules(self.rules_file)
+        expected = select_rules(CleanRequest(rules=("auto", "manual")), snapshot)
+        actual = select_rules(
+            CleanRequest(rules=("manual", "auto", "clean.manual")), snapshot
+        )
+        self.assertEqual(actual, expected)
+        reports = [
+            clean_files(
+                CleanRequest(config=self.rules_file, rules=selection), ui=CleanupUI()
+            )
+            for selection in (("automatic", "manual"), ("manual", "automatic"))
+        ]
+        self.assertEqual(reports[0].choices, reports[1].choices)
+        self.assertEqual(reports[0].choices[0].exact_path, target)
+        self.assertEqual(
+            reports[0].choices[0].rule_ids, ("clean.automatic", "clean.manual")
+        )
+
+    def test_review_direct_rule_construction_enforces_id_contract(self):
+        for identity in (
+            "foo",
+            "clean.",
+            "clean.auto",
+            "purge.auto",
+            "clean..foo",
+            "clean. foo",
+            "clean.foo\u202e",
+        ):
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                CleanupRule(id=identity, match=Condition("glob", "**/*"))
+        rule = CleanupRule(id="clean.foo_bar.v1-cache", match=Condition("glob", "**/*"))
+        self.assertEqual(rule.command, "clean")
+        with self.assertRaises(ValueError):
+            replace(rule, id="invalid")
+
+    def test_review_cli_conflicts_include_actionable_context(self):
+        result = CliRunner().invoke(
+            app,
+            [
+                "file",
+                "rule",
+                "clean.codex.versions",
+                "--command",
+                "purge",
+                "--config",
+                str(self.rules_file),
+            ],
+        )
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--command purge", result.output)
+
+    def test_rule_cli_errors_stop_before_target_scan(self):
+        self.write_rules("""[[rules]]
+id="clean.codex.versions"
+enabled=false
+""")
+        cases = (
+            ["clean", "-r", "missing"],
+            ["clean", "-r", "purge.artifacts"],
+            ["purge", "-r", "clean.codex.staging"],
+            ["clean", "-r", "codex.versions"],
+            ["clean", "--agent", "claude", "-r", "auto"],
+            ["clean", " ", "-r", "auto"],
+            ["purge", "--paths", "-r", "auto"],
+        )
+        for args in cases:
+            with (
+                self.subTest(args=args),
+                mock.patch.object(
+                    scan, "_scan_root", side_effect=AssertionError("scanned")
+                ),
+                mock.patch.object(
+                    agents, "source_roots", side_effect=AssertionError("inspected")
+                ),
+            ):
+                result = CliRunner().invoke(
+                    app, ["file", *args, "--config", str(self.rules_file)]
+                )
+                self.assertEqual(result.exit_code, 2, result.output)
+
+    def test_empty_auto_selection_does_not_resolve_or_scan_roots(self):
+        defaults = config.load_rules(self.rules_file)
+        self.write_rules(
+            "\n".join(
+                f'[[rules]]\nid="{rule.id}"\nauto_apply=false'
+                for rule in defaults.rules
+            )
+        )
+        with (
+            mock.patch.object(
+                scan, "_resolve_roots", side_effect=AssertionError("resolved")
+            ),
+            mock.patch.object(
+                scan, "_agent_and_path_plan", side_effect=AssertionError("scanned")
+            ),
+        ):
+            for request in (
+                CleanRequest(config=self.rules_file),
+                PurgeRequest(config=self.rules_file),
+            ):
+                report = operations.cleanup(request, ui=CleanupUI())
+                self.assertEqual(report.exit_code, 0)
+                self.assertEqual(report.choices, ())
+                self.assertEqual(report.roots, ())
+                self.assertEqual(report.issues[0].code, "no_rules_selected")
+                self.assertFalse(report.issues[0].is_failure)
+                result = CliRunner().invoke(
+                    app, ["file", report.command, "--config", str(self.rules_file)]
+                )
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"No {report.command} rules selected", result.output)
+                self.assertIn("hgc file rule", result.output)
+
+    def test_clean_cli_paths_intersect_within_and_keep_glob_base(self):
+        self.write_rules("""[[rules]]
+id="clean.temp"
+match={all=[{within="configured"}, {glob="nested/*.tmp"}]}
+""")
+        configured = self.file(self.repo / "configured/nested/original.tmp")
+        outside = self.file(self.base / "elsewhere/outside.tmp")
+        report = clean_files(
+            CleanRequest(
+                config=self.rules_file,
+                rules=("temp",),
+                paths=(configured.parent, outside.parent),
+            ),
+            ui=CleanupUI(),
+        )
+        self.assertEqual([choice.exact_path for choice in report.choices], [configured])
+        empty = clean_files(
+            CleanRequest(
+                config=self.rules_file, rules=("temp",), paths=(outside.parent,)
+            ),
+            ui=CleanupUI(),
+        )
+        self.assertEqual(empty.choices, ())
+        self.assertEqual(empty.roots, ())
+
+    def test_rootless_rule_is_valid_until_selected_and_missing_root_stops_all(self):
+        from hagency_cli.files.cleanup.selection import CleanupSelectionError
+
+        self.write_rules(
+            """[[rules]]
+id="clean.rootless"
+match = { glob = '*.tmp' }
+"""
+        )
+        with mock.patch.object(
+            scan, "_agent_and_path_plan", side_effect=AssertionError("scanned")
+        ):
+            with self.assertRaisesRegex(
+                CleanupSelectionError, "PATH or a within condition"
+            ):
+                clean_files(
+                    CleanRequest(config=self.rules_file, rules=("auto", "rootless")),
+                    ui=CleanupUI(),
+                )
+            result = CliRunner().invoke(
+                app,
+                [
+                    "file",
+                    "clean",
+                    "-r",
+                    "rootless",
+                    "--config",
+                    str(self.rules_file),
+                ],
+            )
+            self.assertEqual(result.exit_code, 2, result.output)
+            self.assertIn("PATH or a within condition", result.output)
+        target = self.file(self.base / "cache/item.tmp")
+        report = clean_files(
+            CleanRequest(
+                config=self.rules_file, rules=("rootless",), paths=(target.parent,)
+            ),
+            ui=CleanupUI(),
+        )
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual([choice.exact_path for choice in report.choices], [target])
+
+    def test_removed_command_field_is_rejected(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.legacy"
+command="clean"
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+"""
+        )
+        with mock.patch.object(
+            scan, "_scan_root", side_effect=AssertionError("scanned")
+        ):
+            for command in ("rule", "clean", "purge"):
+                result = CliRunner().invoke(
+                    app,
+                    [
+                        "file",
+                        command,
+                        "--config",
+                        str(self.rules_file),
+                    ],
+                )
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("unsupported fields", result.output)
+                self.assertIn("command", result.output)
+
+    def test_review_auto_rootless_accepts_invocation_path_and_does_not_affect_purge(
+        self,
+    ):
+        defaults = config.load_rules(self.rules_file)
+        self.write_rules(
+            "\n".join(
+                f'[[rules]]\nid="{rule.id}"\nauto_apply=false'
+                for rule in defaults.rules
+            )
+            + """
+[[rules]]
+id="clean.rootless"
+auto_apply=true
+match = { glob = '*.tmp' }
+"""
+        )
+        target = self.file(self.base / "cache/item.tmp")
+        report = clean_files(
+            CleanRequest(config=self.rules_file, paths=(target.parent,)), ui=CleanupUI()
+        )
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual([choice.exact_path for choice in report.choices], [target])
+        self.assertTrue(target.exists())
+        with mock.patch.object(
+            scan, "_scan_root", side_effect=AssertionError("scanned")
+        ):
+            for command, expected in (("clean", 2), ("purge", 0)):
+                result = CliRunner().invoke(
+                    app, ["file", command, "--config", str(self.rules_file)]
+                )
+                self.assertEqual(result.exit_code, expected, result.output)
+
+    def test_selected_rules_only_contribute_exclusions_and_age(self):
+        target = self.file(self.repo / "cache/item.tmp")
+        self.old(target)
+        self.write_rules(
+            """[[rules]]
+id="clean.remove"
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+[[rules]]
+id="clean.exclude"
+exclude=["item.tmp"]
+match = { all = [{ within = "cache" }, { not = { glob = "**/*" } }] }
+[[rules]]
+id="clean.young"
+min_age_days=30
+match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+"""
+        )
+        request = CleanRequest(config=self.rules_file, rules=("remove",))
+        report = clean_files(request, ui=CleanupUI())
+        self.assertEqual([choice.exact_path for choice in report.choices], [target])
+        for extra in ("exclude", "young"):
+            report = clean_files(
+                replace(request, rules=("remove", extra)),
+                ui=CleanupUI(interactive=True),
+            )
+            self.assertEqual(report.choices, ())
+            self.assertTrue(target.exists())
+
+    def test_explicit_path_rule_preserves_git_and_symlink_protections(self):
+        root = self.project()
+        tracked = self.file(root / "tracked.tmp")
+        linked = root / "link.tmp"
+        linked.symlink_to(tracked)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "tracked.tmp"], check=True)
+        self.write_rules("""[[rules]]
+id="clean.temp"
+match = { glob = '*.tmp' }
+""")
+        report = clean_files(
+            CleanRequest(config=self.rules_file, rules=("temp",), paths=(root,)),
+            ui=CleanupUI(interactive=True),
+        )
+        self.assertEqual(report.choices, ())
+        self.assertTrue(tracked.exists())
+        self.assertTrue(linked.is_symlink())
+
+    def test_explicit_path_rule_revalidates_configuration_before_deletion(self):
+        target = self.file(self.base / "cache/item.tmp")
+        self.write_rules("""[[rules]]
+id="clean.temp"
+match = { glob = '*.tmp' }
+""")
+        request = CleanRequest(
+            config=self.rules_file, rules=("temp",), paths=(target.parent,)
+        )
+        report = clean_files(
+            request,
+            ui=CleanupUI(
+                interactive=True,
+                hook=lambda: self.rules_file.write_text("schema_version=1\n"),
+            ),
+        )
+        self.assertTrue(target.exists())
+        self.assertTrue(any(issue.code == "config_changed" for issue in report.issues))
+        self.write_rules("""[[rules]]
+id="clean.temp"
+match = { glob = '*.tmp' }
+""")
+        report = clean_files(request, ui=CleanupUI(interactive=True))
+        self.assertEqual(report.exit_code, 0)
+        self.assertFalse(target.exists())
+
+    def test_purge_cli_rule_selection_and_recursive_short_option(self):
+        root = self.project()
+        target = self.file(root / "a/b/c/d/e/f/deep.tmp")
+        artifact = self.artifact(root)
+        self.old(target)
+        self.write_rules(
+            """[[rules]]
+id="purge.temp"
+match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+"""
+        )
+        args = [
+            "file",
+            "purge",
+            str(root),
+            "-r",
+            "temp",
+            "--config",
+            str(self.rules_file),
+            "--dry-run",
+        ]
+        shallow = CliRunner().invoke(app, args)
+        self.assertEqual(shallow.exit_code, 0, shallow.output)
+        self.assertNotIn(str(target), shallow.output)
+        deep = CliRunner().invoke(app, [*args, "-R"])
+        self.assertEqual(deep.exit_code, 0, deep.output)
+        self.assertIn(str(target), deep.output)
+        self.assertNotIn(str(artifact), deep.output)
+        self.assertTrue(target.exists())
+
+    def test_rule_query_lists_effective_configuration_without_target_inspection(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.manual"
+match = { glob = '*.tmp' }
+[[rules]]
+id="clean.codex.staging"
+enabled=false
+[[rules]]
+id="purge.artifacts"
+preselect_after_days=12
+"""
+        )
+        runner = CliRunner()
+        with (
+            mock.patch.object(
+                scan, "_build_plan", side_effect=AssertionError("scanned")
+            ),
+            mock.patch.object(
+                agents, "source_roots", side_effect=AssertionError("inspected")
+            ),
+        ):
+            result = runner.invoke(
+                app, ["file", "rule", "--config", str(self.rules_file)]
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            for rule in config.load_rules(self.rules_file).rules:
+                self.assertIn(rule.id, result.output)
+                self.assertIn(rule.origin, result.output)
+            self.assertIn("clean.manual | explicit-only | paths", result.output)
+            self.assertIn("clean.codex.staging | disabled", result.output)
+            filtered = runner.invoke(
+                app,
+                [
+                    "file",
+                    "rule",
+                    "--command",
+                    "clean",
+                    "--config",
+                    str(self.rules_file),
+                ],
+            )
+            self.assertEqual(filtered.exit_code, 0, filtered.output)
+            self.assertNotIn("purge.", filtered.output)
+            detail = runner.invoke(
+                app,
+                ["file", "rule", "purge.artifacts", "--config", str(self.rules_file)],
+            )
+            self.assertEqual(detail.exit_code, 0, detail.output)
+            self.assertIn("preselect_after_days = 12", detail.output)
+            self.assertIn("auto_apply = true", detail.output)
+            self.assertNotIn("command =", detail.output)
+        for args in (
+            ["manual"],
+            ["clean.missing"],
+            ["--command", "invalid"],
+            ["purge.artifacts", "--command", "clean"],
+        ):
+            result = runner.invoke(
+                app, ["file", "rule", *args, "--config", str(self.rules_file)]
+            )
+            self.assertEqual(result.exit_code, 2, result.output)
+        self.rules_file.write_text("invalid=[")
+        result = runner.invoke(app, ["file", "rule", "--config", str(self.rules_file)])
+        self.assertEqual(result.exit_code, 1, result.output)
+
+    def test_file_size_parser_units_exactness_and_bounds(self):
+        from hagency_cli.files.cleanup.file_filters import parse_file_size
+
+        for value, expected in (
+            (0, 0),
+            (104_857_600, 104_857_600),
+            ("100MiB", 104_857_600),
+            ("1KB", 1000),
+            ("1MB", 1000**2),
+            ("1GB", 1000**3),
+            ("1TB", 1000**4),
+            ("1KiB", 1024),
+            ("1GiB", 1024**3),
+            ("1TiB", 1024**4),
+            (" 1.5 mIb ", 1_572_864),
+            ("0.001KB", 1),
+            ("0.125KiB", 128),
+            ("0B", 0),
+            ("1.00000000000000000000000000000B", 1),
+            (2**63 - 1, 2**63 - 1),
+            ("9223372036854775807B", 2**63 - 1),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(parse_file_size(value), expected)
+        for value in (
+            True,
+            False,
+            -1,
+            1.5,
+            None,
+            [],
+            2**63,
+            "9223372036854775808B",
+            "-1MiB",
+            "1",
+            "1XB",
+            "1e3B",
+            "NaN B",
+            "Infinity B",
+            "0.1B",
+            "0.1KiB",
+            "1.00000000000000000000000000001B",
+        ):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                parse_file_size(value)
+
+    def test_file_filter_validation_and_override_inheritance(self):
+        defaults = self.file(
+            self.base / "defaults.toml",
+            """[[rules]]
+id="clean.filtered"
+auto_apply=true
+match={any=[{min_file_size="1KiB", max_file_size="4KiB"}, {is_text=true}]}
+""",
+        )
+        self.write_rules("""[[rules]]
+id="clean.filtered"
+min_age_days=2
+""")
+        with mock.patch.object(config, "DEFAULTS_PATH", defaults):
+            rule = config.load_rules(self.rules_file).rules[0]
+            self.assertEqual(
+                rule.match.data(),
+                {
+                    "any": [
+                        {"min_file_size": 1024, "max_file_size": 4096},
+                        {"is_text": True},
+                    ]
+                },
+            )
+            self.assertTrue(rule.auto_apply)
+            self.write_rules(
+                """[[rules]]
+id="clean.filtered"
+match={max_file_size="2KiB"}
+"""
+            )
+            replacement = config.load_rules(self.rules_file).rules[0]
+            self.assertEqual(replacement.match.data(), {"max_file_size": 2048})
+            self.assertTrue(replacement.auto_apply)
+        for value in (
+            {"min_file_size": True},
+            {"max_file_size": -1},
+            {"is_text": 1},
+            {"min_file_size": 2, "max_file_size": 1},
+            {"file_match": "any"},
+            {"any": []},
+            {"is_video": "false"},
+            {"is_image": []},
+            {"glob": 1},
+        ):
+            with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
+                parse_condition(value, self.repo, "clean")
+        for field in (
+            "source",
+            "root",
+            "include",
+            "min_file_size",
+            "is_text",
+            "file_match",
+        ):
+            self.write_rules(f'[[rules]]\nid="clean.codex.versions"\n{field}=false\n')
+            with self.assertRaisesRegex(
+                config.CleanupConfigError, "unsupported fields"
+            ):
+                config.load_rules(self.rules_file)
+
+    def test_text_names_use_last_suffix_and_do_not_inspect_contents(self):
+        from hagency_cli.files.cleanup.file_filters import is_text_name
+
+        for name in (
+            "note.md",
+            "note.TXT",
+            "main.rs",
+            "main.py",
+            "run.log",
+            "data.jsonl",
+            "source.TSX",
+            "config.yml",
+            "diagram.svg",
+            "table.sql",
+            "build.gradle",
+            "Dockerfile",
+            "GNUmakefile",
+            "README",
+            "license",
+            ".gitignore",
+            ".env",
+            ".ENV.local",
+            "Cargo.lock",
+            "uv.lock",
+            "poetry.lock",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_text_name(self.base / "absent" / name))
+        for name in (
+            "file.bin",
+            "image.png",
+            "archive.zip",
+            "log.1",
+            "readme.backup",
+            "file",
+            "x.txt.exe",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(is_text_name(Path(name)))
+        target = self.file(self.base / "cache/binary.TXT")
+        target.write_bytes(b"\x00\xff\x00")
+        plain = self.file(target.parent / "plain.bin", "ordinary text")
+        self.write_rules(
+            """[[rules]]
+id="clean.text"
+match = { all = [{ glob = '**/*' }, { is_text = true }] }
+"""
+        )
+        request = CleanRequest(
+            config=self.rules_file, paths=(target.parent,), rules=("text",)
+        )
+        report = clean_files(request, ui=CleanupUI())
+        self.assertEqual([choice.exact_path for choice in report.choices], [target])
+        self.write_rules(
+            """[[rules]]
+id="clean.text"
+match = { all = [{ glob = '**/*' }, { is_text = false }] }
+"""
+        )
+        report = clean_files(request, ui=CleanupUI())
+        self.assertEqual([choice.exact_path for choice in report.choices], [plain])
+
+    def test_file_filters_combine_and_recurse_instead_of_selecting_directory(self):
+        root = self.base / "cache"
+        expected = {
+            self.file(root / "nested/a.bin", "a" * 4),
+            self.file(root / "nested/deeper/b.bin", "b" * 8),
+        }
+        kept = {
+            self.file(root / "nested/tiny.bin", "a" * 3),
+            self.file(root / "nested/huge.bin", "a" * 9),
+            self.file(root / "nested/text.md", "a" * 5),
+            self.file(root / "outside.bin", "a" * 5),
+        }
+        self.write_rules(
+            """[[rules]]
+id="clean.files"
+match = { all = [{ glob = 'nested/' }, { all = [{ min_file_size = 4, max_file_size = 8 }, { is_text = false }] }] }
+"""
+        )
+        request = CleanRequest(config=self.rules_file, paths=(root,), rules=("files",))
+        preview = clean_files(request, ui=CleanupUI())
+        self.assertEqual({choice.exact_path for choice in preview.choices}, expected)
+        self.assertTrue(all(choice.entry_kind == "file" for choice in preview.choices))
+        report = clean_files(request, ui=CleanupUI(interactive=True))
+        self.assertEqual(report.exit_code, 0)
+        self.assertTrue(all(not path.exists() for path in expected))
+        self.assertTrue(all(path.exists() for path in kept))
+        self.assertTrue((root / "nested/deeper").is_dir())
+
+    def test_non_text_or_large_matches_both_branches_and_strict_size_boundary(self):
+        root = self.base / "cache"
+        threshold = 10 * 1024**2
+        expected = set()
+        kept = set()
+        for name, size, selected in (
+            ("nested/empty.bin", 0, True),
+            ("nested/small.bin", 1, True),
+            ("nested/large.bin", threshold + 1, True),
+            ("nested/large.MD", threshold + 1, True),
+            ("nested/equal.txt", threshold, False),
+            ("nested/small.py", 1, False),
+            ("nested/keep.bin", 1, False),
+            ("outside.bin", threshold + 1, False),
+        ):
+            target = self.file(root / name, "")
+            with target.open("wb") as stream:
+                stream.truncate(size)
+            (expected if selected else kept).add(target)
+        self.write_rules(
+            """[[rules]]
+id="clean.non_text_or_large"
+exclude=["**/keep.bin"]
+match = { all = [{ glob = 'nested/' }, { any = [{ min_file_size = 10_485_761 }, { is_text = false }] }] }
+"""
+        )
+        request = CleanRequest(
+            config=self.rules_file, paths=(root,), rules=("non_text_or_large",)
+        )
+        preview = clean_files(request, ui=CleanupUI())
+        self.assertEqual({choice.exact_path for choice in preview.choices}, expected)
+        self.assertTrue(all(choice.entry_kind == "file" for choice in preview.choices))
+        report = clean_files(request, ui=CleanupUI(interactive=True))
+        self.assertEqual(report.exit_code, 0)
+        self.assertTrue(all(not path.exists() for path in expected))
+        self.assertTrue(all(path.exists() for path in kept))
+        self.assertTrue((root / "nested").is_dir())
+
+    def test_file_match_any_keeps_size_range_together_and_omitted_conditions_absent(
+        self,
+    ):
+        root = self.project()
+        files = {
+            name: self.file(root / name, "x" * size)
+            for name, size in (
+                ("small.txt", 3),
+                ("lower.txt", 4),
+                ("upper.txt", 8),
+                ("large.txt", 9),
+                ("small.bin", 3),
+            )
+        }
+        for fields, names in (
+            (
+                "any=[{min_file_size=4, max_file_size=8}, {is_text=false}]",
+                {"lower.txt", "upper.txt", "small.bin"},
+            ),
+            ("min_file_size=4\nmax_file_size=8", {"lower.txt", "upper.txt"}),
+            ("is_text=false", {"small.bin"}),
+            ("is_text=true", {"small.txt", "lower.txt", "upper.txt", "large.txt"}),
+        ):
+            with self.subTest(fields=fields):
+                self.write_rules(
+                    """[[rules]]
+id="purge.files"
+match = { all = [{any=[{glob="*.txt"},{glob="*.bin"}]}, {"""
+                    + fields.replace("\n", ", ")
+                    + "}] }"
+                )
+                report = purge_space(
+                    PurgeRequest(
+                        config=self.rules_file, paths=(root,), rules=("files",)
+                    ),
+                    ui=CleanupUI(),
+                )
+                self.assertEqual(
+                    {choice.exact_path for choice in report.choices},
+                    {files[name] for name in names},
+                )
+
+    def test_file_match_any_revalidates_changed_files_even_if_still_matching(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.files"
+match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text = false }] }] }
+"""
+        )
+        for name, size in (
+            ("shrunk.txt", 1),
+            ("still-large.txt", 11),
+            ("small.bin", 1),
+        ):
+            with self.subTest(name=name):
+                target = self.file(self.base / name / name, "x" * 12)
+                report = clean_files(
+                    CleanRequest(
+                        config=self.rules_file, paths=(target.parent,), rules=("files",)
+                    ),
+                    ui=CleanupUI(
+                        interactive=True,
+                        hook=lambda target=target, size=size: target.write_text(
+                            "x" * size
+                        ),
+                    ),
+                )
+                self.assertEqual(report.exit_code, 1)
+                self.assertEqual(report.results[0].disposition, ItemDisposition.SKIPPED)
+                self.assertEqual(target.stat().st_size, size)
+
+    def test_file_match_any_descendant_age_applies_to_either_branch(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.whole"
+match = { glob = 'bundle/' }
+[[rules]]
+id="clean.files"
+min_age_days=30
+match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text = false }] }] }
+"""
+        )
+        for name, size, count in (
+            ("small.txt", 1, 1),
+            ("small.bin", 1, 0),
+            ("large.txt", 10, 0),
+        ):
+            with self.subTest(name=name):
+                root = self.base / name
+                self.file(root / "bundle" / name, "x" * size)
+                report = clean_files(
+                    CleanRequest(
+                        config=self.rules_file, paths=(root,), rules=("whole", "files")
+                    ),
+                    ui=CleanupUI(),
+                )
+                self.assertEqual(len(report.choices), count)
+
+    def test_zero_file_size_is_a_file_filter_and_bounds_are_inclusive(self):
+        root = self.base / "cache"
+        empty = self.file(root / "nested/empty", "")
+        nonempty = self.file(root / "nested/nonempty", "x")
+        for fields, expected in (
+            ("min_file_size=0", {empty, nonempty}),
+            ("max_file_size=0", {empty}),
+            ("min_file_size=1\nmax_file_size=1", {nonempty}),
+        ):
+            self.write_rules(
+                """[[rules]]
+id="clean.files"
+match = { """
+                + fields.replace("\n", ", ")
+                + " }"
+            )
+            report = clean_files(
+                CleanRequest(config=self.rules_file, paths=(root,), rules=("files",)),
+                ui=CleanupUI(),
+            )
+            self.assertEqual({choice.exact_path for choice in report.choices}, expected)
+
+    def test_file_filter_uses_sparse_logical_size_not_allocated_space(self):
+        target = self.file(self.base / "cache/sparse.bin", "")
+        with target.open("wb") as stream:
+            stream.truncate(1024**2)
+        info = target.stat()
+        if not hasattr(info, "st_blocks") or info.st_blocks * 512 >= info.st_size:
+            self.skipTest("filesystem does not expose sparse allocation")
+        self.write_rules(
+            """[[rules]]
+id="clean.sparse"
+match = { all = [{ glob = '*.bin' }, { min_file_size = "1MiB", max_file_size = "1MiB" }] }
+"""
+        )
+        report = clean_files(
+            CleanRequest(
+                config=self.rules_file, paths=(target.parent,), rules=("sparse",)
+            ),
+            ui=CleanupUI(),
+        )
+        self.assertEqual([choice.exact_path for choice in report.choices], [target])
+        self.assertEqual(report.choices[0].size_bytes, info.st_blocks * 512)
+
+    def test_purge_file_filters_keep_depth_and_project_semantics(self):
+        root = self.project()
+        shallow = self.file(root / "build/log.txt")
+        deep = self.file(root / "a/b/c/d/e/f/deep.txt")
+        self.write_rules(
+            """[[rules]]
+id="purge.text"
+match = { all = [{ source = "project" }, { glob = '**/*' }, { is_text = true }] }
+"""
+        )
+        request = PurgeRequest(config=self.rules_file, paths=(root,), rules=("text",))
+        report = purge_space(request, ui=CleanupUI())
+        paths = {choice.exact_path for choice in report.choices}
+        self.assertIn(shallow, paths)
+        self.assertNotIn(deep, paths)
+        self.assertNotIn(shallow.parent, paths)
+        report = purge_space(replace(request, recursive=True), ui=CleanupUI())
+        self.assertIn(deep, {choice.exact_path for choice in report.choices})
+
+    def test_file_filters_do_not_become_cross_rule_protection(self):
+        root = self.base / "cache"
+        small_text = self.file(root / "bundle/readme.txt", "keep?")
+        self.file(root / "bundle/payload.bin", "x" * 20)
+        text = """[[rules]]
+id="clean.whole"
+match = { glob = 'bundle/' }
+[[rules]]
+id="clean.filtered"
+match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text = false }] }] }
+"""
+        self.write_rules(text)
+        request = CleanRequest(
+            config=self.rules_file, paths=(root,), rules=("whole", "filtered")
+        )
+        report = clean_files(request, ui=CleanupUI())
+        self.assertEqual(
+            [choice.exact_path for choice in report.choices], [small_text.parent]
+        )
+        self.write_rules(text + 'exclude=["bundle/readme.txt"]\n')
+        report = clean_files(request, ui=CleanupUI(interactive=True))
+        self.assertEqual(report.choices, ())
+        self.assertTrue(small_text.exists())
+
+    def test_age_constraints_apply_only_to_file_filter_matches(self):
+        root = self.base / "cache"
+        target = self.file(root / "bundle/readme.txt")
+        self.old(target.parent)
+        self.write_rules(
+            """[[rules]]
+id="clean.whole"
+match = { glob = 'bundle/' }
+[[rules]]
+id="clean.binary"
+min_age_days=30
+match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text = false }] }] }
+"""
+        )
+        request = CleanRequest(
+            config=self.rules_file, paths=(root,), rules=("whole", "binary")
+        )
+        self.assertEqual(len(clean_files(request, ui=CleanupUI()).choices), 1)
+        self.file(target.parent / "small.bin", "tiny")
+        self.assertEqual(len(clean_files(request, ui=CleanupUI()).choices), 1)
+        self.file(target.parent / "large.bin", "x" * 20)
+        self.assertEqual(clean_files(request, ui=CleanupUI()).choices, ())
+
+    def test_file_size_changes_after_preview_are_not_deleted(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.filtered"
+match = { all = [{ glob = '*.txt' }, { all = [{ max_file_size = 10 }, { is_text = true }] }] }
+"""
+        )
+        for length in (6, 11):
+            with self.subTest(length=length):
+                target = self.file(self.base / f"cache-{length}/file.txt", "x" * 5)
+                report = clean_files(
+                    CleanRequest(
+                        config=self.rules_file,
+                        paths=(target.parent,),
+                        rules=("filtered",),
+                    ),
+                    ui=CleanupUI(
+                        interactive=True,
+                        hook=lambda target=target, length=length: target.write_text(
+                            "x" * length
+                        ),
+                    ),
+                )
+                self.assertEqual(report.exit_code, 1)
+                self.assertEqual(report.results[0].disposition, ItemDisposition.SKIPPED)
+                self.assertEqual(target.stat().st_size, length)
+
+    def test_file_size_changes_during_inspection_are_not_offered(self):
+        target = self.file(self.base / "cache/file.bin", "x" * 5)
+        self.write_rules(
+            """[[rules]]
+id="clean.filtered"
+match = { all = [{ glob = '*.bin' }, { max_file_size = 10 }] }
+"""
+        )
+        measure = scan._measure_candidate
+
+        def grow(*args, **kwargs):
+            target.write_text("x" * 11)
+            return measure(*args, **kwargs)
+
+        with mock.patch.object(scan, "_measure_candidate", side_effect=grow):
+            report = clean_files(
+                CleanRequest(
+                    config=self.rules_file, paths=(target.parent,), rules=("filtered",)
+                ),
+                ui=CleanupUI(),
+            )
+        self.assertEqual(report.choices, ())
+        self.assertTrue(
+            any(
+                issue.code == "candidate_changed_during_scan" for issue in report.issues
+            )
+        )
+        self.assertTrue(target.exists())
+
+    def test_rule_query_shows_canonical_file_filters(self):
+        self.write_rules(
+            """[[rules]]
+id="clean.filtered"
+match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = "1.5MiB", max_file_size = "2MB" }, { is_text = false }] }] }
+"""
+        )
+        result = CliRunner().invoke(
+            app, ["file", "rule", "clean.filtered", "--config", str(self.rules_file)]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        for line in (
+            '"min_file_size": 1572864',
+            '"max_file_size": 2000000',
+            '"is_text": false',
+        ):
+            self.assertIn(line, result.output)
+
+    def test_file_filters_preserve_git_and_symlinks_during_deletion(self):
+        root = self.project()
+        tracked = self.file(root / "tracked.txt")
+        removable = self.file(root / "temporary.txt")
+        linked = root / "linked.txt"
+        linked.symlink_to(tracked)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "tracked.txt"], check=True)
+        self.write_rules(
+            """[[rules]]
+id="clean.filtered"
+match = { all = [{ glob = '*.txt' }, { all = [{ min_file_size = 0 }, { is_text = true }] }] }
+"""
+        )
+        report = clean_files(
+            CleanRequest(config=self.rules_file, paths=(root,), rules=("filtered",)),
+            ui=CleanupUI(interactive=True),
+        )
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual([choice.exact_path for choice in report.choices], [removable])
+        self.assertFalse(removable.exists())
+        self.assertTrue(tracked.exists())
+        self.assertTrue(linked.is_symlink())
 
 
 if __name__ == "__main__":

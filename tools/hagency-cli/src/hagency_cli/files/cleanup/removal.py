@@ -16,7 +16,6 @@ from hagency_cli.files.cleanup.inspection import (
     _find_project_root,
     _git_tracked_state,
     _has_link_or_reparse_component,
-    _is_link_or_reparse,
     _is_mount,
     _is_reparse_stat,
     _is_within,
@@ -42,8 +41,11 @@ def _revalidate(candidate: _BoundCandidate) -> str | None:
     if not _same_identity(path, candidate.target_identity):
         return "candidate changed after review"
     try:
-        if _is_link_or_reparse(path) or not _is_within(
-            _resolve_path(path), _resolve_path(candidate.root)
+        info = path.stat(follow_symlinks=False)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_stat(info)
+            or not _is_within(_resolve_path(path), _resolve_path(candidate.root))
         ):
             return "candidate is no longer a safe filesystem entry"
     except OSError:
@@ -52,8 +54,7 @@ def _revalidate(candidate: _BoundCandidate) -> str | None:
     if _has_link_or_reparse_component(path):
         return "candidate has a linked ancestor after review"
     if not all(
-        included(scope, path, stat.S_ISDIR(candidate.target_identity.mode))
-        for scope in candidate.scopes
+        included(scope, path, info.st_mode, info.st_size) for scope in candidate.scopes
     ):
         if any(scope.rule.source == "cachedir-tag" for scope in candidate.scopes):
             return "candidate no longer has a valid CACHEDIR.TAG"
@@ -88,7 +89,7 @@ def _revalidate(candidate: _BoundCandidate) -> str | None:
         source = candidate.scopes[0].rule.source
         if source.endswith(".versions"):
             keep = max(
-                scope.rule.keep_previous
+                scope.rule.retained_versions
                 for scope in candidate.exclusions
                 if scope.rule.source == source
             )

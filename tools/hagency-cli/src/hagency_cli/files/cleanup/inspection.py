@@ -27,6 +27,13 @@ from hagency_cli.files.cleanup.models import (
 )
 
 _DEADLINE: ContextVar[float | None] = ContextVar("cleanup_deadline", default=None)
+_BUDGET_SECONDS: ContextVar[float] = ContextVar("cleanup_budget_seconds", default=60)
+_CHECKPOINT_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
+    "cleanup_checkpoint_hook", default=None
+)
+_MEASURE_HOOK: ContextVar[Callable[[Path, bool], None] | None] = ContextVar(
+    "cleanup_measure_hook", default=None
+)
 _MOUNTS: ContextVar[frozenset[Path] | None] = ContextVar("cleanup_mounts", default=None)
 
 
@@ -70,19 +77,35 @@ def _is_mount(path: Path | str) -> bool:
     return Path(os.path.realpath(path)) in points
 
 
+class ScanTimeout(OSError):
+    """A scan budget expired; incomplete candidates must not be published."""
+
+
 def checkpoint(deadline: float | None = None) -> None:
+    hook = _CHECKPOINT_HOOK.get()
+    if hook is not None:
+        hook()
     deadline = _DEADLINE.get() if deadline is None else deadline
     if deadline is not None and time.monotonic() >= deadline:
-        raise OSError("cleanup source scan exceeded 60 seconds")
+        raise ScanTimeout(
+            f"cleanup source scan exceeded {_BUDGET_SECONDS.get():g} seconds"
+        )
 
 
 @contextmanager
-def scan_budget(seconds: float = 60) -> Iterator[None]:
-    token = _DEADLINE.set(time.monotonic() + seconds)
+def scan_budget(
+    seconds: float | None = 60, *, limit: float | None = None
+) -> Iterator[None]:
+    token = _DEADLINE.set(None if seconds is None else time.monotonic() + seconds)
+    limit_token = _BUDGET_SECONDS.set(limit if limit is not None else seconds or 0)
     try:
-        with mount_check_scope():
+        if _MOUNTS.get() is not None:
             yield
+        else:
+            with mount_check_scope():
+                yield
     finally:
+        _BUDGET_SECONDS.reset(limit_token)
         _DEADLINE.reset(token)
 
 
@@ -329,6 +352,13 @@ def _discover_git_contexts(
             break
         current = current.parent
 
+    return _discover_nested_git_contexts(path, tuple(contexts.values()))
+
+
+def _discover_nested_git_contexts(
+    path: Path, ancestors: tuple[_GitContext, ...]
+) -> tuple[tuple[_GitContext, ...], str | None]:
+    contexts = {_canonical_key(context.root): context for context in ancestors}
     stack = [path] if path.is_dir() else []
     while stack:
         checkpoint()
@@ -342,6 +372,7 @@ def _discover_git_contexts(
                 f"could not inspect nested Git repositories under {directory}: {exc}",
             )
         for entry in entry_list:
+            checkpoint()
             entry_path = Path(entry.path)
             if entry.name.casefold() == ".git":
                 context, error = _git_context_from_marker(entry_path)
@@ -369,10 +400,22 @@ def _discover_git_contexts(
     return tuple(contexts[key] for key in sorted(contexts)), None
 
 
+def git_query_timeout() -> float:
+    """Use the remaining budget at process launch, without a post-deadline grace."""
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return 10
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ScanTimeout(
+            f"cleanup source scan exceeded {_BUDGET_SECONDS.get():g} seconds"
+        )
+    return min(10, remaining)
+
+
 def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | None]:
     try:
         checkpoint()
-        deadline = _DEADLINE.get()
         relative = path.relative_to(git_root).as_posix()
         git_environment = {
             key: value
@@ -394,11 +437,13 @@ def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | N
             capture_output=True,
             check=False,
             env=git_environment,
-            timeout=min(10, max(0.001, deadline - time.monotonic()))
-            if deadline
-            else 10,
+            timeout=git_query_timeout(),
         )
+        checkpoint()
+    except ScanTimeout:
+        raise
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        checkpoint()
         return None, str(exc)
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
@@ -420,8 +465,11 @@ def _measure_candidate(
     stack = [path]
     try:
         while stack:
-            checkpoint()
             current = stack.pop()
+            hook = _MEASURE_HOOK.get()
+            if hook is not None:
+                hook(current, current != path)
+            checkpoint()
             info = current.stat(follow_symlinks=False)
             if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
                 return (
@@ -480,6 +528,8 @@ def _measure_candidate(
                 continue
             with os.scandir(current) as entries:
                 stack.extend(Path(entry.path) for entry in entries)
+    except ScanTimeout:
+        raise
     except OSError as exc:
         return (
             None,

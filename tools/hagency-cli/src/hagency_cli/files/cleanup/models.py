@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
+
+from hagency_cli.files.cleanup.conditions import Condition, entries
 
 MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 
@@ -118,6 +121,29 @@ def _display_text(value: object) -> str:
     return "".join(f"\\u{ord(c):04x}" if _unsafe_text(c) else c for c in str(value))
 
 
+CLEANUP_COMMANDS = ("clean", "purge")
+
+
+def rule_command(identity: str) -> str:
+    """Validate a full rule ID and return its owning command."""
+    if not isinstance(identity, str) or not identity or _unsafe_text(identity):
+        raise ValueError(f"invalid cleanup rule id: {identity!r}")
+    prefix, separator, suffix = identity.partition(".")
+    if prefix not in CLEANUP_COMMANDS or not separator or not suffix.strip():
+        raise ValueError(
+            f"rule id must start with clean. or purge. and have a nonempty suffix: {identity!r}"
+        )
+    if any(char.isspace() for char in identity) or any(
+        not part for part in suffix.split(".")
+    ):
+        raise ValueError(
+            f"rule id must not contain whitespace or empty dot-separated components: {identity!r}"
+        )
+    if suffix == "auto":
+        raise ValueError(f"reserved cleanup rule id: {identity}")
+    return prefix
+
+
 class Activity(str, Enum):
     OLD = "old"
     RECENT = "recent"
@@ -145,6 +171,9 @@ class PurgeRequest:
     recursive: bool = False
     config: Path | None = None
     include_unverified: bool = False
+    rules: tuple[str, ...] = ()
+    scan_timeout: int = 0
+    yes: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,21 +181,69 @@ class CleanRequest:
     agents: tuple[str, ...] = ()
     dry_run: bool = False
     config: Path | None = None
+    rules: tuple[str, ...] = ()
+    paths: tuple[Path, ...] = ()
+    scan_timeout: int = 0
+    yes: bool = False
+
+
+@dataclass(frozen=True)
+class ScanProgress:
+    stage: str
+    path: Path | None
+    entries: int
+    candidates: int
+    elapsed_seconds: float
+    git_queries: int = 0
+    finished: bool = False
+    stage_seconds: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
 class CleanupRule:
     id: str
-    command: str
-    source: str
-    include: tuple[str, ...]
+    match: Condition
     exclude: tuple[str, ...] = ()
     enabled: bool = True
-    root: Path | None = None
+    auto_apply: bool = False
     min_age_days: int = 0
     preselect_after_days: int = 0
     keep_previous: int = 1
     origin: str = "builtin"
+
+    def __post_init__(self) -> None:
+        rule_command(self.id)
+        if not isinstance(self.match, Condition):
+            raise TypeError("match must be a parsed condition")
+
+    @property
+    def command(self) -> str:
+        return rule_command(self.id)
+
+
+@dataclass(frozen=True)
+class ScanRule(CleanupRule):
+    """One compiled rule routed to a discovery provider; never TOML input."""
+
+    source: str = "paths"
+    root: Path | None = None
+    limits: tuple[Path, ...] = ()
+    policies: tuple[CleanupRule, ...] = ()
+
+    @property
+    def retained_versions(self) -> int:
+        return max(
+            (
+                self.keep_previous,
+                *(
+                    policy.keep_previous
+                    for policy in self.policies
+                    if any(
+                        entry.source == self.source for entry in entries(policy.match)
+                    )
+                ),
+            )
+        )
 
     @property
     def agent(self) -> str | None:
@@ -175,14 +252,21 @@ class CleanupRule:
 
 @dataclass(frozen=True)
 class RuleScope:
-    rule: CleanupRule
+    rule: ScanRule
     root: Path
+
+
+@dataclass(frozen=True)
+class ConfigSignature:
+    identity: tuple[int, ...]
+    digest: str
 
 
 @dataclass(frozen=True)
 class RulesSnapshot:
     rules: tuple[CleanupRule, ...]
-    files: tuple[tuple[Path, str | None], ...]
+    files: tuple[tuple[Path, ConfigSignature | None], ...]
+    expressions: Mapping[str, Condition]
 
 
 @dataclass(frozen=True)
@@ -234,7 +318,19 @@ class CleanupUI(Protocol):
 
     def confirm_exact(self, paths: tuple[Path, ...], known_bytes: int) -> bool: ...
 
+
+@runtime_checkable
+class CleanupPlanPresenter(Protocol):
+    """Optional plan-presentation capability for cleanup UI adapters."""
+
     def present_plan(self, plan: CleanupPlan) -> None: ...
+
+
+@runtime_checkable
+class CleanupProgressObserver(Protocol):
+    """Optional scan-progress capability for cleanup UI adapters."""
+
+    def scan_progress(self, progress: ScanProgress) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -274,6 +370,8 @@ class CleanupReport:
 
     @property
     def exit_code(self) -> int:
+        if any(issue.code == "scan_timeout" for issue in self.issues):
+            return 1
         return (
             0 if self.disposition is CleanupDisposition.CANCELLED else int(self.failed)
         )

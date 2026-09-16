@@ -5,42 +5,48 @@ schema_version = 1
 
 [[rules]]
 id = "purge.artifacts"
+auto_apply = true
 preselect_after_days = 7
 
 [[rules]]
 id = "purge.cachedirs"
+auto_apply = true
 preselect_after_days = 7
 
 [[rules]]
 id = "clean.codex.versions"
+auto_apply = true
 keep_previous = 1
 
 [[rules]]
 id = "clean.claude.versions"
+auto_apply = true
 keep_previous = 1
 
 [[rules]]
 id = "clean.copilot.versions"
+auto_apply = true
 keep_previous = 1
 
 [[rules]]
 id = "clean.codex.staging"
+auto_apply = true
 min_age_days = 7
 
-# Optional examples; uncomment only for directories you intend to clean.
+[[rules]]
+id = "clean.non_text_or_large"
+auto_apply = false
+# Supply PATH when applying: hgc file clean ./target -r non_text_or_large --dry-run
+
+[rules.match]
+any = [{ is_text = false }, { min_file_size = 10_485_761 }]
+
+# Optional examples; new rules default to explicit-only (--rule).
 # [[rules]]
-# id = "purge.temp-files"
-# command = "purge"
-# source = "project"
-# include = ["*.tmp"]
-# preselect_after_days = 7  # Default: recent files require manual selection.
-# exclude = ["keep.tmp"]
+# id = "clean.media"
+# match = { any = [{ is_image = true }, { is_video = true }] }
 #
 # [[rules]]
-# id = "clean.custom-cache"
-# command = "clean"
-# source = "paths"
-# root = ".local/cache"  # Relative to this file, independent of scan paths/CWD.
-# include = ["*.tmp", "downloads/"]
-# exclude = ["downloads/keep/"]
-# min_age_days = 7
+# id = "clean.cached-media"
+# exclude = ["keep/**"]
+# match = { all = [{ within = ".local/cache" }, { ref = "clean.media" }] }

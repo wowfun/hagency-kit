@@ -5,12 +5,14 @@ import os
 import stat
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 from hagency_cli.files.cleanup import agents
-from hagency_cli.files.cleanup.config import CleanupConfigError, load_rules
+from hagency_cli.files.cleanup.config import load_rules
 from hagency_cli.files.cleanup.inspection import (
+    ScanTimeout,
     _artifact_verification_reason,
     _canonical_key,
     _context_protection_reason,
@@ -41,12 +43,20 @@ from hagency_cli.files.cleanup.models import (
     PurgeRequest,
     RuleScope,
     RulesSnapshot,
+    ScanProgress,
     _BoundCandidate,
     _Identity,
     _TreeEntry,
     _unsafe_text,
 )
-from hagency_cli.files.cleanup.policy import age_policy, included, inspect_policy
+from hagency_cli.files.cleanup.planning import current_session, planning_session
+from hagency_cli.files.cleanup.policy import (
+    age_policy,
+    applicable_policies,
+    included,
+    inspect_policy,
+)
+from hagency_cli.files.cleanup.selection import select_rules
 from hagency_cli.files.purge.roots import _resolve_roots, _validate_roots
 
 
@@ -87,7 +97,12 @@ def _bind_candidate(
         root_identity = _identity(root)
         parent_identity = _identity(path.parent)
         target_identity = _identity(path)
-        git_contexts, git_error = _discover_git_contexts(path)
+        session = current_session()
+        if session:
+            session.update("git", path)
+        git_contexts, git_error = (
+            session.git_contexts(path) if session else _discover_git_contexts(path)
+        )
         if git_error is not None:
             return None, [
                 CleanupIssue(
@@ -102,7 +117,11 @@ def _bind_candidate(
                 if _is_within(path, context.root, allow_equal=True)
                 else context.root
             )
-            tracked, git_error = _git_tracked_state(tracked_path, context.root)
+            tracked, git_error = (
+                session.git_tracked(tracked_path, context.root)
+                if session
+                else _git_tracked_state(tracked_path, context.root)
+            )
             if tracked is None:
                 return None, [
                     CleanupIssue(
@@ -118,6 +137,8 @@ def _bind_candidate(
                     )
                 ]
         tree: list[_TreeEntry] = []
+        if session:
+            session.update("measuring", path)
         size, activity, error, hardlinks = _measure_candidate(
             path,
             now_ns,
@@ -125,6 +146,17 @@ def _bind_candidate(
             tree=tree,
         )
         if error is None and tree:
+            if not all(
+                included(scope, path, tree[0].identity.mode, tree[0].size)
+                for scope in scopes
+            ):
+                return None, [
+                    CleanupIssue(
+                        "candidate_changed_during_scan",
+                        path,
+                        "candidate no longer matches its cleanup rules after inspection",
+                    )
+                ]
             activity, error = age_policy(path, tree, scopes, exclusions, now_ns)
         if error:
             protected = error.startswith("protected:")
@@ -148,6 +180,15 @@ def _bind_candidate(
         ):
             return None, issues
         tagged = all(scope.rule.source == "cachedir-tag" for scope in scopes)
+        contributors = tuple(
+            dict.fromkeys(
+                policy
+                for scope in scopes
+                for policy in applicable_policies(
+                    scope, path, target_identity.mode, tree[0].size if tree else 0
+                )
+            )
+        )
         choice = CleanupCandidate(
             id=_candidate_id(path, target_identity),
             exact_path=path,
@@ -160,8 +201,8 @@ def _bind_candidate(
             and artifact_unverified_reason is None
             and activity is Activity.OLD
             and size is not None,
-            rule_ids=tuple(scope.rule.id for scope in scopes),
-            rule_origins=tuple(dict.fromkeys(scope.rule.origin for scope in scopes)),
+            rule_ids=tuple(dict.fromkeys(rule.id for rule in contributors)),
+            rule_origins=tuple(dict.fromkeys(rule.origin for rule in contributors)),
             entry_kind="directory" if stat.S_ISDIR(target_identity.mode) else "file",
             group=agent or (str(project) if is_project else str(root)),
             project_verified=project_verified,
@@ -193,7 +234,12 @@ def _bind_candidate(
                     "candidate or parent changed before scan results were published",
                 ),
             ]
+        checkpoint()
+        if session:
+            session.candidates += 1
         return candidate, issues
+    except ScanTimeout:
+        raise
     except OSError as exc:
         return None, [*issues, CleanupIssue("candidate_stat_failed", path, str(exc))]
 
@@ -210,6 +256,7 @@ def _scan_root(
 ) -> tuple[list[_BoundCandidate], list[CleanupIssue]]:
     candidates: list[_BoundCandidate] = []
     issues: list[CleanupIssue] = []
+    root_identity = None
     if _is_within(Path.home(), root):
         issues.append(
             CleanupIssue(
@@ -237,8 +284,12 @@ def _scan_root(
                 )
                 continue
             for entry in children:
-                checkpoint()
                 path = Path(entry.path)
+                session = current_session()
+                if session:
+                    session.entries += 1
+                    session.update("scanning", path)
+                checkpoint()
                 try:
                     info = entry.stat(follow_symlinks=False)
                     is_directory = stat.S_ISDIR(info.st_mode)
@@ -277,7 +328,10 @@ def _scan_root(
                         # scan root. Keep that distinction in the frozen candidate.
                         project = root
                     all_scopes = (
-                        tuple(RuleScope(rule, project or root) for rule in rules)
+                        tuple(
+                            RuleScope(rule, rule.root or project or root)
+                            for rule in rules
+                        )
                         if path_scopes is None
                         else path_scopes
                     )
@@ -287,7 +341,7 @@ def _scan_root(
                         scope
                         for scope in all_scopes
                         if (path_scopes is None or scope.rule.source == "paths")
-                        and included(scope, path, is_directory)
+                        and included(scope, path, info.st_mode, info.st_size)
                     )
                     if scopes:
                         artifact_reason = None
@@ -331,6 +385,8 @@ def _scan_root(
                         continue
                     if is_directory and (recursive or depth + 1 < MAX_SCAN_DEPTH):
                         stack.append((path, depth + 1))
+                except ScanTimeout:
+                    raise
                 except OSError as exc:
                     issues.append(CleanupIssue("scan_stat_failed", path, str(exc)))
         if not _same_identity(root, root_identity):
@@ -341,6 +397,19 @@ def _scan_root(
                     root,
                     "scan root changed before its results could be published",
                 ),
+            ]
+        return candidates, issues
+    except ScanTimeout as exc:
+        session = current_session()
+        if session is None:
+            raise
+        session.timed_out(exc, root)
+        if root_identity is None:
+            return [], issues
+        if not _same_identity(root, root_identity):
+            return [], [
+                *issues,
+                CleanupIssue("root_changed_during_scan", root, "scan root changed"),
             ]
         return candidates, issues
     except OSError as exc:
@@ -359,12 +428,17 @@ def _drop_duplicate_and_nested(
     )
     kept: list[_BoundCandidate] = []
     identities: dict[tuple[int, int] | str, int] = {}
+    directories: set[str] = set()
     for candidate in ordered:
+        checkpoint()
+        # normcase folds on Windows; POSIX (including macOS) preserves case.
+        # Use the same canonical spelling for candidates and ancestor keys.
+        canonical = _canonical_key(candidate.choice.exact_path)
         identity: tuple[int, int] | str = (
             (candidate.target_identity.device, candidate.target_identity.inode)
             if candidate.target_identity.inode
             and stat.S_ISDIR(candidate.target_identity.mode)
-            else _canonical_key(candidate.choice.exact_path)
+            else canonical
         )
         if identity in identities:
             index = identities[identity]
@@ -401,13 +475,12 @@ def _drop_duplicate_and_nested(
                     scopes=tuple(dict.fromkeys((*previous.scopes, *candidate.scopes))),
                 )
             continue
-        if any(
-            _is_within(candidate.choice.exact_path, item.choice.exact_path)
-            for item in kept
-        ):
+        if any(str(parent) in directories for parent in Path(canonical).parents):
             continue
         identities[identity] = len(kept)
         kept.append(candidate)
+        if stat.S_ISDIR(candidate.target_identity.mode):
+            directories.add(canonical)
     return kept
 
 
@@ -417,6 +490,7 @@ def _sort_candidates(
     project_totals: dict[Path, int] = {}
     seen_hardlinks: set[tuple[int, int]] = set()
     for candidate in sorted(candidates, key=lambda item: str(item.choice.exact_path)):
+        checkpoint()
         project = candidate.choice.project_path
         accounted_size = candidate.choice.size_bytes or 0
         for entry in candidate.hardlink_entries:
@@ -442,36 +516,76 @@ def _sort_candidates(
     )
 
 
-def _build_plan(request: PurgeRequest | CleanRequest) -> CleanupPlan:
+def _build_plan(
+    request: PurgeRequest | CleanRequest,
+    progress: Callable[[ScanProgress], None] | None = None,
+) -> CleanupPlan:
     snapshot = load_rules(request.config)
-    with mount_check_scope():
-        return _plan_with_rules(request, snapshot)
+    rules = select_rules(request, snapshot)
+    with planning_session(request.scan_timeout, progress), mount_check_scope():
+        return _plan_with_rules(request, snapshot, rules)
 
 
 def _plan_with_rules(
-    request: PurgeRequest | CleanRequest, snapshot: RulesSnapshot
+    request: PurgeRequest | CleanRequest,
+    snapshot: RulesSnapshot,
+    rules: tuple[CleanupRule, ...],
 ) -> CleanupPlan:
     now_ns = time.time_ns()
+    session = current_session()
+    assert session is not None
     command = "purge" if isinstance(request, PurgeRequest) else "clean"
-    rules = tuple(
-        rule for rule in snapshot.rules if rule.enabled and rule.command == command
-    )
+    if not rules:
+        return CleanupPlan(
+            (),
+            (),
+            (
+                CleanupIssue(
+                    "no_rules_selected",
+                    None,
+                    f"No {command} rules selected; inspect hgc file rule --command {command} "
+                    "or select a rule with --rule ID",
+                    False,
+                ),
+            ),
+            snapshot,
+            command,
+        )
     if isinstance(request, PurgeRequest):
-        roots, root_issues = _resolve_roots(request)
+        if any(rule.root is None for rule in rules):
+            fallback, root_issues = _resolve_roots(request)
+        else:
+            fallback, root_issues = (), ()
+        raw_roots = tuple(
+            dict.fromkeys(
+                root
+                for rule in rules
+                for base in ((rule.root,) if rule.root is not None else fallback)
+                for root in _intersect_roots(base, rule.limits)
+            )
+        )
+        roots, validation_issues = _validate_roots(raw_roots, Path.home())
+        root_issues = (*root_issues, *validation_issues)
         candidates: list[_BoundCandidate] = []
         issues = list(root_issues)
         discovered_scopes: set[RuleScope] = set()
-        for root in roots:
-            found, scan_issues = _scan_root(
-                root,
-                now_ns,
-                rules=rules,
-                recursive=request.recursive,
-                include_unverified=request.include_unverified,
-                discovered_scopes=discovered_scopes,
-            )
+        for index, root in enumerate(roots):
+            session.remaining_roots = roots[index:]
+            with session.budget():
+                found, scan_issues = _scan_root(
+                    root,
+                    now_ns,
+                    rules=rules,
+                    recursive=request.recursive,
+                    include_unverified=request.include_unverified,
+                    discovered_scopes=discovered_scopes,
+                )
             candidates.extend(found)
             issues.extend(scan_issues)
+            if session.timeout_issues:
+                break
+        if not session.timeout_issues:
+            session.remaining_roots = ()
         # Different overlapping scan roots may discover different project owners.
         # Every discovered exclusion/retention constraint still applies globally.
         scopes = tuple(
@@ -480,47 +594,53 @@ def _plan_with_rules(
             )
         )
         filtered = []
-        for candidate in candidates:
-            path = candidate.choice.exact_path
-            applicable = relevant_scopes(scopes, path)
-            reason = next(
-                (
-                    reason
-                    for entry in candidate.tree
-                    if (
-                        reason := exclusion_reason(
-                            applicable,
-                            path / entry.relative_path,
-                            stat.S_ISDIR(entry.identity.mode),
-                        )
+        try:
+            with session.budget() if not session.timeout_issues else scan_budget(None):
+                for candidate in candidates:
+                    path = candidate.choice.exact_path
+                    session.update("protecting", path)
+                    checkpoint()
+                    applicable = relevant_scopes(scopes, path)
+                    reason = next(
+                        (
+                            reason
+                            for entry in candidate.tree
+                            if (
+                                reason := exclusion_reason(
+                                    applicable,
+                                    path / entry.relative_path,
+                                    stat.S_ISDIR(entry.identity.mode),
+                                )
+                            )
+                        ),
+                        None,
                     )
-                ),
-                None,
-            )
-            activity = candidate.choice.activity
-            if reason is None and candidate.tree:
-                activity, reason = age_policy(
-                    path,
-                    list(candidate.tree),
-                    candidate.scopes,
-                    applicable,
-                    now_ns,
-                )
-            if reason:
-                issues.append(CleanupIssue("protected", path, reason, False))
-            else:
-                choice = replace(
-                    candidate.choice,
-                    activity=activity,
-                    preselected=activity is Activity.OLD
-                    and not _is_within(Path.home(), candidate.root)
-                    and candidate.choice.size_bytes is not None
-                    and candidate.choice.project_verified
-                    and candidate.choice.artifact_unverified_reason is None,
-                )
-                filtered.append(
-                    replace(candidate, choice=choice, exclusions=applicable)
-                )
+                    activity = candidate.choice.activity
+                    if reason is None and candidate.tree:
+                        activity, reason = age_policy(
+                            path,
+                            list(candidate.tree),
+                            candidate.scopes,
+                            applicable,
+                            now_ns,
+                        )
+                    if reason:
+                        issues.append(CleanupIssue("protected", path, reason, False))
+                    else:
+                        choice = replace(
+                            candidate.choice,
+                            activity=activity,
+                            preselected=activity is Activity.OLD
+                            and not _is_within(Path.home(), candidate.root)
+                            and candidate.choice.size_bytes is not None
+                            and candidate.choice.project_verified
+                            and candidate.choice.artifact_unverified_reason is None,
+                        )
+                        filtered.append(
+                            replace(candidate, choice=choice, exclusions=applicable)
+                        )
+        except ScanTimeout as exc:
+            session.timed_out(exc, session.path)
         candidates = filtered
     else:
         if not sys.platform.startswith("linux"):
@@ -537,40 +657,83 @@ def _plan_with_rules(
                 snapshot,
                 command,
             )
-        if any(agent not in agents.AGENTS for agent in request.agents):
-            raise CleanupConfigError("unknown cleanup agent")
-        selected_agents = request.agents or agents.AGENTS
-        rules = tuple(
-            rule
-            for rule in rules
-            if rule.agent is None or rule.agent in selected_agents
-        )
-        candidates, issues, roots = _agent_and_path_plan(rules, now_ns)
+        candidates, issues, roots = _agent_and_path_plan(rules, now_ns, request.paths)
+    session.update("finalizing")
+    try:
+        with (
+            session.budget()
+            if not session.timeout_issues and any(rule.agent is None for rule in rules)
+            else scan_budget(None)
+        ):
+            checkpoint()
+            finalized = _sort_candidates(_drop_duplicate_and_nested(candidates))
+            checkpoint()
+    except ScanTimeout as exc:
+        session.timed_out(exc, None)
+        # Finish only the already inspected candidates; this cannot discover new targets.
+        with scan_budget(None):
+            finalized = _sort_candidates(_drop_duplicate_and_nested(candidates))
+    session.candidates = len(finalized)
     return CleanupPlan(
         roots,
-        _sort_candidates(_drop_duplicate_and_nested(candidates)),
-        tuple(issues),
+        finalized,
+        (
+            *issues,
+            *(
+                replace(
+                    issue,
+                    message=f"{issue.message} {session.entries} entries inspected, {len(finalized)} complete candidates, {time.monotonic() - session.started:.1f}s elapsed.",
+                )
+                for issue in session.timeout_issues
+            ),
+        ),
         snapshot,
         command,
+    )
+
+
+def _intersect_roots(root: Path, limits: tuple[Path, ...]) -> tuple[Path, ...]:
+    if not limits:
+        return (root,)
+    return tuple(
+        dict.fromkeys(
+            limit if limit.is_relative_to(root) else root
+            for limit in limits
+            if limit.is_relative_to(root) or root.is_relative_to(limit)
+        )
     )
 
 
 def _agent_and_path_plan(
     rules: tuple[CleanupRule, ...],
     now_ns: int,
+    paths: tuple[Path, ...] = (),
 ) -> tuple[list[_BoundCandidate], list[CleanupIssue], tuple[Path, ...]]:
     candidates: list[_BoundCandidate] = []
     issues: list[CleanupIssue] = []
     all_scopes: list[RuleScope] = []
     roots: list[Path] = []
+    session = current_session()
+    assert session is not None
+    source_roots: dict[str, tuple[Path, ...]] = {}
     for rule in rules:
         try:
+            if rule.agent and rule.source not in source_roots:
+                source_roots[rule.source] = agents.source_roots(rule.source)
             rule_roots = (
-                (rule.root,)
+                ((rule.root,) if rule.root is not None else rule.limits)
                 if rule.source == "paths"
-                else agents.source_roots(rule.source)
+                else source_roots[rule.source]
             )
-            all_scopes.extend(RuleScope(rule, root) for root in rule_roots)
+            all_scopes.extend(
+                RuleScope(rule, root)
+                for root in rule_roots
+                if not rule.agent
+                or (
+                    _intersect_roots(root, rule.limits)
+                    and (rule.root is None or _intersect_roots(root, (rule.root,)))
+                )
+            )
         except OSError as exc:
             issues.append(CleanupIssue("source_failed", None, f"{rule.id}: {exc}"))
     for source in dict.fromkeys(rule.source for rule in rules):
@@ -581,18 +744,24 @@ def _agent_and_path_plan(
             continue
         source_rules = tuple(dict.fromkeys(scope.rule for scope in source_scopes))
         try:
-            with scan_budget(agents.SOURCE_TIMEOUT):
+            with (
+                session.budget()
+                if source == "paths"
+                else scan_budget(agents.SOURCE_TIMEOUT)
+            ):
                 if source == "paths":
                     raw_roots = tuple(
                         dict.fromkeys(
-                            scope.root
+                            root
                             for scope in source_scopes
-                            if scope.root.exists() or scope.root.is_symlink()
+                            for root in _intersect_roots(scope.root, scope.rule.limits)
+                            if root.exists() or root.is_symlink()
                         )
                     )
                     validated, root_issues = _validate_roots(raw_roots, Path.home())
                     issues.extend(root_issues)
-                    for root in validated:
+                    for index, root in enumerate(validated):
+                        session.remaining_roots = validated[index:]
                         roots.append(root)
                         found, scan_issues = _scan_root(
                             root,
@@ -603,6 +772,10 @@ def _agent_and_path_plan(
                         )
                         candidates.extend(found)
                         issues.extend(scan_issues)
+                        if session.timeout_issues:
+                            break
+                    if not session.timeout_issues:
+                        session.remaining_roots = ()
                     continue
                 agent = source_rules[0].agent
                 if not any(
@@ -622,11 +795,13 @@ def _agent_and_path_plan(
                     )
                     continue
                 if source.endswith(".versions"):
-                    keep = max(rule.keep_previous for rule in source_rules)
+                    keep = max(rule.retained_versions for rule in source_rules)
                     inventory = agents.version_inventory(source, keep)
                 else:
                     inventory = agents.staging_inventory()
                 for entry in inventory:
+                    session.entries += 1
+                    session.update("scanning", entry.path)
                     checkpoint()
                     if entry.root not in roots:
                         roots.append(entry.root)
@@ -653,7 +828,7 @@ def _agent_and_path_plan(
                     scopes = tuple(
                         scope
                         for scope in source_scopes
-                        if included(scope, entry.path, stat.S_ISDIR(info.st_mode))
+                        if included(scope, entry.path, info.st_mode, info.st_size)
                     )
                     if not scopes:
                         continue
@@ -686,6 +861,20 @@ def _agent_and_path_plan(
                     issues.extend(problems)
                     if candidate is not None:
                         candidates.append(candidate)
+        except ScanTimeout as exc:
+            if source == "paths":
+                session.timed_out(exc, source_scopes[0].root)
+            else:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if all(scope.rule.source != source for scope in candidate.scopes)
+                ]
+                issues.append(
+                    CleanupIssue(
+                        "source_failed", source_scopes[0].root, f"{source}: {exc}"
+                    )
+                )
         except OSError as exc:
             # A source whose state cannot be fully inspected contributes no targets.
             candidates = [

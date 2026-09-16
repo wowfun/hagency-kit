@@ -3,10 +3,24 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import sys
 import tomllib
 from pathlib import Path
+from types import MappingProxyType
 
-from hagency_cli.files.cleanup.models import CleanupRule, RulesSnapshot, _unsafe_text
+from hagency_cli.files.cleanup.conditions import (
+    entries,
+    expand_rules,
+    parse_condition,
+    walk,
+)
+from hagency_cli.files.cleanup.models import (
+    CleanupRule,
+    ConfigSignature,
+    RulesSnapshot,
+    _unsafe_text,
+    rule_command,
+)
 from hagency_cli.paths import expand_path
 from hagency_cli.workspace.discovery import (
     _find_workspace_root,
@@ -16,22 +30,24 @@ from hagency_cli.workspace.discovery import (
 CONFIG_NAME = "hagency-cleanup.toml"
 DEFAULTS_PATH = Path(__file__).with_name("defaults.toml")
 MAX_CONFIG_BYTES = 1024 * 1024
-SOURCES = {
-    "project",
-    "cachedir-tag",
-    "paths",
-    "codex.versions",
-    "claude.versions",
-    "copilot.versions",
-    "codex.staging",
-}
 
 
 class CleanupConfigError(ValueError):
     pass
 
 
-def _read(path: Path, *, optional: bool = False) -> tuple[dict, str | None]:
+def _config_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read(path: Path, *, optional: bool = False) -> tuple[dict, ConfigSignature | None]:
     try:
         if _unsafe_text(str(path)):
             raise CleanupConfigError("unsafe characters in cleanup config path")
@@ -47,23 +63,13 @@ def _read(path: Path, *, optional: bool = False) -> tuple[dict, str | None]:
         if len(data) > MAX_CONFIG_BYTES:
             raise CleanupConfigError(f"cleanup config exceeds 1 MiB: {path}")
 
-        def identity(info: os.stat_result) -> tuple[int, ...]:
-            return (
-                info.st_dev,
-                info.st_ino,
-                info.st_mode,
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-            )
-
-        if identity(before) != identity(after) or identity(path.stat()) != identity(
-            after
+        identity = _config_identity(after)
+        if (
+            _config_identity(before) != identity
+            or _config_identity(path.stat()) != identity
         ):
             raise CleanupConfigError(f"cleanup config changed while reading: {path}")
-        signature = hashlib.sha256(
-            data + repr((after.st_dev, after.st_ino, after.st_mtime_ns)).encode()
-        ).hexdigest()
+        signature = ConfigSignature(identity, hashlib.sha256(data).hexdigest())
         return tomllib.loads(data.decode("utf-8")), signature
     except FileNotFoundError as exc:
         if optional and not path.is_symlink():
@@ -71,7 +77,7 @@ def _read(path: Path, *, optional: bool = False) -> tuple[dict, str | None]:
         raise CleanupConfigError(f"missing cleanup config: {path}") from exc
     except CleanupConfigError:
         raise
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:
         raise CleanupConfigError(f"cannot read cleanup config {path}: {exc}") from exc
 
 
@@ -95,14 +101,13 @@ def _rows(data: dict, origin: Path) -> list[dict]:
     seen = set()
     for row in rows:
         identity = row.get("id")
-        if (
-            not isinstance(identity, str)
-            or not identity.strip()
-            or _unsafe_text(identity)
-            or identity in seen
-        ):
+        try:
+            rule_command(identity)
+        except ValueError as exc:
+            raise CleanupConfigError(f"{exc}: {origin}") from exc
+        if identity in seen:
             raise CleanupConfigError(
-                f"invalid or duplicate cleanup rule id {identity!r}: {origin}"
+                f"duplicate cleanup rule id {identity!r}: {origin}"
             )
         seen.add(identity)
     return rows
@@ -111,84 +116,56 @@ def _rows(data: dict, origin: Path) -> list[dict]:
 def _rule(row: dict, origin: Path, previous: CleanupRule | None = None) -> CleanupRule:
     fields = {
         "id",
-        "command",
-        "source",
-        "include",
+        "match",
         "exclude",
         "enabled",
-        "root",
+        "auto_apply",
         "min_age_days",
         "preselect_after_days",
         "keep_previous",
     }
-    if set(row) - fields:
+    unknown = set(row) - fields
+    if unknown:
         raise CleanupConfigError(
-            f"unknown fields in cleanup rule {row['id']}: {sorted(set(row) - fields)}"
+            f"unsupported fields in cleanup rule {row['id']}: {sorted(unknown)}; use match conditions"
         )
     values = {key: getattr(previous, key) for key in fields} if previous else {}
-    if previous and any(
-        key in row and row[key] != getattr(previous, key)
-        for key in ("command", "source")
-    ):
-        raise CleanupConfigError(
-            f"cannot change command/source of builtin rule {row['id']}"
-        )
     values.update(row)
-    source = values.get("source")
-    command = values.get("command")
-    if (
-        not isinstance(source, str)
-        or source not in SOURCES
-        or command != ("purge" if source in {"project", "cachedir-tag"} else "clean")
-    ):
-        raise CleanupConfigError(f"invalid command/source in cleanup rule {row['id']}")
-    if previous is None and source in {"project", "cachedir-tag", "paths"}:
-        # Recent custom targets remain eligible for deliberate manual selection.
-        values.setdefault("preselect_after_days", 7)
-    for key in ("include", "exclude"):
-        patterns = values.get(key, [])
+    try:
+        if "match" in row:
+            values["match"] = parse_condition(
+                row["match"], origin.parent, rule_command(row["id"])
+            )
+        elif previous is None:
+            raise ValueError("missing match condition")
+        patterns = values.get("exclude", ())
         if not isinstance(patterns, (list, tuple)) or any(
             not isinstance(p, str) or "\x00" in p for p in patterns
         ):
-            raise CleanupConfigError(f"{row['id']}.{key} must contain path patterns")
-        values[key] = tuple(patterns)
+            raise ValueError("exclude must contain path patterns")
         from hagency_cli.files.cleanup.matching import compile_patterns
 
-        try:
-            compile_patterns(values[key])
-        except (ValueError, TypeError) as exc:
-            raise CleanupConfigError(
-                f"invalid pattern in {row['id']}.{key}: {exc}"
-            ) from exc
-    if not previous and "include" not in row:
-        raise CleanupConfigError(
-            f"missing include patterns in cleanup rule {row['id']}"
-        )
-    if type(values.get("enabled", True)) is not bool:
-        raise CleanupConfigError(f"{row['id']}.enabled must be boolean")
-    for key in ("min_age_days", "preselect_after_days", "keep_previous"):
-        if key in values and (
-            type(values[key]) is not int or not 0 <= values[key] <= 2**63 - 1
-        ):
-            raise CleanupConfigError(
-                f"{row['id']}.{key} must be a nonnegative 64-bit integer"
-            )
-    if "keep_previous" in row and not source.endswith(".versions"):
-        raise CleanupConfigError(f"keep_previous is not supported by {source}")
-    if source != "paths" and "root" in row:
-        raise CleanupConfigError(f"root is not supported by {source}")
-    if source == "paths":
-        root = values.get("root")
-        if not isinstance(root, (str, Path)) or not str(root):
-            raise CleanupConfigError(f"missing root in cleanup rule {row['id']}")
-        if "root" in row:
-            if not isinstance(root, str) or _unsafe_text(root):
-                raise CleanupConfigError(f"invalid root in cleanup rule {row['id']}")
-            values["root"] = Path(os.path.abspath(expand_path(root, origin.parent)))
-    values["origin"] = str(origin)
-    try:
+        values["exclude"] = tuple(patterns)
+        compile_patterns(values["exclude"])
+        for key, default in (("enabled", True), ("auto_apply", False)):
+            if type(values.get(key, default)) is not bool:
+                raise ValueError(f"{key} must be boolean")
+        for key in ("min_age_days", "preselect_after_days", "keep_previous"):
+            if key in values and (
+                type(values[key]) is not int or not 0 <= values[key] <= 2**63 - 1
+            ):
+                raise ValueError(f"{key} must be a nonnegative 64-bit integer")
+        if previous is None:
+            sources = [
+                node.value for node in walk(values["match"]) if node.op == "source"
+            ]
+            if not sources or any(
+                source in {"project", "cachedir-tag"} for source in sources
+            ):
+                values.setdefault("preselect_after_days", 7)
+        values["origin"] = str(origin)
         return CleanupRule(**values)
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise CleanupConfigError(f"invalid cleanup rule {row['id']}: {exc}") from exc
 
 
@@ -204,14 +181,40 @@ def load_rules(value: Path | None = None, *, cwd: Path | None = None) -> RulesSn
         files.append((selected, signature))
         for row in _rows(data, selected):
             rules[row["id"]] = _rule(row, selected, rules.get(row["id"]))
-    return RulesSnapshot(tuple(rules.values()), tuple(files))
+    try:
+        expressions = expand_rules(tuple(rules.values()))
+        for expression in expressions.values():
+            entries(expression)  # Reject ambiguous lexical entries before any scan.
+        for rule in rules.values():
+            if rule.keep_previous != 1 and not any(
+                node.op == "source" and node.value.endswith(".versions")
+                for node in walk(expressions[rule.id])
+            ):
+                raise ValueError(f"keep_previous requires a versions source: {rule.id}")
+    except ValueError as exc:
+        raise CleanupConfigError(str(exc)) from exc
+    return RulesSnapshot(
+        tuple(rules.values()), tuple(files), MappingProxyType(expressions)
+    )
 
 
 def configuration_unchanged(snapshot: RulesSnapshot) -> bool:
     try:
-        return all(
-            _read(path, optional=signature is None)[1] == signature
-            for path, signature in snapshot.files
-        )
-    except CleanupConfigError:
+        for path, signature in snapshot.files:
+            if signature is None:
+                # A newly created file or dangling symlink changes discovery.
+                if path.exists() or path.is_symlink():
+                    return False
+                continue
+            info = path.stat()
+            if _config_identity(info) != signature.identity:
+                return False
+            # POSIX ctime detects in-place rewrites even with restored mtime.
+            # Windows ctime can be creation time; retain content checks there,
+            # and when the filesystem cannot supply a stable inode identity.
+            if sys.platform == "win32" or not info.st_ino:
+                if _read(path)[1] != signature:
+                    return False
+        return True
+    except (CleanupConfigError, OSError):
         return False

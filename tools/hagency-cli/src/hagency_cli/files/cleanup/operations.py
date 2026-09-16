@@ -11,6 +11,8 @@ from hagency_cli.files.cleanup.models import (
     CleanupIssue,
     CleanupItemResult,
     CleanupPlan,
+    CleanupPlanPresenter,
+    CleanupProgressObserver,
     CleanupReport,
     CleanupUI,
     ItemDisposition,
@@ -107,8 +109,10 @@ def clean_files(request: CleanRequest, *, ui: CleanupUI) -> CleanupReport:
 
 
 def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupReport:
+    """Raise CleanupSelectionError for invalid invocations; report config/execution failures."""
     try:
-        plan = _build_plan(request)
+        progress = ui.scan_progress if isinstance(ui, CleanupProgressObserver) else None
+        plan = _build_plan(request, progress=progress)
     except CleanupConfigError as exc:
         plan = CleanupPlan(
             (),
@@ -119,7 +123,7 @@ def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupRe
         return _make_report(plan, CleanupDisposition.PARTIAL)
     interactive = ui.is_interactive()
 
-    if not interactive:
+    if not interactive and not request.yes:
         selected = tuple(item for item in plan.candidates if item.choice.preselected)
         results = tuple(
             CleanupItemResult(
@@ -134,22 +138,25 @@ def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupRe
             plan, CleanupDisposition.PREVIEW, selected=selected, results=results
         )
 
-    if hasattr(ui, "present_plan"):
+    if interactive and isinstance(ui, CleanupPlanPresenter):
         ui.present_plan(plan)
 
     if not plan.candidates:
         return _make_report(plan, CleanupDisposition.COMPLETED)
 
-    selected_ids = ui.select(tuple(item.choice for item in plan.candidates))
-    if selected_ids is None or not selected_ids:
-        return _make_report(plan, CleanupDisposition.CANCELLED)
-    selected, selection_issues = _bind_selection(selected_ids, plan)
-    if selection_issues:
-        return _make_report(
-            plan,
-            CleanupDisposition.PARTIAL,
-            extra_issues=selection_issues,
-        )
+    if request.yes:
+        selected = plan.candidates
+    else:
+        selected_ids = ui.select(tuple(item.choice for item in plan.candidates))
+        if selected_ids is None or not selected_ids:
+            return _make_report(plan, CleanupDisposition.CANCELLED)
+        selected, selection_issues = _bind_selection(selected_ids, plan)
+        if selection_issues:
+            return _make_report(
+                plan,
+                CleanupDisposition.PARTIAL,
+                extra_issues=selection_issues,
+            )
 
     if request.dry_run:
         results = tuple(
@@ -167,7 +174,7 @@ def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupRe
 
     known_bytes = _selection_known_bytes(selected)
     exact_paths = tuple(item.choice.exact_path for item in selected)
-    if not ui.confirm_exact(exact_paths, known_bytes):
+    if not request.yes and not ui.confirm_exact(exact_paths, known_bytes):
         return _make_report(plan, CleanupDisposition.CANCELLED, selected=selected)
 
     results: list[CleanupItemResult] = []

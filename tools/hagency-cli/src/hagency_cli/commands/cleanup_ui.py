@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import questionary
 
 from hagency_cli.commands.cleanup_render import _render_issues, format_bytes
-from hagency_cli.files.cleanup.models import CleanupCandidate, CleanupPlan
+from hagency_cli.files.cleanup.models import (
+    CleanupCandidate,
+    CleanupPlan,
+    ScanProgress,
+    _display_text,
+)
 
 
 class QuestionaryCleanupUI:
@@ -14,6 +20,27 @@ class QuestionaryCleanupUI:
 
     def __init__(self) -> None:
         self.presented_plan: CleanupPlan | None = None
+        self._progress_visible = False
+
+    def scan_progress(self, progress: ScanProgress) -> None:
+        if not sys.stderr.isatty():
+            return
+        if progress.finished:
+            if self._progress_visible:
+                print("\r\033[2K", end="", file=sys.stderr, flush=True)
+            self._progress_visible = False
+            return
+        text = _display_text(
+            f"{progress.stage}: {progress.entries} entries, {progress.candidates} candidates, "
+            f"{progress.elapsed_seconds:.1f}s | {progress.path or ''}"
+        )
+        try:
+            columns = os.get_terminal_size(sys.stderr.fileno()).columns
+        except (OSError, ValueError):
+            columns = 80
+        width = max(1, columns - 1)
+        print("\r\033[2K" + text[:width], end="", file=sys.stderr, flush=True)
+        self._progress_visible = True
 
     def is_interactive(self) -> bool:
         self.presented_plan = None

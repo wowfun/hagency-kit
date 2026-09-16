@@ -2,77 +2,75 @@ schema_version = 1
 
 [[rules]]
 id = "purge.artifacts"
-command = "purge"
-source = "project"
-include = [
-  ".angular/",
-  ".astro/",
-  ".build/",
-  ".cxx/",
-  ".dart_tool/",
-  ".expo/",
-  ".gradle/",
-  ".mypy_cache/",
-  ".next/",
-  ".nox/",
-  ".nuxt/",
-  ".output/",
-  ".parcel-cache/",
-  ".pytest_cache/",
-  ".ruff_cache/",
-  ".svelte-kit/",
-  ".terragrunt-cache/",
-  ".tox/",
-  ".turbo/",
-  ".venv/",
-  ".zig-cache/",
-  "DerivedData/",
-  "Pods/",
-  "__pycache__/",
-  "bin/",
-  "build/",
-  "coverage/",
-  "dist/",
-  "node_modules/",
-  "obj/",
-  "target/",
-  "vendor/",
-  "venv/",
-  "zig-out/",
-]
+auto_apply = true
 preselect_after_days = 7
+[rules.match]
+all = [
+  { source = "project" },
+  { any = [
+    { glob = '.angular/' },
+    { glob = '.astro/' },
+    { glob = '.build/' },
+    { glob = '.cxx/' },
+    { glob = '.dart_tool/' },
+    { glob = '.expo/' },
+    { glob = '.gradle/' },
+    { glob = '.mypy_cache/' },
+    { glob = '.next/' },
+    { glob = '.nox/' },
+    { glob = '.nuxt/' },
+    { glob = '.output/' },
+    { glob = '.parcel-cache/' },
+    { glob = '.pytest_cache/' },
+    { glob = '.ruff_cache/' },
+    { glob = '.svelte-kit/' },
+    { glob = '.terragrunt-cache/' },
+    { glob = '.tox/' },
+    { glob = '.turbo/' },
+    { glob = '.venv/' },
+    { glob = '.zig-cache/' },
+    { glob = 'DerivedData/' },
+    { glob = 'Pods/' },
+    { glob = '__pycache__/' },
+    { glob = 'bin/' },
+    { glob = 'build/' },
+    { glob = 'coverage/' },
+    { glob = 'dist/' },
+    { glob = 'node_modules/' },
+    { glob = 'obj/' },
+    { glob = 'target/' },
+    { glob = 'vendor/' },
+    { glob = 'venv/' },
+    { glob = 'zig-out/' },
+  ] },
+]
 
 [[rules]]
 id = "purge.cachedirs"
-command = "purge"
-source = "cachedir-tag"
-include = ["**/"]
+auto_apply = true
 preselect_after_days = 7
+match = { all = [{ source = "cachedir-tag" }, { glob = '**/' }] }
 
 [[rules]]
 id = "clean.codex.versions"
-command = "clean"
-source = "codex.versions"
-include = ["*"]
+auto_apply = true
 keep_previous = 1
+match = { all = [{ source = "codex.versions" }, { glob = '*' }] }
 
 [[rules]]
 id = "clean.claude.versions"
-command = "clean"
-source = "claude.versions"
-include = ["*"]
+auto_apply = true
 keep_previous = 1
+match = { all = [{ source = "claude.versions" }, { glob = '*' }] }
 
 [[rules]]
 id = "clean.copilot.versions"
-command = "clean"
-source = "copilot.versions"
-include = ["*"]
+auto_apply = true
 keep_previous = 1
+match = { all = [{ source = "copilot.versions" }, { glob = '*' }] }
 
 [[rules]]
 id = "clean.codex.staging"
-command = "clean"
-source = "codex.staging"
-include = [".staging.*/", "openai-bundled.staging-*/", "marketplace-add-*/", "marketplace-upgrade-*/"]
+auto_apply = true
 min_age_days = 7
+match = { all = [{ source = "codex.staging" }, { any = [{ glob = '.staging.*/' }, { glob = 'openai-bundled.staging-*/' }, { glob = 'marketplace-add-*/' }, { glob = 'marketplace-upgrade-*/' }] }] }

@@ -12,7 +12,11 @@ Conduct a comprehensive, in-depth, and adversarial audit of <repo>'s architectur
 
 ---
 
-Conduct a comprehensive, in-depth, and adversarial simplification audit of `<scope>`:
+Conduct a comprehensive, in-depth, and adversarial simplification audit of <scope>:
 - Find unused or support-only surfaces, abandoned-feature residue, duplication, speculative generality, pass-through abstractions, needless nesting, redundant lifecycle machinery, misplaced defenses, and hand-rolled infrastructure replaceable by simpler established mechanisms.
 - Reject changes that merely move complexity, reduce clarity, or alter required behavior.
 - Preserve trust-boundary validation, security and accessibility controls, data safety, resource cleanup, and intentional seams.
+
+---
+
+read <file>. verify and fix substantive issues; selectively adopt improvement suggestions based on their expected benefit

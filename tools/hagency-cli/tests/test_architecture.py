@@ -336,7 +336,17 @@ class CommandTreeTests(unittest.TestCase):
                 "rm",
                 "apply",
             },
-            "file": {"init", "push", "pull", "sync", "pack", "apply", "purge", "clean"},
+            "file": {
+                "init",
+                "push",
+                "pull",
+                "sync",
+                "pack",
+                "apply",
+                "rule",
+                "purge",
+                "clean",
+            },
             "service": {"model-proxy"},
         }
         for name, commands in expected.items():
@@ -460,7 +470,18 @@ class CommandTreeTests(unittest.TestCase):
                 "before any destination write",
                 "manifest deletion markers",
             ),
-            ("file", "purge"): ("Non-TTY", "always preview", "Permanent deletion"),
+            ("file", "purge"): (
+                "Non-TTY",
+                "preview unless",
+                "--yes",
+                "skips both prompts",
+                "Permanent deletion",
+            ),
+            ("file", "clean"): (
+                "--yes",
+                "skips both prompts",
+                "never deletes",
+            ),
             ("service", "model-proxy", "start"): (
                 "mutually exclusive",
                 "127.0.0.1:8765",

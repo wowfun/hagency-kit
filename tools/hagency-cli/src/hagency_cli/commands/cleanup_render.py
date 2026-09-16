@@ -1,27 +1,90 @@
 from __future__ import annotations
 
+import json
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import fields
 from typing import Any
 
+from hagency_cli.files.cleanup.conditions import Condition, entries, walk
 from hagency_cli.files.cleanup.models import (
     CleanupPlan,
     CleanupReport,
+    CleanupRule,
     PathsEditReport,
     _display_text,
 )
+from hagency_cli.files.cleanup.models import (
+    _format_bytes as format_bytes,
+)
 
 
-def format_bytes(value: int) -> str:
-    size = float(max(value, 0))
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    for unit in units:
-        if size < 1024 or unit == units[-1]:
-            if unit == "B":
-                return f"{int(size)} {unit}"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    raise AssertionError("unreachable")
+def render_cleanup_rules(
+    rules: tuple[CleanupRule, ...],
+    *,
+    detail: bool = False,
+    resolved: Mapping[str, Condition] | None = None,
+) -> None:
+    def sources(rule: CleanupRule) -> str:
+        expression = resolved[rule.id] if resolved is not None else rule.match
+        if resolved is not None or not any(
+            node.op == "ref" for node in walk(expression)
+        ):
+            return ", ".join(
+                dict.fromkeys(
+                    "project"
+                    if entry.source == "paths" and rule.command == "purge"
+                    else entry.source
+                    for entry in entries(expression)
+                )
+            )
+        return (
+            ", ".join(
+                dict.fromkeys(
+                    str(node.value) for node in walk(expression) if node.op == "source"
+                )
+            )
+            or "paths"
+        )
+
+    if not rules:
+        print("No cleanup rules found.")
+        return
+    if detail:
+        for index, rule in enumerate(rules):
+            if index:
+                print()
+            for field in fields(rule):
+                value = (
+                    rule.match.data()
+                    if field.name == "match"
+                    else getattr(rule, field.name)
+                )
+                print(
+                    _display_text(
+                        f"{field.name} = {json.dumps(value, ensure_ascii=False, default=str)}"
+                    )
+                )
+            print(f"sources = {json.dumps(sources(rule).split(', '))}")
+            print(
+                f"references = {json.dumps(list(dict.fromkeys(node.value for node in walk(rule.match) if node.op == 'ref')))}"
+            )
+        return
+    print("ID | STATE | SOURCE | ORIGIN")
+    for rule in rules:
+        state = (
+            "disabled"
+            if not rule.enabled
+            else "auto"
+            if rule.auto_apply
+            else "explicit-only"
+        )
+        print(
+            " | ".join(
+                _display_text(cell).replace("|", r"\|")
+                for cell in (rule.id, state, sources(rule), rule.origin)
+            )
+        )
 
 
 def _value(value: Any) -> str:
@@ -159,4 +222,4 @@ def render_paths_edit_report(report: PathsEditReport) -> None:
             print(f"  {root}")
 
 
-__all__ = ["render_cleanup_report", "render_paths_edit_report"]
+__all__ = ["render_cleanup_report", "render_cleanup_rules", "render_paths_edit_report"]

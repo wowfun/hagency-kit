@@ -409,6 +409,7 @@ class CliTests(unittest.TestCase):
                 "init",
                 "pack",
                 "apply",
+                "rule",
                 "purge",
                 "clean",
             ],
@@ -482,7 +483,8 @@ class CliTests(unittest.TestCase):
 
         values, _stderr = self.complete_bash("hgc file ", 2)
         self.assertEqual(
-            values, ["push", "pull", "sync", "init", "pack", "apply", "purge", "clean"]
+            values,
+            ["push", "pull", "sync", "init", "pack", "apply", "rule", "purge", "clean"],
         )
 
         values, _stderr = self.complete_bash("hgc file purge --", 3)

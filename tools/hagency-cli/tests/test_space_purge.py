@@ -630,11 +630,14 @@ class SpacePurgeTests(unittest.TestCase):
         (project / "composer.json").write_text("{}\n", encoding="utf-8")
         (project / "app.csproj").write_text("<Project />\n", encoding="utf-8")
 
+        from hagency_cli.files.cleanup.conditions import walk
+
         artifact_names = {
-            pattern.removesuffix("/")
+            node.value.removesuffix("/")
             for rule in load_rules().rules
             if rule.id == "purge.artifacts"
-            for pattern in rule.include
+            for node in walk(rule.match)
+            if node.op == "glob"
         }
         for name in sorted(artifact_names):
             artifact = project / name

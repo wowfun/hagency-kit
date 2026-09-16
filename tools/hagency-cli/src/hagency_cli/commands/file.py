@@ -8,12 +8,20 @@ import typer
 
 from hagency_cli.commands.cleanup_render import (
     render_cleanup_report,
+    render_cleanup_rules,
     render_paths_edit_report,
 )
 from hagency_cli.commands.completion import complete_directory
 from hagency_cli.commands.shared import command_errors, die, make_app
-from hagency_cli.files.cleanup.models import CleanRequest, PurgeRequest
+from hagency_cli.files.cleanup.agents import AGENTS
+from hagency_cli.files.cleanup.config import CleanupConfigError, load_rules
+from hagency_cli.files.cleanup.models import (
+    CLEANUP_COMMANDS,
+    CleanRequest,
+    PurgeRequest,
+)
 from hagency_cli.files.cleanup.operations import clean_files, purge_space
+from hagency_cli.files.cleanup.selection import CleanupSelectionError
 from hagency_cli.files.purge.roots import edit_purge_paths
 from hagency_cli.files.sync.bundle.apply import apply_sync_bundle
 from hagency_cli.files.sync.bundle.pack import pack_sync_bundle
@@ -35,7 +43,9 @@ file_app = make_app(
     SFTP. A temporary [user@]host:path endpoint bypasses that configuration.
     pack and apply transfer offline ZIP bundles without a network connection.
     purge finds project artifacts; clean finds obsolete Agent installations and caches.
-    Both confirm permanent deletion in a TTY and preview in non-TTY invocations.
+    By default, both confirm deletion in a TTY and preview without a TTY.
+    --yes/-y deletes all eligible candidates after scanning without prompts.
+    rule lists the available cleanup rules and their automatic application status.
 
     Sync and bundle commands use the invocation directory or their --root.
     They do not discover a Hagency workspace. Purge uses explicit paths, a saved
@@ -717,6 +727,74 @@ def apply_sync_bundle_cli(
     )
 
 
+CleanupRuleOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--rule",
+        "-r",
+        help="Rule ID (command prefix optional); repeat or add auto for automatic rules",
+    ),
+]
+
+
+CleanupYesOption = Annotated[
+    bool,
+    typer.Option(
+        "--yes",
+        "-y",
+        help="After scanning, delete all eligible candidates without selection or confirmation, including without a TTY",
+    ),
+]
+
+
+@file_app.command("rule", short_help="List cleanup rules or inspect a full rule ID.")
+@command_errors
+def cleanup_rules_cli(
+    rule_id: Annotated[
+        str | None, typer.Argument(help="Full rule ID to inspect (no shorthand)")
+    ] = None,
+    command: Annotated[
+        str | None, typer.Option("--command", help="Filter rules by clean or purge")
+    ] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Explicit cleanup TOML")
+    ] = None,
+) -> None:
+    """Show merged rules, including disabled rules, without scanning targets.
+
+    Uses the same repository discovery and --config behavior as clean and purge.
+    A full rule ID shows all effective configuration fields; its prefix identifies
+    the command. --command filters the list.
+    States are auto, explicit-only and disabled.
+
+    \b
+    Examples:
+      hgc file rule
+      hgc file rule --command clean
+      hgc file rule clean.codex.versions
+    """
+    if command is not None and command not in CLEANUP_COMMANDS:
+        raise typer.BadParameter("choose clean or purge", param_hint="--command")
+    try:
+        snapshot = load_rules(config)
+    except CleanupConfigError as exc:
+        die(str(exc))
+    rules = tuple(
+        rule for rule in snapshot.rules if command is None or rule.command == command
+    )
+    if rule_id is not None:
+        rules = tuple(rule for rule in rules if rule.id == rule_id)
+        if not rules:
+            filter_hint = f" under --command {command}" if command is not None else ""
+            raise typer.BadParameter(
+                f"no matching rule with full ID {rule_id!r}{filter_hint}",
+                param_hint="RULE_ID",
+            )
+    render_cleanup_rules(
+        rules, detail=rule_id is not None, resolved=snapshot.expressions
+    )
+
+
 @file_app.command("purge", short_help="Find and remove rebuildable project artifacts.")
 @command_errors
 def space_purge_cli(
@@ -726,6 +804,16 @@ def space_purge_cli(
             help="Optional directories to scan instead of configured roots",
             metavar="PATH...",
             autocompletion=complete_directory,
+        ),
+    ] = None,
+    rule: CleanupRuleOption = None,
+    yes: CleanupYesOption = False,
+    scan_timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--scan-timeout",
+            min=0,
+            help="Shared generic scan budget in seconds; 0 or omitted means unlimited",
         ),
     ] = None,
     dry_run: Annotated[
@@ -738,7 +826,7 @@ def space_purge_cli(
         bool,
         typer.Option(
             "--recursive",
-            "-r",
+            "-R",
             help="Discover candidates without the default depth limit of 6",
         ),
     ] = False,
@@ -767,7 +855,14 @@ def space_purge_cli(
     directories. Explicit PATH values replace saved and automatic roots for this
     invocation. Otherwise a nonempty per-user space-purge-paths file wins; missing
     or empty files restore automatic home project roots and agent worktrees.
-    Scan depth defaults to 6 (root is depth 0); -r/--recursive removes that limit.
+    Scan depth defaults to 6 (root is depth 0); -R/--recursive removes that limit.
+    Generic scanning has no time limit by default. --scan-timeout SECONDS sets a
+    shared budget across paths and candidate processing; 0 means unlimited.
+    A timeout reports incomplete scanning and permits confirmation of only fully
+    checked candidates, returning status 1 even if their deletion succeeds.
+    Without --rule, applies enabled auto_apply rules. Repeat --rule/-r to select
+    only named rules; omit the purge. prefix or use full IDs. Add -r auto to
+    include automatic rules. Use hgc file rule to inspect available rules.
     Rules combine builtins with hagency-cleanup.toml from the nearest ancestor
     Hagency workspace or editable source repository. --config overrides this
     discovery; scan paths never choose the rules file. A missing automatic file
@@ -778,6 +873,10 @@ def space_purge_cli(
     systems with effective user IDs protect their entire candidate directory.
     Scan roots containing the home directory disable all default selections.
 
+    Match trees support all/any/not, rule references, within, glob and source.
+    Size and is_text/is_image/is_video leaves select ordinary files and traverse
+    directories. CLI PATH intersects within entries without changing glob bases.
+
     --include-unverified also lists rule-matched artifacts without enclosing
     project markers, non-Composer vendor directories and bins without confirmed
     .NET output. Each unverified reason is shown; these candidates are never
@@ -787,7 +886,7 @@ def space_purge_cli(
 
     --paths is an exclusive mode: create/edit the saved roots with VISUAL, EDITOR,
     or the platform editor, then reload. It cannot accompany PATH, --dry-run,
-    --recursive, --include-unverified or --config.
+    --recursive, --include-unverified, --config, --rule, --scan-timeout or --yes.
     Entries are absolute or ~ paths, one per line; blanks and # comments are ignored.
     The file lives under XDG_CONFIG_HOME/hagency or ~/.config/hagency on Linux/WSL,
     ~/Library/Application Support/Hagency on macOS, or APPDATA/Hagency on Windows
@@ -797,7 +896,10 @@ def space_purge_cli(
     seven days are preselected by default; recent candidates may be selected.
     Permanent deletion then requires confirmation,
     which defaults to No. --dry-run still opens the selection UI but only previews.
-    Non-TTY invocations always preview, even without --dry-run. Partial deletion
+    Non-TTY invocations preview unless --yes/-y is supplied. --yes selects every
+    eligible candidate after scanning and skips both prompts, including recent
+    candidates; deletion still revalidates all protection checks. With --yes and
+    --dry-run, all candidates are previewed without prompts or deletion. Partial deletion
     may leave some contents removed; other selections continue and exit status 1
     indicates incomplete cleanup. Nothing is moved to Trash or the Recycle Bin.
 
@@ -817,9 +919,12 @@ def space_purge_cli(
         or recursive
         or include_unverified
         or config is not None
+        or rule is not None
+        or scan_timeout is not None
+        or yes
     ):
         raise typer.BadParameter(
-            "--paths cannot be combined with PATH, --dry-run, --recursive, --include-unverified or --config",
+            "--paths cannot be combined with PATH, --dry-run, --recursive, --include-unverified, --config, --rule, --scan-timeout or --yes",
             param_hint="--paths",
         )
 
@@ -839,10 +944,15 @@ def space_purge_cli(
                 recursive=recursive,
                 include_unverified=include_unverified,
                 config=config,
+                rules=tuple(rule or ()),
+                scan_timeout=scan_timeout or 0,
+                yes=yes,
             )
             ui = QuestionaryCleanupUI()
             report = purge_space(request, ui=ui)
             render_cleanup_report(report, presented_plan=ui.presented_plan)
+    except CleanupSelectionError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except OSError as exc:
@@ -857,6 +967,24 @@ def space_purge_cli(
 )
 @command_errors
 def clean_files_cli(
+    paths: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="Directories limiting rule entries, or supplying entries for rootless rules",
+            metavar="PATH...",
+            autocompletion=complete_directory,
+        ),
+    ] = None,
+    rule: CleanupRuleOption = None,
+    yes: CleanupYesOption = False,
+    scan_timeout: Annotated[
+        int,
+        typer.Option(
+            "--scan-timeout",
+            min=0,
+            help="Shared paths scan budget in seconds; 0 means unlimited (Agent sources keep 60 seconds)",
+        ),
+    ] = 0,
     agent: Annotated[
         list[str] | None,
         typer.Option(
@@ -880,13 +1008,25 @@ def clean_files_cli(
 ) -> None:
     """Inspect obsolete Agent versions and configured caches on Linux/WSL.
 
-    Defaults to Codex standalone releases and staging, Claude native versions,
-    Copilot universal packages, plus configured paths rules. Repeated --agent
-    filters Agent sources; configured paths rules still apply.
+    Defaults to enabled auto_apply rules. Repeat --rule/-r to select only named
+    rules; the clean. prefix is optional. Add -r auto to include automatic rules.
+    New rules default to explicit-only. Use hgc file rule to inspect rules.
+    Repeated --agent filters automatic Agent sources; automatic paths rules still
+    apply. --agent and --rule are mutually exclusive.
+    PATH intersects rule entries; rootless generic rules require PATH. Relative
+    PATH uses the invocation directory; within paths use the declaring TOML directory.
+    Match trees combine all/any/not, full-ID ref, within, glob and source conditions.
+    Size and is_text/is_image/is_video conditions and their negations select only
+    ordinary files. Classification uses names; sizes use logical bytes.
     Keeps current, one rollback and pending newer versions by default. Unknown
     layouts and prereleases stay protected. Staging must be inactive for strictly
     more than seven days. Running tools and uncertain state are skipped.
-    Each source has a 60-second scan budget. Inspection never launches an Agent,
+    Paths scanning is unlimited by default; --scan-timeout SECONDS sets a shared
+    budget across paths and candidate processing (0 means unlimited). A timeout
+    retains only fully checked candidates and returns status 1 even if their
+    confirmed deletion succeeds. Agent sources keep independent 60-second budgets.
+    TTY scanning shows progress on stderr; Ctrl+C interrupts with status 130.
+    Inspection never launches an Agent,
     installer or network request. Sessions, authentication, configuration, plugin
     installations, worktree bodies and Desktop data stay protected.
 
@@ -900,7 +1040,11 @@ def clean_files_cli(
     stop before scanning. See the CLI README for fields and matching semantics.
 
     TTY: select exact paths, then confirm permanent deletion (default No).
-    --dry-run and non-TTY invocations never delete. Config or filesystem changes
+    --yes/-y selects every eligible candidate after scanning and skips both prompts,
+    including without a TTY. Recent candidates are included; protection checks and
+    deletion revalidation still apply. --dry-run never deletes; with --yes it previews
+    all candidates without prompting. Non-TTY runs without --yes only preview.
+    Config or filesystem changes
     after review require a new preview; revalidation never adds candidates.
     Exit codes: 0 success/cancel, 1 invalid config or incomplete cleanup,
     2 invalid CLI arguments, 130 interrupted.
@@ -910,21 +1054,39 @@ def clean_files_cli(
       hgc file clean --dry-run
       hgc file clean --agent codex --agent claude
       hgc file clean --config ./hagency-cleanup.toml --dry-run
+      hgc file clean ./cache -r temp-files --dry-run
     """
+    if agent is not None and rule is not None:
+        raise typer.BadParameter("--agent and --rule are mutually exclusive")
+    if any(not value.strip() for value in paths or ()):
+        raise typer.BadParameter("scan paths must not be empty", param_hint="PATH")
     selected = tuple(dict.fromkeys(agent or []))
-    if any(value not in {"codex", "claude", "copilot"} for value in selected):
+    if any(value not in AGENTS for value in selected):
         raise typer.BadParameter(
-            "choose codex, claude or copilot", param_hint="--agent"
+            f"choose an Agent from {', '.join(AGENTS)}", param_hint="--agent"
         )
     try:
         from hagency_cli.commands.cleanup_ui import QuestionaryCleanupUI
 
         ui = QuestionaryCleanupUI()
         report = clean_files(
-            CleanRequest(agents=selected, dry_run=dry_run, config=config),
+            CleanRequest(
+                agents=selected,
+                scan_timeout=scan_timeout,
+                yes=yes,
+                dry_run=dry_run,
+                config=config,
+                rules=tuple(rule or ()),
+                paths=tuple(
+                    Path(os.path.abspath(expand_path(value, Path.cwd())))
+                    for value in paths or ()
+                ),
+            ),
             ui=ui,
         )
         render_cleanup_report(report, presented_plan=ui.presented_plan)
+    except CleanupSelectionError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     except KeyboardInterrupt:
         raise typer.Exit(130) from None
     except OSError as exc:

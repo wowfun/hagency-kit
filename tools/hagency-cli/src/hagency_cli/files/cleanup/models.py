@@ -185,6 +185,8 @@ class CleanRequest:
     paths: tuple[Path, ...] = ()
     scan_timeout: int = 0
     yes: bool = False
+    recursive: bool = False
+    include_unverified: bool = False
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,8 @@ class CleanupRule:
     exclude: tuple[str, ...] = ()
     enabled: bool = True
     auto_apply: bool = False
+    recursive: bool = False
+    include_unverified: bool = False
     min_age_days: int = 0
     preselect_after_days: int = 0
     keep_previous: int = 1
@@ -229,6 +233,11 @@ class ScanRule(CleanupRule):
     root: Path | None = None
     limits: tuple[Path, ...] = ()
     policies: tuple[CleanupRule, ...] = ()
+
+    @property
+    def is_project(self) -> bool:
+        """Whether this provider requires project-context safety checks."""
+        return self.source in {"project", "cachedir-tag"}
 
     @property
     def retained_versions(self) -> int:
@@ -284,6 +293,15 @@ class CleanupCandidate:
     group: str = ""
     project_verified: bool = True
     artifact_unverified_reason: str | None = None
+
+    @property
+    def purge_phase(self) -> bool:
+        """Order by contributing rules, not the provider that discovered a file.
+
+        A project provider can also discover an independent generic-file branch.
+        Such a file still requires project checks but belongs to the later phase.
+        """
+        return any(identity.startswith("purge.") for identity in self.rule_ids)
 
     @property
     def verification_note(self) -> str:

@@ -158,6 +158,12 @@ def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupRe
                 extra_issues=selection_issues,
             )
 
+    # Stable linear partition: preserve the UI's relative order within each phase.
+    purge_selected, other_selected = [], []
+    for item in selected:
+        (purge_selected if item.choice.purge_phase else other_selected).append(item)
+    selected = (*purge_selected, *other_selected)
+
     if request.dry_run:
         results = tuple(
             CleanupItemResult(

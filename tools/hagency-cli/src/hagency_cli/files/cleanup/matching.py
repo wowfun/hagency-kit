@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from bisect import bisect_left
 from functools import lru_cache
 from pathlib import Path
 
@@ -57,3 +59,31 @@ def relevant_scopes(scopes: tuple[RuleScope, ...], path: Path) -> tuple[RuleScop
         for scope in scopes
         if path.is_relative_to(scope.root) or scope.root.is_relative_to(path)
     )
+
+
+class ScopeIndex:
+    """Planning-only lookup of overlapping roots, preserving policy order.
+
+    Ancestors use direct lookup; descendant roots use a sorted prefix range.
+    No filesystem state or deletion authorization is cached here.
+    """
+
+    def __init__(self, scopes: tuple[RuleScope, ...]):
+        self.scopes = scopes
+        self.by_root: dict[str, list[int]] = {}
+        for index, scope in enumerate(scopes):
+            self.by_root.setdefault(os.path.normcase(str(scope.root)), []).append(index)
+        self.roots = sorted(self.by_root)
+
+    def for_path(self, path: Path) -> tuple[RuleScope, ...]:
+        indices = []
+        for ancestor in (path, *path.parents):
+            indices.extend(self.by_root.get(os.path.normcase(str(ancestor)), ()))
+        prefix = os.path.normcase(str(path)).rstrip(os.sep) + os.sep
+        start = bisect_left(self.roots, prefix)
+        for index in range(start, len(self.roots)):
+            root = self.roots[index]
+            if not root.startswith(prefix):
+                break
+            indices.extend(self.by_root[root])
+        return tuple(self.scopes[index] for index in sorted(set(indices)))

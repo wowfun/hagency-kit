@@ -187,8 +187,13 @@ def parse_condition(
                 "purge" if operand in {"project", "cachedir-tag"} else "clean"
             ):
                 raise ValueError(f"invalid command/source: {operand}")
-        elif not operand.startswith(command + "."):
-            raise ValueError(f"ref requires a full {command} rule ID")
+        elif not operand.startswith(
+            ("clean.", "purge.") if command == "clean" else ("purge.",)
+        ):
+            allowed = "clean. or purge." if command == "clean" else "purge."
+            raise ValueError(
+                f"ref requires a full rule ID starting with {allowed}: {operand}"
+            )
     else:
         raise ValueError(f"unknown match condition: {op}")
     return Condition(op, operand)

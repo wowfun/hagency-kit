@@ -59,7 +59,7 @@ def _revalidate(candidate: _BoundCandidate) -> str | None:
         if any(scope.rule.source == "cachedir-tag" for scope in candidate.scopes):
             return "candidate no longer has a valid CACHEDIR.TAG"
         return "candidate no longer matches its cleanup rules"
-    is_project = any(scope.rule.command == "purge" for scope in candidate.scopes)
+    is_project = any(scope.rule.is_project for scope in candidate.scopes)
     if is_project:
         project_root = _find_project_root(path, candidate.root)
         if candidate.choice.project_verified:

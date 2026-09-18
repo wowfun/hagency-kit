@@ -992,6 +992,21 @@ def clean_files_cli(
             help="Agent to inspect: codex, claude or copilot; repeat to select several",
         ),
     ] = None,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "--recursive",
+            "-R",
+            help="Remove the depth limit for referenced purge rules",
+        ),
+    ] = False,
+    include_unverified: Annotated[
+        bool,
+        typer.Option(
+            "--include-unverified",
+            help="Include referenced purge artifacts with unverified project context or purpose",
+        ),
+    ] = False,
     config: Annotated[
         Path | None,
         typer.Option(
@@ -1016,6 +1031,10 @@ def clean_files_cli(
     PATH intersects rule entries; rootless generic rules require PATH. Relative
     PATH uses the invocation directory; within paths use the declaring TOML directory.
     Match trees combine all/any/not, full-ID ref, within, glob and source conditions.
+    Clean rules may reference purge rules, preserving project checks and depth 6.
+    -R/--recursive removes that depth limit; --include-unverified admits artifacts
+    with unverified project context or purpose. These options affect project sources;
+    generic paths remain recursive. Project sources require PATH or a within entry.
     Size and is_text/is_image/is_video conditions and their negations select only
     ordinary files. Classification uses names; sizes use logical bytes.
     Keeps current, one rollback and pending newer versions by default. Unknown
@@ -1071,6 +1090,8 @@ def clean_files_cli(
         ui = QuestionaryCleanupUI()
         report = clean_files(
             CleanRequest(
+                recursive=recursive,
+                include_unverified=include_unverified,
                 agents=selected,
                 scan_timeout=scan_timeout,
                 yes=yes,

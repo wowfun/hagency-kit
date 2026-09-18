@@ -120,6 +120,8 @@ def _rule(row: dict, origin: Path, previous: CleanupRule | None = None) -> Clean
         "exclude",
         "enabled",
         "auto_apply",
+        "recursive",
+        "include_unverified",
         "min_age_days",
         "preselect_after_days",
         "keep_previous",
@@ -147,7 +149,12 @@ def _rule(row: dict, origin: Path, previous: CleanupRule | None = None) -> Clean
 
         values["exclude"] = tuple(patterns)
         compile_patterns(values["exclude"])
-        for key, default in (("enabled", True), ("auto_apply", False)):
+        for key, default in (
+            ("enabled", True),
+            ("auto_apply", False),
+            ("recursive", False),
+            ("include_unverified", False),
+        ):
             if type(values.get(key, default)) is not bool:
                 raise ValueError(f"{key} must be boolean")
         for key in ("min_age_days", "preselect_after_days", "keep_previous"):

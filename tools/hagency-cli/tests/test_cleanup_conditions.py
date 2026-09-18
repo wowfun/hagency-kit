@@ -146,7 +146,7 @@ match={any=[{ref="clean.anchored"},{all=[{within="two"},{ref="clean.leaf"}]}]}
     def test_invalid_graphs_and_conditions_fail_without_scan(self):
         cases = (
             'match={ref="clean.missing"}',
-            'match={ref="purge.artifacts"}',
+            'match={ref="purge.missing"}',
             'match={ref="clean.test"}',
             "match={any=[]}",
             "match={all=[]}",

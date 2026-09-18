@@ -27,6 +27,11 @@ def select_rules(
         raise CleanupSelectionError("yes must be boolean")
     if type(request.scan_timeout) is not int or request.scan_timeout < 0:
         raise CleanupSelectionError("scan_timeout must be a nonnegative integer")
+    if (
+        type(request.recursive) is not bool
+        or type(request.include_unverified) is not bool
+    ):
+        raise CleanupSelectionError("recursive and include_unverified must be boolean")
     command = "clean" if isinstance(request, CleanRequest) else "purge"
     if isinstance(request, CleanRequest):
         if request.agents and request.rules:
@@ -83,7 +88,12 @@ def select_rules(
                 and source.split(".")[0] not in request.agents
             ):
                 continue
-            if source == "paths" and entry.root is None and not paths:
+            if (
+                isinstance(request, CleanRequest)
+                and source in {"paths", "project", "cachedir-tag"}
+                and entry.root is None
+                and not paths
+            ):
                 raise CleanupSelectionError(
                     f"selected rules require PATH or a within condition: {rule.id}"
                 )

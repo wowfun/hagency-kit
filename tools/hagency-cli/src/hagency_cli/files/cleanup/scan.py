@@ -29,7 +29,11 @@ from hagency_cli.files.cleanup.inspection import (
     mount_check_scope,
     scan_budget,
 )
-from hagency_cli.files.cleanup.matching import exclusion_reason, relevant_scopes
+from hagency_cli.files.cleanup.matching import (
+    ScopeIndex,
+    exclusion_reason,
+    relevant_scopes,
+)
 from hagency_cli.files.cleanup.models import (
     CACHEDIR_TAG_NAME,
     MAX_SCAN_DEPTH,
@@ -79,7 +83,8 @@ def _bind_candidate(
     issues: list[CleanupIssue] = []
     exclusions = relevant_scopes(exclusions, path)
     agent = scopes[0].rule.agent
-    is_project = scopes[0].rule.command == "purge"
+    # Each discovery call binds homogeneous providers; deduplication may merge them later.
+    is_project = scopes[0].rule.is_project
     try:
         checkpoint()
         if _unsafe_text(str(path)):
@@ -253,10 +258,30 @@ def _scan_root(
     include_unverified: bool = False,
     path_scopes: tuple[RuleScope, ...] | None = None,
     discovered_scopes: set[RuleScope] | None = None,
+    covered_directories: frozenset[Path] = frozenset(),
+    scanned_directories: set[Path] | None = None,
 ) -> tuple[list[_BoundCandidate], list[CleanupIssue]]:
     candidates: list[_BoundCandidate] = []
     issues: list[CleanupIssue] = []
     root_identity = None
+    # These are completed, protected phase-one candidates, never deletion authority.
+    if root in covered_directories or any(
+        parent in covered_directories for parent in root.parents
+    ):
+        return candidates, issues
+    if scanned_directories is not None and root in scanned_directories:
+        return candidates, issues
+    recursive_rules = tuple(rule for rule in rules if rule.recursive)
+    unverified_any = include_unverified or any(
+        rule.include_unverified for rule in rules
+    )
+    fixed_scopes = all(rule.root is not None for rule in rules)
+    scopes_by_root: dict[Path, tuple[RuleScope, ...]] = {}
+    registered_roots: set[Path] = set()
+    path_index = ScopeIndex(path_scopes) if path_scopes is not None else None
+    matching_path_scopes = tuple(
+        scope for scope in path_scopes or () if scope.rule.source == "paths"
+    )
     if _is_within(Path.home(), root):
         issues.append(
             CleanupIssue(
@@ -273,6 +298,8 @@ def _scan_root(
         while stack:
             checkpoint()
             directory, depth = stack.pop()
+            if scanned_directories is not None and directory in scanned_directories:
+                continue
             try:
                 with os.scandir(directory) as entries:
                     children = list(entries)
@@ -283,6 +310,8 @@ def _scan_root(
                     )
                 )
                 continue
+            if scanned_directories is not None:
+                scanned_directories.add(directory)
             for entry in children:
                 path = Path(entry.path)
                 session = current_session()
@@ -291,6 +320,8 @@ def _scan_root(
                     session.update("scanning", path)
                 checkpoint()
                 try:
+                    if path in covered_directories:
+                        continue
                     info = entry.stat(follow_symlinks=False)
                     is_directory = stat.S_ISDIR(info.st_mode)
                     if (
@@ -323,24 +354,39 @@ def _scan_root(
                         _find_project_root(path, root) if path_scopes is None else root
                     )
                     project_verified = project is not None
-                    if project is None and include_unverified:
+                    if project is None and unverified_any:
                         # Without project evidence, patterns use this invocation's
                         # scan root. Keep that distinction in the frozen candidate.
                         project = root
-                    all_scopes = (
-                        tuple(
-                            RuleScope(rule, rule.root or project or root)
-                            for rule in rules
-                        )
-                        if path_scopes is None
-                        else path_scopes
-                    )
-                    if project is not None and discovered_scopes is not None:
+                    if path_scopes is None:
+                        scope_root = root if fixed_scopes else project or root
+                        if scope_root not in scopes_by_root:
+                            scopes_by_root[scope_root] = tuple(
+                                RuleScope(rule, rule.root or project or root)
+                                for rule in rules
+                            )
+                        all_scopes = scopes_by_root[scope_root]
+                    else:
+                        all_scopes = path_scopes
+                    if (
+                        path_scopes is None
+                        and project is not None
+                        and discovered_scopes is not None
+                        and scope_root not in registered_roots
+                    ):
                         discovered_scopes.update(all_scopes)
+                        registered_roots.add(scope_root)
                     scopes = tuple(
                         scope
-                        for scope in all_scopes
-                        if (path_scopes is None or scope.rule.source == "paths")
+                        for scope in (
+                            all_scopes if path_scopes is None else matching_path_scopes
+                        )
+                        if (
+                            path_scopes is not None
+                            or recursive
+                            or scope.rule.recursive
+                            or depth < MAX_SCAN_DEPTH
+                        )
                         and included(scope, path, info.st_mode, info.st_size)
                     )
                     if scopes:
@@ -351,20 +397,31 @@ def _scan_root(
                             protection_reason = _context_protection_reason(
                                 path, project or root
                             )
-                            if protection_reason is None and not include_unverified:
+                            if protection_reason is None:
                                 reasons = []
-                                if project is None:
+                                if not project_verified:
                                     reasons.append("no qualifying project context")
                                 if artifact_reason:
                                     reasons.append(artifact_reason)
-                                protection_reason = "; ".join(reasons) or None
+                                if reasons and not include_unverified:
+                                    permitted = tuple(
+                                        scope
+                                        for scope in scopes
+                                        if scope.rule.include_unverified
+                                    )
+                                    if permitted:
+                                        scopes = permitted
+                                    else:
+                                        protection_reason = "; ".join(reasons)
                         if protection_reason is None:
                             candidate, problems = _bind_candidate(
                                 path,
                                 root,
                                 project,
                                 scopes,
-                                all_scopes,
+                                path_index.for_path(path)
+                                if path_index is not None
+                                else all_scopes,
                                 now_ns,
                                 project_verified=project_verified,
                                 artifact_unverified_reason=artifact_reason,
@@ -383,7 +440,26 @@ def _scan_root(
                             )
                         # Whole artifact directories are never traversed, including protected ones.
                         continue
-                    if is_directory and (recursive or depth + 1 < MAX_SCAN_DEPTH):
+                    if is_directory and (
+                        recursive
+                        or depth + 1 < MAX_SCAN_DEPTH
+                        or any(
+                            (
+                                rule.root is None
+                                or path.is_relative_to(rule.root)
+                                or rule.root.is_relative_to(path)
+                            )
+                            and (
+                                not rule.limits
+                                or any(
+                                    path.is_relative_to(limit)
+                                    or limit.is_relative_to(path)
+                                    for limit in rule.limits
+                                )
+                            )
+                            for rule in recursive_rules
+                        )
+                    ):
                         stack.append((path, depth + 1))
                 except ScanTimeout:
                     raise
@@ -444,10 +520,18 @@ def _drop_duplicate_and_nested(
             index = identities[identity]
             previous = kept[index]
             if previous.choice.exact_path == candidate.choice.exact_path:
-                # Overlapping roots may find the same path with and without
-                # enclosing evidence. Keep the verified ownership for revalidation.
-                if (
-                    candidate.choice.project_verified
+                # A generic path's synthetic owner is not project evidence.
+                # Preserve the project scan's real context when combining sources;
+                # between equivalent providers, prefer verified ownership.
+                previous_project = any(
+                    scope.rule.is_project for scope in previous.scopes
+                )
+                candidate_project = any(
+                    scope.rule.is_project for scope in candidate.scopes
+                )
+                if (candidate_project and not previous_project) or (
+                    candidate_project == previous_project
+                    and candidate.choice.project_verified
                     and not previous.choice.project_verified
                 ):
                     previous, candidate = candidate, previous
@@ -507,6 +591,7 @@ def _sort_candidates(
         sorted(
             candidates,
             key=lambda item: (
+                not item.choice.purge_phase,
                 -project_totals[item.choice.project_path],
                 str(item.choice.project_path),
                 -(item.choice.size_bytes if item.choice.size_bytes is not None else -1),
@@ -524,6 +609,117 @@ def _build_plan(
     rules = select_rules(request, snapshot)
     with planning_session(request.scan_timeout, progress), mount_check_scope():
         return _plan_with_rules(request, snapshot, rules)
+
+
+def _project_plan(
+    request: PurgeRequest | CleanRequest,
+    rules: tuple[CleanupRule, ...],
+    now_ns: int,
+    extra_scopes: tuple[RuleScope, ...] = (),
+) -> tuple[
+    list[_BoundCandidate], list[CleanupIssue], tuple[Path, ...], tuple[RuleScope, ...]
+]:
+    session = current_session()
+    assert session is not None
+    if any(rule.root is None for rule in rules):
+        # Clean rootless entries use explicit PATH only; purge retains saved/home discovery.
+        if isinstance(request, CleanRequest):
+            fallback, root_issues = request.paths, ()
+        else:
+            fallback, root_issues = _resolve_roots(request)
+    else:
+        fallback, root_issues = (), ()
+    raw_roots = tuple(
+        dict.fromkeys(
+            root
+            for rule in rules
+            for base in ((rule.root,) if rule.root is not None else fallback)
+            for root in _intersect_roots(base, rule.limits)
+        )
+    )
+    roots, validation_issues = _validate_roots(raw_roots, Path.home())
+    root_issues = (*root_issues, *validation_issues)
+    candidates: list[_BoundCandidate] = []
+    issues = list(root_issues)
+    discovered_scopes: set[RuleScope] = set()
+    for index, root in enumerate(roots):
+        session.remaining_roots = roots[index:]
+        with session.budget():
+            found, scan_issues = _scan_root(
+                root,
+                now_ns,
+                rules=rules,
+                recursive=request.recursive,
+                include_unverified=request.include_unverified,
+                discovered_scopes=discovered_scopes,
+            )
+        candidates.extend(found)
+        issues.extend(scan_issues)
+        if session.timeout_issues:
+            break
+    if not session.timeout_issues:
+        session.remaining_roots = ()
+    # Different overlapping scan roots may discover different project owners.
+    # Every discovered exclusion/retention constraint still applies globally.
+    scopes = (
+        *extra_scopes,
+        *tuple(
+            sorted(
+                discovered_scopes, key=lambda scope: (str(scope.root), scope.rule.id)
+            )
+        ),
+    )
+    scope_index = ScopeIndex(scopes)
+    filtered = []
+    try:
+        with session.budget() if not session.timeout_issues else scan_budget(None):
+            for candidate in candidates:
+                path = candidate.choice.exact_path
+                session.update("protecting", path)
+                checkpoint()
+                applicable = scope_index.for_path(path)
+                reason = next(
+                    (
+                        reason
+                        for entry in candidate.tree
+                        if (
+                            reason := exclusion_reason(
+                                applicable,
+                                path / entry.relative_path,
+                                stat.S_ISDIR(entry.identity.mode),
+                            )
+                        )
+                    ),
+                    None,
+                )
+                activity = candidate.choice.activity
+                if reason is None and candidate.tree:
+                    activity, reason = age_policy(
+                        path,
+                        list(candidate.tree),
+                        candidate.scopes,
+                        applicable,
+                        now_ns,
+                    )
+                if reason:
+                    issues.append(CleanupIssue("protected", path, reason, False))
+                else:
+                    choice = replace(
+                        candidate.choice,
+                        activity=activity,
+                        preselected=activity is Activity.OLD
+                        and not _is_within(Path.home(), candidate.root)
+                        and candidate.choice.size_bytes is not None
+                        and candidate.choice.project_verified
+                        and candidate.choice.artifact_unverified_reason is None,
+                    )
+                    filtered.append(
+                        replace(candidate, choice=choice, exclusions=applicable)
+                    )
+    except ScanTimeout as exc:
+        session.timed_out(exc, session.path)
+    candidates = filtered
+    return candidates, issues, roots, scopes
 
 
 def _plan_with_rules(
@@ -552,96 +748,7 @@ def _plan_with_rules(
             command,
         )
     if isinstance(request, PurgeRequest):
-        if any(rule.root is None for rule in rules):
-            fallback, root_issues = _resolve_roots(request)
-        else:
-            fallback, root_issues = (), ()
-        raw_roots = tuple(
-            dict.fromkeys(
-                root
-                for rule in rules
-                for base in ((rule.root,) if rule.root is not None else fallback)
-                for root in _intersect_roots(base, rule.limits)
-            )
-        )
-        roots, validation_issues = _validate_roots(raw_roots, Path.home())
-        root_issues = (*root_issues, *validation_issues)
-        candidates: list[_BoundCandidate] = []
-        issues = list(root_issues)
-        discovered_scopes: set[RuleScope] = set()
-        for index, root in enumerate(roots):
-            session.remaining_roots = roots[index:]
-            with session.budget():
-                found, scan_issues = _scan_root(
-                    root,
-                    now_ns,
-                    rules=rules,
-                    recursive=request.recursive,
-                    include_unverified=request.include_unverified,
-                    discovered_scopes=discovered_scopes,
-                )
-            candidates.extend(found)
-            issues.extend(scan_issues)
-            if session.timeout_issues:
-                break
-        if not session.timeout_issues:
-            session.remaining_roots = ()
-        # Different overlapping scan roots may discover different project owners.
-        # Every discovered exclusion/retention constraint still applies globally.
-        scopes = tuple(
-            sorted(
-                discovered_scopes, key=lambda scope: (str(scope.root), scope.rule.id)
-            )
-        )
-        filtered = []
-        try:
-            with session.budget() if not session.timeout_issues else scan_budget(None):
-                for candidate in candidates:
-                    path = candidate.choice.exact_path
-                    session.update("protecting", path)
-                    checkpoint()
-                    applicable = relevant_scopes(scopes, path)
-                    reason = next(
-                        (
-                            reason
-                            for entry in candidate.tree
-                            if (
-                                reason := exclusion_reason(
-                                    applicable,
-                                    path / entry.relative_path,
-                                    stat.S_ISDIR(entry.identity.mode),
-                                )
-                            )
-                        ),
-                        None,
-                    )
-                    activity = candidate.choice.activity
-                    if reason is None and candidate.tree:
-                        activity, reason = age_policy(
-                            path,
-                            list(candidate.tree),
-                            candidate.scopes,
-                            applicable,
-                            now_ns,
-                        )
-                    if reason:
-                        issues.append(CleanupIssue("protected", path, reason, False))
-                    else:
-                        choice = replace(
-                            candidate.choice,
-                            activity=activity,
-                            preselected=activity is Activity.OLD
-                            and not _is_within(Path.home(), candidate.root)
-                            and candidate.choice.size_bytes is not None
-                            and candidate.choice.project_verified
-                            and candidate.choice.artifact_unverified_reason is None,
-                        )
-                        filtered.append(
-                            replace(candidate, choice=choice, exclusions=applicable)
-                        )
-        except ScanTimeout as exc:
-            session.timed_out(exc, session.path)
-        candidates = filtered
+        candidates, issues, roots, _ = _project_plan(request, rules, now_ns)
     else:
         if not sys.platform.startswith("linux"):
             return CleanupPlan(
@@ -657,7 +764,42 @@ def _plan_with_rules(
                 snapshot,
                 command,
             )
-        candidates, issues, roots = _agent_and_path_plan(rules, now_ns, request.paths)
+        project_rules = tuple(
+            rule for rule in rules if rule.source in {"project", "cachedir-tag"}
+        )
+        other_rules = tuple(
+            rule for rule in rules if rule.source not in {"project", "cachedir-tag"}
+        )
+        path_scopes = tuple(
+            RuleScope(rule, root)
+            for rule in other_rules
+            if rule.source == "paths"
+            for root in ((rule.root,) if rule.root is not None else rule.limits)
+        )
+        candidates, issues, roots, project_scopes = [], [], (), ()
+        if project_rules:
+            candidates, issues, roots, project_scopes = _project_plan(
+                request,
+                project_rules,
+                now_ns,
+                path_scopes,
+            )
+        found, problems, other_roots = _agent_and_path_plan(
+            other_rules,
+            now_ns,
+            request.paths,
+            extra_scopes=project_scopes,
+            covered_directories=frozenset(
+                item.choice.exact_path
+                for item in candidates
+                if item.choice.entry_kind == "directory"
+                and item.choice.size_bytes is not None
+                and item.tree
+            ),
+        )
+        candidates.extend(found)
+        issues.extend(problems)
+        roots = tuple(dict.fromkeys((*roots, *other_roots)))
     session.update("finalizing")
     try:
         with (
@@ -708,10 +850,13 @@ def _agent_and_path_plan(
     rules: tuple[CleanupRule, ...],
     now_ns: int,
     paths: tuple[Path, ...] = (),
+    *,
+    extra_scopes: tuple[RuleScope, ...] = (),
+    covered_directories: frozenset[Path] = frozenset(),
 ) -> tuple[list[_BoundCandidate], list[CleanupIssue], tuple[Path, ...]]:
     candidates: list[_BoundCandidate] = []
     issues: list[CleanupIssue] = []
-    all_scopes: list[RuleScope] = []
+    all_scopes: list[RuleScope] = list(extra_scopes)
     roots: list[Path] = []
     session = current_session()
     assert session is not None
@@ -760,6 +905,10 @@ def _agent_and_path_plan(
                     )
                     validated, root_issues = _validate_roots(raw_roots, Path.home())
                     issues.extend(root_issues)
+                    # Share actual visits, not just containing roots: an outer
+                    # scan may stop at a protected directory that is itself an
+                    # explicitly supplied inner root and still needs inspection.
+                    scanned_directories: set[Path] = set()
                     for index, root in enumerate(validated):
                         session.remaining_roots = validated[index:]
                         roots.append(root)
@@ -769,6 +918,8 @@ def _agent_and_path_plan(
                             rules=source_rules,
                             recursive=True,
                             path_scopes=tuple(all_scopes),
+                            covered_directories=covered_directories,
+                            scanned_directories=scanned_directories,
                         )
                         candidates.extend(found)
                         issues.extend(scan_issues)

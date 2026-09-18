@@ -387,7 +387,21 @@ keep_previous = 2
 
 Rules with an existing `id` inherit omitted fields. A supplied `match` replaces the entire previous condition tree. New rules default to `auto_apply = false`; all builtins explicitly use `true`. `enabled = false` disables selection, including through references. IDs start with `clean.` or `purge.`; `clean.auto` and `purge.auto` are reserved. `schema_version` remains `1`.
 
-The top-level matching fields are `id`, `match`, `exclude`, `enabled`, and `auto_apply`; retention fields are `min_age_days`, `preselect_after_days`, and `keep_previous`. `match` is required for new rules. Unsupported fields are errors, including `command`, `root`, `source`, `include`, `file_match`, and top-level size/type filters. An empty configuration leaves builtins active.
+The top-level matching fields are `id`, `match`, `exclude`, `enabled`, and `auto_apply`; retention fields are `min_age_days`, `preselect_after_days`, and `keep_previous`. Optional booleans `recursive` and `include_unverified` configure the selected rule's project scanning, default to `false`, and inherit omitted values on override. `recursive = true` removes the six-level discovery limit; `include_unverified = true` admits artifacts without verified project context or purpose. They do not relax Git, link, mount or frozen-file protections, or widen another selected rule's scope. `match` is required for new rules. Unsupported fields are errors, including `command`, `root`, `source`, `include`, `file_match`, and top-level size/type filters. An empty configuration leaves builtins active.
+
+### Project scan options
+
+For each selected rule, CLI and TOML options combine as follows:
+
+| CLI option | Rule option | Effective behavior |
+| --- | --- | --- |
+| omitted | omitted / `false` | Depth 6; unverified project context or artifact purpose is excluded. |
+| omitted | `true` | Enable that option for this rule. |
+| present | either value | Enable that option for all selected project rules. |
+
+Apply the table independently to `--recursive` / `recursive` and `--include-unverified` / `include_unverified`. CLI flags enable behavior; there is no CLI switch to override a configured `true` with `false`. Generic path scans remain recursive, and Agent budgets are independent.
+
+Project rules share directory traversal. Below depth six, only recursive rules can select candidates. Deeper traversal continues only within or toward a recursive rule's anchored entries and PATH limits. Rules sharing an entry share the necessary traversal; a restrictive glob does not imply a separate filesystem traversal budget. Unverified opt-in is also checked per matching rule before binding candidates.
 
 ### Nested cleanup conditions
 
@@ -395,7 +409,7 @@ The top-level matching fields are `id`, `match`, `exclude`, `enabled`, and `auto
 | --- | --- |
 | `all = [...]` / `any = [...]` | Every condition / at least one condition must match; arrays must be nonempty. |
 | `not = {...}` | Negate a condition within its applicable file/directory types. |
-| `ref = "clean.media"` | Reference a complete rule, including its protections; full ID and same command required. |
+| `ref = "clean.media"` | Reference a complete rule, including its protections; full ID required. Clean rules may also reference purge rules; purge rules may reference only purge rules. |
 | `within = "./cache"` | Match descendants of a directory and provide a scan entry. Relative paths use the declaring TOML's directory; `~` expands to home. |
 | `glob = "**/*.tmp"` | Git-style path pattern relative to the branch's entry. Use explicit `not` to negate a pattern. |
 | `source = "project"` | Purge project discovery; purge also supports `cachedir-tag`. Clean supports `codex.versions`, `claude.versions`, `copilot.versions`, and `codex.staging`. |
@@ -422,7 +436,7 @@ all = [
 
 Use `hgc file clean -r cached-media --dry-run`. CLI `PATH...` intersects the rule's entries; it does not replace `within` or change an anchored glob's base. A rootless generic rule uses CLI PATH as its entry. Purge retains its configured/default scan-root discovery. Empty intersections produce no candidates. The entry directory itself is not selected. Filesystem roots, home itself and linked roots remain protected.
 
-Each `any` branch retains its own entry. A reference with its own entry preserves it; a rootless reference inherits the enclosing entry. Ambiguous conjunctive entries are rejected before scanning. `not` supplies no entry: a negative-only rule needs PATH or a positive enclosing entry. References are resolved after configuration overrides; missing references, cross-command references and cycles are errors. `auto_apply` controls only top-level selection, not referenced rules. Nesting is limited to 64 levels.
+Each `any` branch retains its own entry. A reference with its own entry preserves it; a rootless reference inherits the enclosing entry. Ambiguous conjunctive entries are rejected before scanning. `not` supplies no entry: a negative-only rule needs PATH or a positive enclosing entry. References are resolved after configuration overrides; missing references, purge-to-clean references and cycles are errors. Clean-to-purge references reuse project/cachedir discovery and project safety checks, with the default depth of six. `recursive = true` or `-R` removes that limit; `include_unverified = true` or `--include-unverified` admits unverified project context or artifact purpose. These settings affect project sources; generic paths remain recursive. They require PATH or an anchored entry and do not use automatic home-root discovery. `auto_apply` controls only top-level selection, not referenced rules. Nesting is limited to 64 levels.
 
 Size/type leaves and their negations match only regular files. Thus `not = { is_image = true }` traverses directories and selects non-image files. An independent path/source branch may still select a whole directory. All matching rules contribute to the candidate union.
 
@@ -437,13 +451,16 @@ match = { all = [
   { min_file_size = "100MiB", max_file_size = "2GiB" },
   { is_text = false },
 ] }
-
-[[rules]]
-id = "clean.non_text_or_large"
-match = { any = [{ is_text = false }, { min_file_size = 10_485_761 }] }
 ```
 
-The repository provides `clean.non_text_or_large`: non-text files or files **strictly larger than 10MiB**. Preview with `hgc file clean ./target -r non_text_or_large --dry-run`. Text files of exactly 10MiB remain. Supply `--config /path/to/hagency-cleanup.toml` when applying repository policy elsewhere.
+The repository provides [`clean.project_default`](../../hagency-cleanup.toml), applied explicitly with `hgc file clean -r project_default ./ --dry-run`:
+
+- First apply `purge.artifacts` and `purge.cachedirs` to each project directory supplied as CLI `PATH`, **including its `.local`**, with `recursive = true` and `include_unverified = true` configured in the rule. No extra CLI flags are needed. Referenced exclusions and retention constraints still apply.
+- Then filter remaining ordinary files under each supplied project's top-level `.local/`: retain text and images up to **10MB inclusive**, and videos up to **50MB inclusive**; other files are candidates. MB means 1,000,000 bytes. Purge may remove a whole artifact/tagged directory containing otherwise retained media or text; the size/type conditions apply to what remains.
+- Planning completes before confirmation or `--yes` deletion. Completed whole purge candidates replace nested file candidates, and the later path scan skips their subtrees. Purge candidates rejected by exclusions or age constraints do not prune the path scan. Overlapping generic path roots reuse directories already visited; an explicit inner root remains inspectable when its outer scan stopped at a protected directory. Selected purge candidates are processed before remaining `.local` candidates, preserving UI order within each phase. Each candidate still undergoes deletion-time checks.
+- Supply one or more project roots as `PATH`; for the current project use `./`. This rule has no `within` anchor: its `/.local/**` glob is relative to each supplied root, so loading it from another repository does not change the target project. Omitting PATH is an argument error. Pass the project directory, rather than its `.local` directory. Other rules using `within` still resolve that condition relative to their TOML file. Existing Git, link, mount and Agent protections still apply.
+
+Use `hgc file rule clean.project_default` to inspect the merged tree. This rule remains explicit-only (`auto_apply = false`).
 
 Sizes accept nonnegative byte integers or strings with `B`, `KB/MB/GB/TB` (1000), or `KiB/MiB/GiB/TiB` (1024), case-insensitively. Decimals such as `"1.5MiB"` must resolve to whole bytes. Reject booleans, bare floats, negative sizes, unknown units, fractional bytes, values above `2^63-1`, and reversed bounds. Filters use logical length (`st_size`), including sparse holes; previews estimate allocated disk space. `hgc file rule` displays canonical byte values and the merged tree.
 
@@ -460,8 +477,8 @@ All name classification is case-insensitive and uses the final extension; it nev
 Generic `clean` paths and `purge` scanning have no time limit by default. `--scan-timeout SECONDS` accepts a nonnegative integer; `0` means unlimited. A positive budget is shared by all generic paths and candidate processing in the invocation, rather than restarting for each PATH. It does not change Agent-source budgets or the existing deletion revalidation budget. `purge --paths` editing cannot be combined with `--scan-timeout`, including explicit `0`.
 
 ```sh
-hgc file clean ./target -r non_text_or_large --dry-run
-hgc file clean ./target -r non_text_or_large --scan-timeout 600 --dry-run
+hgc file clean -r project_default ./ --dry-run
+hgc file clean -r project_default ./ --scan-timeout 600 --dry-run
 ```
 
 TTY scans show the stage, current path, inspected-entry count, candidate count and elapsed time on stderr, updating at most five times per second without an estimated percentage. Non-TTY output has no dynamic progress. Ctrl+C during scanning exits with status 130 and never enters deletion.
@@ -470,16 +487,16 @@ Python UI adapters may implement `scan_progress(ScanProgress)` to receive thrott
 
 A timeout reports the incomplete scope and the number of fully checked candidates. Those candidates can still be selected and confirmed, or processed automatically with `--yes`; an unfinished candidate or one whose protection checks cannot finish is omitted. Exit status remains 1 even when selected deletions succeed or the user cancels selection. Finalizing already inspected results can take additional time after the budget expires; the budget is checked cooperatively and cannot interrupt a blocking filesystem call. The partial preview is not a complete inventory of the requested paths.
 
-Planning loads tracked paths once per Git repository and reuses ancestor discovery for sibling files and directories. The sorted index stores file paths without duplicating every parent prefix; directory checks use prefix lookup. Memory scales with Git index output and the number of distinct directories cached during ancestor discovery. Whole-directory candidates still inspect nested repositories. These caches exist only during planning: deletion rechecks current Git state and the frozen file manifest independently. Candidate deduplication uses a directory-ancestor index instead of comparing every candidate against every previous one. Rule references are expanded once in each loaded snapshot and shared by selection and inspection. Age checks stop evaluating rules that cannot tighten the already established thresholds; complete manifests and exclusion checks remain required.
+Planning loads tracked paths once per Git repository and reuses ancestor discovery for sibling files and directories. The sorted index stores file paths without duplicating every parent prefix; directory checks use prefix lookup. Memory scales with Git index output and the number of distinct directories cached during ancestor discovery. Rule scopes are reused per project context; a root index limits protection merging to overlapping scopes while preserving policy order. The index retains all scopes for this invocation so that exclusions and descendant age constraints are not evicted. Whole-directory candidates still inspect nested repositories. These caches exist only during planning: deletion rechecks current Git state and the frozen file manifest independently. Candidate deduplication uses a directory-ancestor index instead of comparing every candidate against every previous one. Rule references are expanded once in each loaded snapshot and shared by selection and inspection. Age checks stop evaluating rules that cannot tighten the already established thresholds; complete manifests and exclusion checks remain required.
 
 ### Automatic deletion after scanning
 
 `clean` and `purge` accept `--yes` / `-y` to delete all eligible candidates after scanning, without a selection dialog or confirmation. This also enables deletion without a TTY. It includes recent candidates that would normally be unchecked; `preselect_after_days` controls default checkbox selection, not eligibility. Exclusions, `min_age_days`, retained Agent versions, Git/link/mount protections, and deletion-time configuration and frozen-file checks still apply.
 
 ```sh
-hgc file clean ./target -r non_text_or_large --yes
+hgc file clean -r project_default ./ --yes
 hgc file purge ./project -r artifacts -y
-hgc file clean ./target -r non_text_or_large --yes --dry-run
+hgc file clean -r project_default ./ --yes --dry-run
 ```
 
 `--yes --dry-run` previews all candidates without any selection or confirmation and never deletes. Scanning completes before deletion starts; a scan timeout can leave a partial set of fully checked candidates available for automatic deletion, with final exit status 1. `purge --paths` editing cannot be combined with `--yes`. Python callers use `CleanRequest(yes=True)` or `PurgeRequest(yes=True)`.

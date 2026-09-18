@@ -34,12 +34,25 @@ auto_apply = true
 min_age_days = 7
 
 [[rules]]
-id = "clean.non_text_or_large"
+id = "clean.project_default"
 auto_apply = false
-# Supply PATH when applying: hgc file clean ./target -r non_text_or_large --dry-run
+recursive = true
+include_unverified = true
+# Supply project roots: hgc file clean -r project_default ./ --dry-run
+# Purge the entire project first; filter remaining .local files afterwards.
 
 [rules.match]
-any = [{ is_text = false }, { min_file_size = 10_485_761 }]
+any = [
+  { ref = "purge.artifacts" },
+  { ref = "purge.cachedirs" },
+  { all = [
+    { glob = "/.local/**" },
+    { not = { any = [
+      { all = [{ any = [{ is_text = true }, { is_image = true }] }, { max_file_size = "10MB" }] },
+      { all = [{ is_video = true }, { max_file_size = "50MB" }] },
+    ] } },
+  ] },
+]
 
 # Optional examples; new rules default to explicit-only (--rule).
 # [[rules]]

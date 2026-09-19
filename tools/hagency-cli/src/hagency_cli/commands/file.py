@@ -764,7 +764,8 @@ def cleanup_rules_cli(
 
     Uses the same repository discovery and --config behavior as clean and purge.
     A full rule ID shows all effective configuration fields; its prefix identifies
-    the command. --command filters the list.
+    the command. The match field is a copyable expression with canonical byte
+    sizes and full reference IDs. --command filters the list.
     States are auto, explicit-only and disabled.
 
     \b
@@ -873,7 +874,9 @@ def space_purge_cli(
     systems with effective user IDs protect their entire candidate directory.
     Scan roots containing the home directory disable all default selections.
 
-    Match trees support all/any/not, rule references, within, glob and source.
+    Match expressions combine conditions with |, &, ! and parentheses.
+    Use ref="purge.artifacts", within="cache", glob="*.tmp" and source="project".
+    File sizes support <, <=, =, !=, >= and >, for example file_size <= 1MB.
     Size and is_text/is_image/is_video leaves select ordinary files and traverse
     directories. CLI PATH intersects within entries without changing glob bases.
 
@@ -1030,7 +1033,9 @@ def clean_files_cli(
     apply. --agent and --rule are mutually exclusive.
     PATH intersects rule entries; rootless generic rules require PATH. Relative
     PATH uses the invocation directory; within paths use the declaring TOML directory.
-    Match trees combine all/any/not, full-ID ref, within, glob and source conditions.
+    Match expressions combine conditions with |, &, ! and parentheses (! > & > |).
+    Use ref="clean.media", within="cache", glob="*.log" and is_text.
+    File sizes support <, <=, =, !=, >= and >, for example file_size <= 1MB.
     Clean rules may reference purge rules, preserving project checks and depth 6.
     -R/--recursive removes that depth limit; --include-unverified admits artifacts
     with unverified project context or purpose. These options affect project sources;

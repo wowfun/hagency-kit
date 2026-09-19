@@ -4,73 +4,84 @@ schema_version = 1
 id = "purge.artifacts"
 auto_apply = true
 preselect_after_days = 7
-[rules.match]
-all = [
-  { source = "project" },
-  { any = [
-    { glob = '.angular/' },
-    { glob = '.astro/' },
-    { glob = '.build/' },
-    { glob = '.cxx/' },
-    { glob = '.dart_tool/' },
-    { glob = '.expo/' },
-    { glob = '.gradle/' },
-    { glob = '.mypy_cache/' },
-    { glob = '.next/' },
-    { glob = '.nox/' },
-    { glob = '.nuxt/' },
-    { glob = '.output/' },
-    { glob = '.parcel-cache/' },
-    { glob = '.pytest_cache/' },
-    { glob = '.ruff_cache/' },
-    { glob = '.svelte-kit/' },
-    { glob = '.terragrunt-cache/' },
-    { glob = '.tox/' },
-    { glob = '.turbo/' },
-    { glob = '.venv/' },
-    { glob = '.zig-cache/' },
-    { glob = 'DerivedData/' },
-    { glob = 'Pods/' },
-    { glob = '__pycache__/' },
-    { glob = 'bin/' },
-    { glob = 'build/' },
-    { glob = 'coverage/' },
-    { glob = 'dist/' },
-    { glob = 'node_modules/' },
-    { glob = 'obj/' },
-    { glob = 'target/' },
-    { glob = 'vendor/' },
-    { glob = 'venv/' },
-    { glob = 'zig-out/' },
-  ] },
-]
+match = '''
+  source="project" & (
+    glob=".angular/"
+    | glob=".astro/"
+    | glob=".build/"
+    | glob=".cxx/"
+    | glob=".dart_tool/"
+    | glob=".expo/"
+    | glob=".gradle/"
+    | glob=".mypy_cache/"
+    | glob=".next/"
+    | glob=".nox/"
+    | glob=".nuxt/"
+    | glob=".output/"
+    | glob=".parcel-cache/"
+    | glob=".pytest_cache/"
+    | glob=".ruff_cache/"
+    | glob=".svelte-kit/"
+    | glob=".terragrunt-cache/"
+    | glob=".tox/"
+    | glob=".turbo/"
+    | glob=".venv/"
+    | glob=".zig-cache/"
+    | glob="DerivedData/"
+    | glob="Pods/"
+    | glob="__pycache__/"
+    | glob="bin/"
+    | glob="build/"
+    | glob="coverage/"
+    | glob="dist/"
+    | glob="node_modules/"
+    | glob="obj/"
+    | glob="target/"
+    | glob="vendor/"
+    | glob="venv/"
+    | glob="zig-out/"
+  )
+'''
 
 [[rules]]
 id = "purge.cachedirs"
 auto_apply = true
 preselect_after_days = 7
-match = { all = [{ source = "cachedir-tag" }, { glob = '**/' }] }
+match = 'source="cachedir-tag" & glob="**/"'
 
 [[rules]]
 id = "clean.codex.versions"
 auto_apply = true
 keep_previous = 1
-match = { all = [{ source = "codex.versions" }, { glob = '*' }] }
+match = 'source="codex.versions" & glob="*"'
 
 [[rules]]
 id = "clean.claude.versions"
 auto_apply = true
 keep_previous = 1
-match = { all = [{ source = "claude.versions" }, { glob = '*' }] }
+match = 'source="claude.versions" & glob="*"'
 
 [[rules]]
 id = "clean.copilot.versions"
 auto_apply = true
 keep_previous = 1
-match = { all = [{ source = "copilot.versions" }, { glob = '*' }] }
+match = 'source="copilot.versions" & glob="*"'
 
 [[rules]]
 id = "clean.codex.staging"
 auto_apply = true
 min_age_days = 7
-match = { all = [{ source = "codex.staging" }, { any = [{ glob = '.staging.*/' }, { glob = 'openai-bundled.staging-*/' }, { glob = 'marketplace-add-*/' }, { glob = 'marketplace-upgrade-*/' }] }] }
+match = '''
+  source="codex.staging" & (
+    glob=".staging.*/"
+    | glob="openai-bundled.staging-*/"
+    | glob="marketplace-add-*/"
+    | glob="marketplace-upgrade-*/"
+  )
+'''
+
+[[rules]]
+id = "clean.empty_directories"
+auto_apply = false
+preselect_after_days = 0
+match = 'is_empty_directory'

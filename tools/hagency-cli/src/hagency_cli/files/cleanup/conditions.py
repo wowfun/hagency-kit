@@ -1,4 +1,4 @@
-"""Immutable cleanup expressions, entry planning and metadata-only evaluation.
+"""Immutable cleanup expressions, entry planning and candidate evaluation.
 
 Each load_rules call expands references once into RulesSnapshot.expressions.
 Global LRU caches are bounded and contain only pure results keyed by immutable,
@@ -10,8 +10,12 @@ between planning and deletion revalidation.
 
 from __future__ import annotations
 
+import json
+import operator
 import os
+import re
 import stat
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -36,12 +40,23 @@ SOURCES = frozenset(
         "codex.staging",
     }
 )
+COMPARISONS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    "=": operator.eq,
+    "!=": operator.ne,
+    ">=": operator.ge,
+    ">": operator.gt,
+}
+BOOLEAN_CONDITIONS = frozenset(
+    {"is_text", "is_image", "is_video", "is_empty_directory"}
+)
 
 
 @dataclass(frozen=True, eq=False)
 class Condition:
     op: str
-    value: str | bool | Path | tuple[int | None, int | None] | None = None
+    value: str | bool | Path | tuple[str, int] | None = None
     children: tuple[Condition, ...] = ()
 
     _hash: int = field(init=False, repr=False, compare=False)
@@ -59,24 +74,20 @@ class Condition:
         else:
             if self.children:
                 raise ValueError("leaf conditions cannot have children")
-            if self.op in {"is_text", "is_image", "is_video"}:
+            if self.op in BOOLEAN_CONDITIONS:
                 if type(self.value) is not bool:
                     raise ValueError(f"{self.op} must be boolean")
-            elif self.op == "size":
+            elif self.op == "file_size":
                 if (
                     not isinstance(self.value, tuple)
                     or len(self.value) != 2
-                    or all(v is None for v in self.value)
+                    or self.value[0] not in COMPARISONS
+                    or type(self.value[1]) is not int
+                    or not 0 <= self.value[1] <= 2**63 - 1
                 ):
-                    raise ValueError("size requires bounds")
-                for bound in self.value:
-                    if bound is not None and (
-                        type(bound) is not int or not 0 <= bound <= 2**63 - 1
-                    ):
-                        raise ValueError("invalid canonical byte bound")
-                low, high = self.value
-                if low is not None and high is not None and low > high:
-                    raise ValueError("min_file_size must not exceed max_file_size")
+                    raise ValueError(
+                        "file_size requires a comparison and canonical bytes"
+                    )
             elif self.op == "within":
                 if not isinstance(self.value, Path) or not self.value.is_absolute():
                     raise ValueError("within requires an absolute parsed path")
@@ -112,20 +123,25 @@ class Condition:
             pending.extend(zip(left.children, right.children))
         return True
 
-    def data(self) -> dict:
+    def expression(self) -> str:
+        """Render the declared tree, retaining lexical groups and reference IDs."""
+
+        def grouped(child: Condition) -> str:
+            value = child.expression()
+            return f"({value})" if child.op in {"all", "any"} else value
+
         if self.op in {"all", "any"}:
-            return {self.op: [child.data() for child in self.children]}
+            separator = " & " if self.op == "all" else " | "
+            return separator.join(grouped(child) for child in self.children)
         if self.op == "not":
-            return {"not": self.children[0].data()}
-        if self.op == "size":
-            return {
-                key: value
-                for key, value in zip(("min_file_size", "max_file_size"), self.value)
-                if value is not None
-            }
-        return {
-            self.op: str(self.value) if isinstance(self.value, Path) else self.value
-        }
+            return "!" + grouped(self.children[0])
+        if self.op == "file_size":
+            comparison, size = self.value
+            return f"file_size {comparison} {size}"
+        if self.op in BOOLEAN_CONDITIONS:
+            return self.op if self.value else "!" + self.op
+        value = str(self.value) if isinstance(self.value, Path) else self.value
+        return f"{self.op}={json.dumps(value, ensure_ascii=False)}"
 
 
 @lru_cache(maxsize=1024)
@@ -133,35 +149,8 @@ def pattern(value: str) -> GitIgnoreSpec:
     return GitIgnoreSpec.from_lines([value])
 
 
-def parse_condition(
-    value: object, base: Path, command: str, depth: int = 0
-) -> Condition:
-    if depth > 64:
-        raise ValueError("match nesting exceeds 64 levels")
-    if not isinstance(value, dict) or not value:
-        raise ValueError("match must be a nonempty condition table")
-    if set(value) <= {"min_file_size", "max_file_size"}:
-        bounds = tuple(
-            parse_file_size(value[key]) if key in value else None
-            for key in ("min_file_size", "max_file_size")
-        )
-        if bounds[0] is not None and bounds[1] is not None and bounds[0] > bounds[1]:
-            raise ValueError("min_file_size must not exceed max_file_size")
-        return Condition("size", bounds)
-    if len(value) != 1:
-        raise ValueError("each condition must contain exactly one operator")
-    op, operand = next(iter(value.items()))
-    if op in {"all", "any", "not"}:
-        operands = [operand] if op == "not" else operand
-        if not isinstance(operands, list) or not operands:
-            raise ValueError(f"{op} requires a nonempty condition array")
-        return Condition(
-            op,
-            children=tuple(
-                parse_condition(item, base, command, depth + 1) for item in operands
-            ),
-        )
-    if op in {"is_text", "is_image", "is_video"}:
+def _leaf_condition(op: str, operand: object, base: Path, command: str) -> Condition:
+    if op in BOOLEAN_CONDITIONS:
         if type(operand) is not bool:
             raise ValueError(f"{op} must be boolean")
     elif op in {"within", "glob", "ref", "source"}:
@@ -199,6 +188,150 @@ def parse_condition(
     return Condition(op, operand)
 
 
+_TOKEN = re.compile(
+    r"""(?P<space>[ \t\r\n]+)|(?P<string>"(?:[^"\\\r\n]|\\[^\r\n])*"|'[^'\r\n]*')"""
+    r"|(?P<symbol><=|>=|!=|[<>=!&|()])"
+    r"|(?P<name>[a-zA-Z_][a-zA-Z_0-9]*)"
+    r"|(?P<number>[0-9]+(?:\.[0-9]+)?(?:[ \t]*[a-zA-Z]+)?)"
+)
+
+
+class _ExpressionParser:
+    """Streaming lexer and recursive descent; boolean chains do not recurse."""
+
+    def __init__(self, text: str, base: Path, command: str):
+        self.text, self.base, self.command = text, base, command
+        self.position = 0
+        self.advance()
+
+    def error(self, message: str, position: int | None = None) -> ValueError:
+        position = self.start if position is None else position
+        line = self.text.count("\n", 0, position) + 1
+        column = position - self.text.rfind("\n", 0, position)
+        return ValueError(f"match expression line {line}, column {column}: {message}")
+
+    def advance(self) -> None:
+        while self.position < len(self.text):
+            self.start = self.position
+            token = _TOKEN.match(self.text, self.position)
+            if token is None:
+                raise self.error("invalid token or unterminated string")
+            self.position = token.end()
+            if token.lastgroup != "space":
+                self.kind, self.token = token.lastgroup, token.group()
+                return
+        self.start = self.position
+        self.kind, self.token = "end", ""
+
+    def take(self, token: str) -> bool:
+        if self.token != token:
+            return False
+        self.advance()
+        return True
+
+    def parse(self) -> Condition:
+        result = self.disjunction(0)
+        if self.kind != "end":
+            raise self.error("expected '&', '|' or end of expression")
+        if condition_depth(result) > 64:
+            raise self.error("match nesting exceeds 64 levels")
+
+        def canonical(node: Condition) -> Condition:
+            if not node.children:
+                return node
+            children = tuple(canonical(child) for child in node.children)
+            if node.op == "not" and children[0].op in BOOLEAN_CONDITIONS:
+                return Condition(children[0].op, not children[0].value)
+            return replace(node, children=children)
+
+        # Fold boolean negation only after validating the original nesting.
+        # This also preserves false predicates for consumers such as cascade planning.
+        return canonical(result)
+
+    def disjunction(self, depth: int) -> Condition:
+        children = [self.conjunction(depth)]
+        while self.take("|"):
+            children.append(self.conjunction(depth))
+        return (
+            children[0]
+            if len(children) == 1
+            else Condition("any", children=tuple(children))
+        )
+
+    def conjunction(self, depth: int) -> Condition:
+        children = [self.unary(depth)]
+        while self.take("&"):
+            children.append(self.unary(depth))
+        return (
+            children[0]
+            if len(children) == 1
+            else Condition("all", children=tuple(children))
+        )
+
+    def unary(self, depth: int) -> Condition:
+        if depth > 64:
+            raise self.error("match nesting exceeds 64 levels")
+        if self.take("!"):
+            return Condition("not", children=(self.unary(depth + 1),))
+        if self.take("("):
+            result = self.disjunction(depth + 1)
+            if not self.take(")"):
+                raise self.error("expected ')'")
+            return result
+        return self.leaf()
+
+    def leaf(self) -> Condition:
+        if self.kind != "name":
+            raise self.error("expected a condition or '('")
+        op = self.token
+        if op in {"min_file_size", "max_file_size"}:
+            raise self.error(
+                "use file_size comparisons instead of min_file_size/max_file_size"
+            )
+        self.advance()
+        comparison = self.token
+        if op in BOOLEAN_CONDITIONS and comparison in {"", "&", "|", ")"}:
+            return Condition(op, True)
+        if comparison not in COMPARISONS or (op != "file_size" and comparison != "="):
+            raise self.error(
+                "expected a file_size comparison"
+                if op == "file_size"
+                else "expected '='"
+            )
+        self.advance()
+        kind, raw, position = self.kind, self.token, self.start
+        if kind not in {"string", "number", "name"}:
+            raise self.error("expected a condition value")
+        try:
+            if kind == "string":
+                value = tomllib.loads("value=" + raw)["value"]
+            elif raw in {"true", "false"}:
+                value = raw == "true"
+            elif op == "file_size" and kind == "number":
+                # Route integers through the bounded unit parser too, including
+                # arbitrarily long zero padding without Python's int digit limit.
+                value = raw + "B" if raw.isdigit() else raw
+            else:
+                raise ValueError("expected a quoted string, boolean or file size")
+            if op == "file_size":
+                result = Condition(op, (comparison, parse_file_size(value)))
+            else:
+                result = _leaf_condition(op, value, self.base, self.command)
+        except (ValueError, TypeError) as exc:
+            raise self.error(str(exc), position) from exc
+        self.advance()
+        return result
+
+
+def parse_condition(value: object, base: Path, command: str) -> Condition:
+    if not isinstance(value, str):
+        raise TypeError(
+            "match expression line 1, column 1: match must be an expression string; "
+            "condition tables are no longer supported"
+        )
+    return _ExpressionParser(value, base, command).parse()
+
+
 def walk(node: Condition):
     pending, seen = [node], set()
     while pending:
@@ -209,6 +342,22 @@ def walk(node: Condition):
         seen.add(identity)
         yield current
         pending.extend(reversed(current.children))
+
+
+def has_positive_empty_directory(node: Condition) -> bool:
+    """Find an emptiness predicate, accounting for negated groups and references."""
+    pending, seen = [(node, False)], set()
+    while pending:
+        current, negated = pending.pop()
+        key = (id(current), negated)
+        if key in seen:
+            continue
+        seen.add(key)
+        if current.op == "is_empty_directory" and current.value is not negated:
+            return True
+        child_negated = not negated if current.op == "not" else negated
+        pending.extend((child, child_negated) for child in current.children)
+    return False
 
 
 @lru_cache(maxsize=2048)
@@ -347,8 +496,10 @@ def entries(
 
 @lru_cache(maxsize=2048)
 def kinds(node: Condition) -> frozenset[str]:
-    if node.op in {"size", "is_text", "is_image", "is_video"}:
+    if node.op in {"file_size", "is_text", "is_image", "is_video"}:
         return frozenset({"file"})
+    if node.op == "is_empty_directory":
+        return frozenset({"directory"})
     if node.op in {"not", "ref"}:
         return kinds(node.children[0])
     if node.op in {"all", "any"}:
@@ -412,11 +563,12 @@ def evaluate(
         return node.value == source or (
             node.value == "project" and source == "cachedir-tag"
         )
-    if node.op == "size":
-        minimum, maximum = node.value
-        return (minimum is None or size >= minimum) and (
-            maximum is None or size <= maximum
-        )
+    if node.op == "file_size":
+        comparison, expected = node.value
+        return COMPARISONS[comparison](size, expected)
+    if node.op == "is_empty_directory":
+        with os.scandir(path) as entries:
+            return (next(entries, None) is None) == node.value
     classify = {
         "is_text": is_text_name,
         "is_image": is_image_name,

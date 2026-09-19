@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import heapq
+import os
+import stat
+import time
 from dataclasses import replace
+from pathlib import Path
 
 from hagency_cli.files.cleanup.agents import installation_lock
 from hagency_cli.files.cleanup.config import CleanupConfigError, configuration_unchanged
 from hagency_cli.files.cleanup.inspection import scan_budget
+from hagency_cli.files.cleanup.matching import ScopeIndex
 from hagency_cli.files.cleanup.models import (
     CleanRequest,
     CleanupDisposition,
@@ -19,8 +25,9 @@ from hagency_cli.files.cleanup.models import (
     PurgeRequest,
     _BoundCandidate,
 )
+from hagency_cli.files.cleanup.policy import included
 from hagency_cli.files.cleanup.removal import _permanently_remove, _revalidate
-from hagency_cli.files.cleanup.scan import _build_plan
+from hagency_cli.files.cleanup.scan import _bind_candidate, _build_plan
 
 
 def _partial_or(
@@ -77,6 +84,7 @@ def _make_report(
         config_files=tuple(path for path, _signature in plan.snapshot.files)
         if plan.snapshot
         else (),
+        empty_directory_cascade=bool(plan.empty_directory_scopes),
     )
 
 
@@ -98,6 +106,158 @@ def _bind_selection(
             ),
         )
     return tuple(by_id[value] for value in ids), ()
+
+
+def _cascade_empty_directories(
+    plan: CleanupPlan,
+    removed_paths: tuple[Path, ...],
+    removed_links: set[tuple[int, int]],
+) -> tuple[
+    tuple[_BoundCandidate, ...], tuple[CleanupItemResult, ...], tuple[CleanupIssue, ...]
+]:
+    """Remove newly empty ancestors without rediscovering unrelated directories."""
+    if not plan.empty_directory_scopes:
+        return (), (), ()
+
+    selected: list[_BoundCandidate] = []
+    results: list[CleanupItemResult] = []
+    issues: list[CleanupIssue] = []
+    scope_index = ScopeIndex(tuple(dict.fromkeys(plan.empty_directory_scopes)))
+    policy_index = ScopeIndex(plan.policy_scopes)
+    removed_identities = frozenset(removed_links)
+    pending: list[tuple[int, int, Path]] = []
+    scheduled: set[Path] = set()
+
+    def schedule(path: Path, order: int) -> None:
+        if path not in scheduled:
+            scheduled.add(path)
+            heapq.heappush(pending, (-len(path.parts), order, path))
+
+    for order, removed in enumerate(removed_paths):
+        schedule(removed.parent, order)
+    # Always finish deeper siblings before their parent. A parent is checked once,
+    # after every selected branch that could make it empty has completed.
+    while pending:
+        _depth, order, path = heapq.heappop(pending)
+        possible_scopes = tuple(
+            scope
+            for scope in scope_index.for_path(path)
+            if path != scope.root and path.is_relative_to(scope.root)
+        )
+        if not possible_scopes:
+            continue
+        candidate = None
+        try:
+            # Binding and deletion share this ancestor's bounded, fresh mount view;
+            # no filesystem or Git authorization survives a preceding removal.
+            with scan_budget():
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode):
+                    continue
+                with os.scandir(path) as entries:
+                    if next(entries, None) is not None:
+                        continue
+                scopes = tuple(
+                    scope
+                    for scope in possible_scopes
+                    if included(scope, path, info.st_mode, info.st_size)
+                )
+                if not scopes:
+                    continue
+                # The containing root bounds identity/containment checks only.
+                # Each RuleScope retains its own glob base in included()/policy.
+                root = min(
+                    (scope.root for scope in scopes), key=lambda value: len(value.parts)
+                )
+                candidate, problems = _bind_candidate(
+                    path,
+                    root,
+                    root,
+                    scopes,
+                    policy_index.for_path(path),
+                    time.time_ns(),
+                )
+                issues.extend(problems)
+                if candidate is None:
+                    continue
+                # Other OR branches may match nonempty directories. A cascade
+                # may authorize only the empty directory itself, even after a race.
+                if len(candidate.tree) != 1 or candidate.tree[0].relative_path != ".":
+                    results.append(
+                        CleanupItemResult(
+                            path,
+                            ItemDisposition.SKIPPED,
+                            candidate.choice.size_bytes,
+                            "directory is no longer verifiably empty; preview again",
+                        )
+                    )
+                    continue
+                candidate = replace(candidate, removed_links=removed_identities)
+                if plan.snapshot is not None and not configuration_unchanged(
+                    plan.snapshot
+                ):
+                    issues.append(
+                        CleanupIssue(
+                            "config_changed",
+                            None,
+                            "cleanup configuration changed before empty-directory cascade; preview again",
+                        )
+                    )
+                    return tuple(selected), tuple(results), tuple(issues)
+                with installation_lock(candidate.choice.exact_path, candidate.agent):
+                    reason = _revalidate(candidate)
+                    if reason is not None:
+                        results.append(
+                            CleanupItemResult(
+                                path,
+                                ItemDisposition.SKIPPED,
+                                candidate.choice.size_bytes,
+                                reason,
+                            )
+                        )
+                        continue
+                    if plan.snapshot is not None and not configuration_unchanged(
+                        plan.snapshot
+                    ):
+                        issues.append(
+                            CleanupIssue(
+                                "config_changed",
+                                None,
+                                "cleanup configuration changed during empty-directory cascade; preview again",
+                            )
+                        )
+                        return tuple(selected), tuple(results), tuple(issues)
+                    _permanently_remove(candidate)
+        except OSError as exc:
+            if candidate is None:
+                issues.append(
+                    CleanupIssue(
+                        "cascade_check_failed",
+                        path,
+                        f"could not verify empty directory: {exc}",
+                    )
+                )
+            else:
+                results.append(
+                    CleanupItemResult(
+                        path,
+                        ItemDisposition.FAILED,
+                        candidate.choice.size_bytes,
+                        str(exc),
+                    )
+                )
+            continue
+        selected.append(candidate)
+        results.append(
+            CleanupItemResult(
+                path,
+                ItemDisposition.REMOVED,
+                candidate.choice.size_bytes,
+                "removed after selected descendants made it empty",
+            )
+        )
+        schedule(path.parent, order)
+    return tuple(selected), tuple(results), tuple(issues)
 
 
 def purge_space(request: PurgeRequest, *, ui: CleanupUI) -> CleanupReport:
@@ -253,11 +413,24 @@ def cleanup(request: PurgeRequest | CleanRequest, *, ui: CleanupUI) -> CleanupRe
                     item.choice.size_bytes,
                 )
             )
+    cascade_selected: tuple[_BoundCandidate, ...] = ()
+    if not extra_issues:
+        cascade_selected, cascade_results, cascade_issues = _cascade_empty_directories(
+            plan,
+            tuple(
+                result.exact_path
+                for result in results
+                if result.disposition is ItemDisposition.REMOVED
+            ),
+            removed_links,
+        )
+        results.extend(cascade_results)
+        extra_issues = (*extra_issues, *cascade_issues)
     result_tuple = tuple(results)
     return _make_report(
         plan,
         CleanupDisposition.COMPLETED,
-        selected=selected,
+        selected=(*selected, *cascade_selected),
         results=result_tuple,
         extra_issues=extra_issues,
     )

@@ -378,6 +378,7 @@ class CleanupReport:
     known_bytes: int = 0
     command: str = "purge"
     config_files: tuple[Path, ...] = ()
+    empty_directory_cascade: bool = False
 
     @property
     def failed(self) -> bool:
@@ -464,6 +465,8 @@ class CleanupPlan:
     issues: tuple[CleanupIssue, ...]
     snapshot: RulesSnapshot | None = None
     command: str = "purge"
+    empty_directory_scopes: tuple[RuleScope, ...] = ()
+    policy_scopes: tuple[RuleScope, ...] = ()
 
 
 @dataclass(frozen=True)

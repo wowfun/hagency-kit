@@ -173,7 +173,9 @@ def _rule(row: dict, origin: Path, previous: CleanupRule | None = None) -> Clean
         values["origin"] = str(origin)
         return CleanupRule(**values)
     except (TypeError, ValueError) as exc:
-        raise CleanupConfigError(f"invalid cleanup rule {row['id']}: {exc}") from exc
+        raise CleanupConfigError(
+            f"invalid cleanup rule {row['id']} in {origin}: {exc}"
+        ) from exc
 
 
 def load_rules(value: Path | None = None, *, cwd: Path | None = None) -> RulesSnapshot:

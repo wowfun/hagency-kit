@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from hagency_cli.files.cleanup import agents
+from hagency_cli.files.cleanup.conditions import has_positive_empty_directory
 from hagency_cli.files.cleanup.config import load_rules
 from hagency_cli.files.cleanup.inspection import (
     ScanTimeout,
@@ -677,30 +678,44 @@ def _project_plan(
                 path = candidate.choice.exact_path
                 session.update("protecting", path)
                 checkpoint()
-                applicable = scope_index.for_path(path)
-                reason = next(
-                    (
-                        reason
-                        for entry in candidate.tree
-                        if (
-                            reason := exclusion_reason(
-                                applicable,
-                                path / entry.relative_path,
-                                stat.S_ISDIR(entry.identity.mode),
+                try:
+                    applicable = scope_index.for_path(path)
+                    reason = next(
+                        (
+                            reason
+                            for entry in candidate.tree
+                            if (
+                                reason := exclusion_reason(
+                                    applicable,
+                                    path / entry.relative_path,
+                                    stat.S_ISDIR(entry.identity.mode),
+                                )
                             )
-                        )
-                    ),
-                    None,
-                )
-                activity = candidate.choice.activity
-                if reason is None and candidate.tree:
-                    activity, reason = age_policy(
-                        path,
-                        list(candidate.tree),
-                        candidate.scopes,
-                        applicable,
-                        now_ns,
+                        ),
+                        None,
                     )
+                    activity = candidate.choice.activity
+                    if reason is None and candidate.tree:
+                        activity, reason = age_policy(
+                            path,
+                            list(candidate.tree),
+                            candidate.scopes,
+                            applicable,
+                            now_ns,
+                        )
+                except ScanTimeout:
+                    raise
+                except OSError as exc:
+                    # A failed predicate cannot prove that retention is satisfied.
+                    # Reject this candidate without discarding other checked items.
+                    issues.append(
+                        CleanupIssue(
+                            "candidate_policy_failed",
+                            path,
+                            f"could not verify candidate protection policies: {exc}",
+                        )
+                    )
+                    continue
                 if reason:
                     issues.append(CleanupIssue("protected", path, reason, False))
                 else:
@@ -747,6 +762,8 @@ def _plan_with_rules(
             snapshot,
             command,
         )
+    empty_directory_scopes: tuple[RuleScope, ...] = ()
+    policy_scopes: tuple[RuleScope, ...] = ()
     if isinstance(request, PurgeRequest):
         candidates, issues, roots, _ = _project_plan(request, rules, now_ns)
     else:
@@ -800,6 +817,12 @@ def _plan_with_rules(
         candidates.extend(found)
         issues.extend(problems)
         roots = tuple(dict.fromkeys((*roots, *other_roots)))
+        policy_scopes = tuple(dict.fromkeys((*project_scopes, *path_scopes)))
+        empty_directory_scopes = tuple(
+            scope
+            for scope in path_scopes
+            if has_positive_empty_directory(scope.rule.match)
+        )
     session.update("finalizing")
     try:
         with (
@@ -831,6 +854,8 @@ def _plan_with_rules(
         ),
         snapshot,
         command,
+        empty_directory_scopes,
+        policy_scopes,
     )
 
 

@@ -18,6 +18,11 @@ from hagency_cli.files.cleanup.models import (
     _format_bytes as format_bytes,
 )
 
+EMPTY_DIRECTORY_CASCADE_NOTICE = (
+    "Ancestors of removed items may also be removed if they become empty "
+    "and match the selected cleanup rules."
+)
+
 
 def render_cleanup_rules(
     rules: tuple[CleanupRule, ...],
@@ -56,7 +61,7 @@ def render_cleanup_rules(
                 print()
             for field in fields(rule):
                 value = (
-                    rule.match.data()
+                    rule.match.expression()
                     if field.name == "match"
                     else getattr(rule, field.name)
                 )
@@ -191,6 +196,11 @@ def render_cleanup_report(
     selected_count = len(report.selected_paths)
     size = _size_summary(report.known_bytes, _selected_unknown_count(report))
     if disposition == "preview":
+        if report.empty_directory_cascade:
+            print(EMPTY_DIRECTORY_CASCADE_NOTICE)
+            print(
+                "Preview paths and known size exclude these possible ancestor removals."
+            )
         state = "incomplete" if report.failed else "complete"
         print(f"Preview {state}: {selected_count} artifact(s), {size}.")
     elif disposition == "partial":

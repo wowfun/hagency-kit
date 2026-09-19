@@ -53,9 +53,14 @@ def _revalidate(candidate: _BoundCandidate) -> str | None:
 
     if _has_link_or_reparse_component(path):
         return "candidate has a linked ancestor after review"
-    if not all(
-        included(scope, path, info.st_mode, info.st_size) for scope in candidate.scopes
-    ):
+    try:
+        matches_rules = all(
+            included(scope, path, info.st_mode, info.st_size)
+            for scope in candidate.scopes
+        )
+    except OSError as exc:
+        return f"candidate could not be rechecked against cleanup rules: {exc}"
+    if not matches_rules:
         if any(scope.rule.source == "cachedir-tag" for scope in candidate.scopes):
             return "candidate no longer has a valid CACHEDIR.TAG"
         return "candidate no longer matches its cleanup rules"

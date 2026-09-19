@@ -6,7 +6,11 @@ from pathlib import Path
 
 import questionary
 
-from hagency_cli.commands.cleanup_render import _render_issues, format_bytes
+from hagency_cli.commands.cleanup_render import (
+    EMPTY_DIRECTORY_CASCADE_NOTICE,
+    _render_issues,
+    format_bytes,
+)
 from hagency_cli.files.cleanup.models import (
     CleanupCandidate,
     CleanupPlan,
@@ -86,6 +90,8 @@ class QuestionaryCleanupUI:
         print("Selected paths:")
         for path in paths:
             print(f"  {path}")
+        if self.presented_plan and self.presented_plan.empty_directory_scopes:
+            print(EMPTY_DIRECTORY_CASCADE_NOTICE)
         prompt = questionary.confirm(
             f"Remove {len(paths)} selected item(s) "
             f"({format_bytes(known_bytes)} known size)?",

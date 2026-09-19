@@ -28,11 +28,33 @@ class ScanReviewTests(unittest.TestCase):
         remaining = self.file(self.repo / ".local/standalone.bin")
         original = scan._scan_root
         visits = []
+        reads = []
         scandir = scan.os.scandir
+
+        class TrackedScan:
+            def __init__(self, path):
+                self.stream = scandir(path)
+                self.counter = [path, 0]
+                reads.append(self.counter)
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                entry = next(self.stream)
+                self.counter[1] += 1
+                return entry
 
         def record(path):
             visits.append(path)
-            return scandir(path)
+            return TrackedScan(path)
 
         def scanning(*args, **kwargs):
             if kwargs.get("path_scopes") is not None:
@@ -45,7 +67,12 @@ class ScanReviewTests(unittest.TestCase):
         self.assertEqual({c.exact_path for c in report.choices}, {artifact, remaining})
         self.assertNotIn(artifact, visits)
         self.assertFalse(any(path.is_relative_to(artifact) for path in visits))
-        self.assertEqual(visits.count(self.repo / ".local"), 1)
+        # One traversal reads both children; the other two opens are single-entry
+        # empty-directory probes, not additional traversals of this subtree.
+        self.assertEqual(
+            sorted(count for path, count in reads if path == self.repo / ".local"),
+            [1, 1, 2],
+        )
 
     def test_protected_purge_directory_still_receives_path_scan(self):
         self.repository_policy()
@@ -68,11 +95,11 @@ class ScanReviewTests(unittest.TestCase):
 id="clean.deep"
 recursive=true
 include_unverified=true
-match={all=[{within="recursive"},{ref="purge.artifacts"}]}
+match='within="recursive" & ref="purge.artifacts"'
 [[rules]]
 id="clean.shallow"
 include_unverified=true
-match={all=[{within="."},{ref="purge.artifacts"}]}
+match='within="." & ref="purge.artifacts"'
 """)
         wanted = self.file(self.repo / "recursive/a/b/c/d/e/f/node_modules/data").parent
         outside = self.file(self.repo / "other/a/b/c/d/e/f/unmatched.bin")
@@ -91,7 +118,7 @@ match={all=[{within="."},{ref="purge.artifacts"}]}
     def test_sibling_files_reuse_rule_scopes(self):
         self.write_rules("""[[rules]]
 id="clean.project"
-match={ref="purge.artifacts"}
+match='ref="purge.artifacts"'
 """)
         self.file(self.repo / "package.json", "{}")
         for index in range(100):
@@ -121,7 +148,7 @@ match={ref="purge.artifacts"}
         self.repository_policy()
         with self.rules_file.open("a") as stream:
             stream.write(
-                '\n[[rules]]\nid="clean.young"\nmin_age_days=30\nmatch={all=[{within=".local"},{glob="**/keep.txt"}]}\n'
+                '\n[[rules]]\nid="clean.young"\nmin_age_days=30\nmatch=\'within=".local" & glob="**/keep.txt"\'\n'
             )
         keep = self.file(self.repo / ".local/node_modules/keep.txt")
         target = self.file(keep.parent / "drop.bin")

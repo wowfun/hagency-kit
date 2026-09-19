@@ -62,10 +62,10 @@ class ConditionTests(unittest.TestCase):
 
     def test_negation_preserves_file_domain_at_every_level(self):
         for data in (
-            {"not": {"is_image": True}},
-            {"not": {"all": [{"is_image": True}, {"is_text": True}]}},
-            {"not": {"not": {"is_video": False}}},
-            {"not": {"min_file_size": 0}},
+            "!is_image=true",
+            "!(is_image=true & is_text=true)",
+            "!!is_video=false",
+            "!(file_size >= 0)",
         ):
             node = parse_condition(data, self.repo, "clean")
             self.assertFalse(
@@ -81,7 +81,7 @@ class ConditionTests(unittest.TestCase):
             )
         self.write_rules("""[[rules]]
 id="clean.test"
-match={not={is_image=true}}
+match='!is_image=true'
 """)
         text = self.file(self.base / "cache/nested/note.txt")
         image = self.file(text.parent / "photo.JPG")
@@ -89,17 +89,120 @@ match={not={is_image=true}}
         self.assertEqual([choice.exact_path for choice in report.choices], [text])
         self.assertTrue(image.exists())
 
+    def test_empty_directory_condition_selects_directories_and_revalidates(self):
+        self.write_rules("""[[rules]]
+id="clean.test"
+preselect_after_days=0
+match='is_empty_directory=true'
+""")
+        root = self.base / "cache"
+        empty = root / "empty"
+        empty.mkdir(parents=True)
+        self.file(root / "populated/keep")
+        regular = self.file(root / "regular.txt")
+        preview = self.run_rule(root)
+        self.assertEqual([choice.exact_path for choice in preview.choices], [empty])
+        self.assertEqual(preview.choices[0].entry_kind, "directory")
+        self.assertTrue(regular.exists())
+
+        report = clean_files(
+            CleanRequest(
+                config=self.rules_file,
+                rules=("test",),
+                paths=(root,),
+            ),
+            ui=fixtures.CleanupUI(
+                interactive=True,
+                hook=lambda: self.file(empty / "arrived"),
+            ),
+        )
+        self.assertEqual(report.results[0].disposition, ItemDisposition.SKIPPED)
+        self.assertTrue(empty.exists())
+
+    def test_empty_directory_condition_stops_after_first_entry(self):
+        class OneEntry:
+            calls = 0
+
+            def __next__(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise AssertionError(
+                        "empty-directory check read past the first entry"
+                    )
+                return object()
+
+        class Scan:
+            def __init__(self, entries):
+                self.entries = entries
+
+            def __enter__(self):
+                return self.entries
+
+            def __exit__(self, *args):
+                return False
+
+        directory = self.base / "directory"
+        directory.mkdir()
+        node = parse_condition("is_empty_directory=true", self.repo, "clean")
+        entries = OneEntry()
+        with mock.patch(
+            "hagency_cli.files.cleanup.conditions.os.scandir",
+            return_value=Scan(entries),
+        ):
+            self.assertFalse(
+                evaluate(
+                    node,
+                    directory,
+                    stat.S_IFDIR,
+                    directory.stat().st_size,
+                    self.base,
+                    "paths",
+                    lambda path: False,
+                )
+            )
+        self.assertEqual(entries.calls, 1)
+
+    def test_builtin_empty_directories_rule_is_explicit_and_path_driven(self):
+        with self.assertRaisesRegex(CleanupSelectionError, "PATH"):
+            clean_files(
+                CleanRequest(config=self.rules_file, rules=("empty_directories",)),
+                ui=fixtures.CleanupUI(),
+            )
+        root = self.base / "cache"
+        empty = root / "empty"
+        empty.mkdir(parents=True)
+        preview = clean_files(
+            CleanRequest(
+                config=self.rules_file,
+                rules=("empty_directories",),
+                paths=(root,),
+            ),
+            ui=fixtures.CleanupUI(),
+        )
+        self.assertEqual(preview.selected_paths, (empty,))
+        report = clean_files(
+            CleanRequest(
+                config=self.rules_file,
+                rules=("empty_directories",),
+                paths=(root,),
+                yes=True,
+            ),
+            ui=fixtures.CleanupUI(),
+        )
+        self.assertEqual([choice.exact_path for choice in report.choices], [empty])
+        self.assertFalse(empty.exists())
+
     def test_nested_media_refs_share_scan_and_do_not_select_dependencies_alone(self):
         self.write_rules("""[[rules]]
 id="clean.media"
-match={any=[{is_image=true},{is_video=true}]}
+match='is_image=true | is_video=true'
 [[rules]]
 id="clean.test"
-match={all=[{ref="clean.media"},{min_file_size=2}]}
+match='ref="clean.media" & file_size >= 2'
 [[rules]]
 id="clean.unselected"
 min_age_days=30
-match={glob="**/*"}
+match='glob="**/*"'
 """)
         root = self.base / "cache"
         wanted = self.file(root / "video.MP4", "xx")
@@ -113,7 +216,7 @@ match={glob="**/*"}
     def test_any_branches_keep_their_own_within_and_glob_base(self):
         self.write_rules("""[[rules]]
 id="clean.test"
-match={any=[{all=[{within="one"},{glob="sub/*.png"}]},{all=[{within="two"},{glob="*.mp4"}]}]}
+match='(within="one" & glob="sub/*.png") | (within="two" & glob="*.mp4")'
 """)
         first = self.file(self.repo / "one/sub/photo.png")
         second = self.file(self.repo / "two/video.mp4")
@@ -129,13 +232,13 @@ match={any=[{all=[{within="one"},{glob="sub/*.png"}]},{all=[{within="two"},{glob
     def test_ref_own_entry_and_inherited_entry_are_both_supported(self):
         self.write_rules("""[[rules]]
 id="clean.anchored"
-match={all=[{within="one"},{glob="*.png"}]}
+match='within="one" & glob="*.png"'
 [[rules]]
 id="clean.leaf"
-match={is_video=true}
+match='is_video=true'
 [[rules]]
 id="clean.test"
-match={any=[{ref="clean.anchored"},{all=[{within="two"},{ref="clean.leaf"}]}]}
+match='ref="clean.anchored" | (within="two" & ref="clean.leaf")'
 """)
         first = self.file(self.repo / "one/photo.png")
         second = self.file(self.repo / "two/video.mp4")
@@ -145,21 +248,22 @@ match={any=[{ref="clean.anchored"},{all=[{within="two"},{ref="clean.leaf"}]}]}
 
     def test_invalid_graphs_and_conditions_fail_without_scan(self):
         cases = (
-            'match={ref="clean.missing"}',
-            'match={ref="purge.missing"}',
-            'match={ref="clean.test"}',
+            "match='ref=\"clean.missing\"'",
+            "match='ref=\"purge.missing\"'",
+            "match='ref=\"clean.test\"'",
             "match={any=[]}",
             "match={all=[]}",
             "match={not=[]}",
             'match={glob="*",is_text=true}',
-            "match={is_image=1}",
-            'match={is_video="false"}',
-            "match={unknown=true}",
-            'match={all=[{within="one"},{within="two"},{glob="*"}]}',
-            """match={ref="clean.second"}
+            "match='is_image=1'",
+            "match='is_video=\"false\"'",
+            "match='is_empty_directory=1'",
+            "match='unknown=true'",
+            'match=\'within="one" & within="two" & glob="*"\'',
+            """match='ref="clean.second"'
 [[rules]]
 id="clean.second"
-match={ref="clean.test"}""",
+match='ref="clean.test"'""",
         )
         for body in cases:
             with (
@@ -177,10 +281,10 @@ match={ref="clean.test"}""",
         self.write_rules("""[[rules]]
 id="clean.disabled"
 enabled=false
-match={is_image=true}
+match='is_image=true'
 [[rules]]
 id="clean.test"
-match={not={ref="clean.disabled"}}
+match='!ref="clean.disabled"'
 """)
         with self.assertRaisesRegex(CleanupSelectionError, "disabled"):
             self.run_rule(self.base)
@@ -188,7 +292,7 @@ match={not={ref="clean.disabled"}}
     def test_negated_entry_does_not_authorize_unbounded_scan(self):
         self.write_rules("""[[rules]]
 id="clean.test"
-match={not={within="keep"}}
+match='!within="keep"'
 """)
         with self.assertRaisesRegex(CleanupSelectionError, "PATH"):
             self.run_rule()
@@ -198,10 +302,10 @@ match={not={within="keep"}}
 id="clean.protected"
 exclude=["keep.png"]
 min_age_days=30
-match={is_image=true}
+match='is_image=true'
 [[rules]]
 id="clean.test"
-match={any=[{ref="clean.protected"},{glob="*.png"},{is_video=true}]}
+match='ref="clean.protected" | glob="*.png" | is_video=true'
 """)
         root = self.base / "cache"
         self.file(root / "keep.png")
@@ -215,10 +319,10 @@ match={any=[{ref="clean.protected"},{glob="*.png"},{is_video=true}]}
         self.write_rules("""[[rules]]
 id="clean.images"
 min_age_days=30
-match={is_image=true}
+match='is_image=true'
 [[rules]]
 id="clean.test"
-match={any=[{glob="bundle/"},{ref="clean.images"}]}
+match='glob="bundle/" | ref="clean.images"'
 """)
         self.file(self.base / "cache/bundle/photo.png")
         self.assertEqual(self.run_rule(self.base / "cache").choices, ())
@@ -234,7 +338,7 @@ id="clean.claude.versions"
 keep_previous=2
 [[rules]]
 id="clean.test"
-match={any=[{ref="clean.claude.versions"},{all=[{within="media"},{is_image=true}]}]}
+match='ref="clean.claude.versions" | (within="media" & is_image=true)'
 """)
         image = self.file(self.repo / "media/photo.jpg")
         with mock.patch.object(
@@ -252,7 +356,7 @@ match={any=[{ref="clean.claude.versions"},{all=[{within="media"},{is_image=true}
         versions = self.versions("claude", ["1.0.0", "1.1.0", "1.2.0"], "1.2.0")
         self.write_rules("""[[rules]]
 id="clean.test"
-match={all=[{ref="clean.claude.versions"},{is_image=false},{min_file_size=0}]}
+match='ref="clean.claude.versions" & is_image=false & file_size >= 0'
 """)
         request = CleanRequest(config=self.rules_file, rules=("test",))
         launcher = self.home / ".local/bin/claude"
@@ -275,7 +379,7 @@ match={all=[{ref="clean.claude.versions"},{is_image=false},{min_file_size=0}]}
         self.file(tagged / "payload")
         self.write_rules("""[[rules]]
 id="purge.test"
-match={ref="purge.cachedirs"}
+match='ref="purge.cachedirs"'
 """)
         request = PurgeRequest(paths=(root,), rules=("test",), config=self.rules_file)
         report = purge_space(
@@ -291,10 +395,10 @@ match={ref="purge.cachedirs"}
     def test_rule_query_retains_refs_and_canonical_sizes_without_scanning(self):
         self.write_rules("""[[rules]]
 id="clean.media"
-match={is_image=true}
+match='is_image=true'
 [[rules]]
 id="clean.test"
-match={all=[{ref="clean.media"},{min_file_size="1.5MiB"}]}
+match='ref="clean.media" & file_size >= "1.5MiB"'
 """)
         with mock.patch.object(
             scan, "_scan_root", side_effect=AssertionError("scanned")
@@ -303,13 +407,13 @@ match={all=[{ref="clean.media"},{min_file_size="1.5MiB"}]}
                 app, ["file", "rule", "clean.test", "--config", str(self.rules_file)]
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn('"ref": "clean.media"', result.output)
-        self.assertIn('"min_file_size": 1572864', result.output)
+        self.assertIn(r"ref=\"clean.media\"", result.output)
+        self.assertIn("file_size >= 1572864", result.output)
 
     def test_unanchored_any_branch_is_not_hidden_by_an_anchored_sibling(self):
         self.write_rules("""[[rules]]
 id="clean.test"
-match={all=[{any=[{within="media"},{glob="*.png"}]},{is_image=true}]}
+match='(within="media" | glob="*.png") & is_image=true'
 """)
         self.file(self.repo / "media/photo.png")
         with self.assertRaisesRegex(CleanupSelectionError, "PATH"):
@@ -318,7 +422,7 @@ match={all=[{any=[{within="media"},{glob="*.png"}]},{is_image=true}]}
     def test_glob_outside_multiple_entries_is_ambiguous(self):
         self.write_rules("""[[rules]]
 id="clean.test"
-match={all=[{any=[{within="one"},{within="two"}]},{glob="*.png"}]}
+match='(within="one" | within="two") & glob="*.png"'
 """)
         report = self.run_rule(self.base)
         self.assertEqual(report.issues[0].code, "config_error")
@@ -329,10 +433,10 @@ match={all=[{any=[{within="one"},{within="two"}]},{glob="*.png"}]}
         self.write_rules(
             """[[rules]]
 id="clean.leaf"
-match={is_image=true}
+match='is_image=true'
 """
             + "\n".join(
-                f'[[rules]]\nid="clean.level{i}"\nmatch={{any=[{{ref="clean.{previous}"}},{{ref="clean.{previous}"}}]}}'
+                f"""[[rules]]\nid="clean.level{i}"\nmatch='ref="clean.{previous}" | ref="clean.{previous}"' """
                 for i, previous in (
                     (i, "leaf" if i == 0 else f"level{i - 1}") for i in range(20)
                 )
@@ -354,7 +458,7 @@ match={is_image=true}
         self.file(tagged / "payload")
         self.write_rules("""[[rules]]
 id="purge.test"
-match={all=[{source="project"},{source="cachedir-tag"}]}
+match='source="project" & source="cachedir-tag"'
 """)
         report = purge_space(
             PurgeRequest(paths=(root,), rules=("test",), config=self.rules_file),
@@ -369,7 +473,7 @@ id="clean.codex.versions"
 keep_previous=100
 [[rules]]
 id="clean.test"
-match={any=[{ref="clean.codex.versions"},{ref="clean.claude.versions"}]}
+match='ref="clean.codex.versions" | ref="clean.claude.versions"'
 """)
         report = self.run_rule()
         self.assertEqual(
@@ -379,16 +483,16 @@ match={any=[{ref="clean.codex.versions"},{ref="clean.claude.versions"}]}
     def test_nested_glob_cannot_hide_ambiguous_entry_binding(self):
         self.write_rules("""[[rules]]
 id="clean.test"
-match={all=[{any=[{within="one"},{within="two"}]},{all=[{glob="*.png"},{is_image=true}]}]}
+match='(within="one" | within="two") & (glob="*.png" & is_image=true)'
 """)
         report = self.run_rule(self.base)
         self.assertEqual(report.issues[0].code, "config_error")
 
     def test_combined_reference_depth_is_bounded_before_scanning(self):
         self.write_rules(
-            '[[rules]]\nid="clean.leaf"\nmatch={is_text=true}\n'
+            "[[rules]]\nid=\"clean.leaf\"\nmatch='is_text=true'\n"
             + "\n".join(
-                f'[[rules]]\nid="clean.level{i}"\nmatch={{all=[{{ref="clean.{previous}"}},{{is_text=true}}]}}'
+                f"""[[rules]]\nid="clean.level{i}"\nmatch='ref="clean.{previous}" & is_text=true' """
                 for i, previous in (
                     (i, "leaf" if i == 0 else f"level{i - 1}") for i in range(40)
                 )
@@ -403,7 +507,7 @@ match={all=[{any=[{within="one"},{within="two"}]},{all=[{glob="*.png"},{is_image
         image = self.file(self.repo / "media/photo.png")
         self.write_rules("""[[rules]]
 id="clean.test"
-match={any=[{ref="clean.claude.versions"},{all=[{within="media"},{is_image=true}]}]}
+match='ref="clean.claude.versions" | (within="media" & is_image=true)'
 """)
         with mock.patch.object(
             agents,
@@ -420,7 +524,7 @@ id="clean.codex.versions"
 exclude=["*"]
 [[rules]]
 id="clean.test"
-match={any=[{ref="clean.codex.versions"},{ref="clean.claude.versions"}]}
+match='ref="clean.codex.versions" | ref="clean.claude.versions"'
 """)
         report = self.run_rule()
         self.assertEqual(

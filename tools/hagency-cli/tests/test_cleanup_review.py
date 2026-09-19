@@ -22,7 +22,7 @@ from hagency_cli.files.cleanup import (
     scan,
 )
 from hagency_cli.files.cleanup.file_filters import is_text_name, parse_file_size
-from hagency_cli.files.cleanup.models import CleanRequest
+from hagency_cli.files.cleanup.models import CleanRequest, PurgeRequest
 from hagency_cli.files.cleanup.selection import select_rules
 
 
@@ -31,9 +31,121 @@ class CleanupReviewTests(unittest.TestCase):
     file = fixtures.CleanupTests.file
     write_rules = fixtures.CleanupTests.write_rules
 
+    def test_project_policy_probe_failure_rejects_only_the_affected_candidate(self):
+        self.write_rules("""[[rules]]
+id="purge.bundles"
+match='source="project" & glob="bundle-*/"'
+preselect_after_days=0
+[[rules]]
+id="purge.retained"
+match='source="project" & is_empty_directory'
+preselect_after_days=90
+[[rules]]
+id="clean.project"
+match='ref="purge.bundles" | ref="purge.retained"'
+""")
+        update = planning.PlanningSession.update
+        scandir = os.scandir
+        for request_type in (CleanRequest, PurgeRequest):
+            for failure in ("missing", "unreadable", "timeout"):
+                with self.subTest(command=request_type.__name__, failure=failure):
+                    root = self.base / request_type.__name__ / failure
+                    self.file(root / "package.json", "{}")
+                    bad = root / "bundle-bad"
+                    leaf = self.file(bad / "child/payload")
+                    kept = self.file(bad / "keep.bin")
+                    healthy = self.file(root / "bundle-healthy/payload").parent
+                    probes = []
+
+                    def change_during_filter(
+                        session,
+                        stage,
+                        path=None,
+                        *,
+                        bad=bad,
+                        failure=failure,
+                        leaf=leaf,
+                    ):
+                        update(session, stage, path)
+                        if (
+                            stage == "protecting"
+                            and path == bad
+                            and failure == "missing"
+                        ):
+                            leaf.unlink()
+                            leaf.parent.rmdir()
+
+                    def probe(path, *, leaf=leaf, failure=failure, probes=probes):
+                        session = planning.current_session()
+                        if (
+                            session
+                            and session.stage == "protecting"
+                            and failure == "timeout"
+                        ):
+                            probes.append(path)
+                            raise inspection.ScanTimeout("protection check timed out")
+                        if (
+                            session
+                            and session.stage == "protecting"
+                            and path == leaf.parent
+                        ):
+                            probes.append(path)
+                            if failure == "unreadable":
+                                raise PermissionError(
+                                    "directory unreadable during protection"
+                                )
+                        return scandir(path)
+
+                    with (
+                        mock.patch.object(
+                            planning.PlanningSession, "update", change_during_filter
+                        ),
+                        mock.patch.object(conditions.os, "scandir", probe),
+                    ):
+                        report = operations.cleanup(
+                            request_type(
+                                config=self.rules_file,
+                                paths=(root,),
+                                rules=("clean.project",)
+                                if request_type is CleanRequest
+                                else ("purge.bundles", "purge.retained"),
+                                yes=True,
+                            ),
+                            ui=fixtures.CleanupUI(),
+                        )
+                    self.assertEqual(report.exit_code, 1)
+                    self.assertTrue(kept.exists())
+                    if failure == "timeout":
+                        self.assertEqual(len(probes), 1)
+                        self.assertEqual(report.choices, ())
+                        self.assertTrue(healthy.exists())
+                        self.assertTrue(
+                            any(issue.code == "scan_timeout" for issue in report.issues)
+                        )
+                        self.assertFalse(
+                            any(
+                                issue.code == "candidate_policy_failed"
+                                for issue in report.issues
+                            )
+                        )
+                        continue
+                    self.assertEqual(probes, [leaf.parent])
+                    self.assertEqual(
+                        {choice.exact_path for choice in report.choices}, {healthy}
+                    )
+                    self.assertFalse(healthy.exists())
+                    self.assertTrue(
+                        any(
+                            issue.code == "candidate_policy_failed"
+                            and issue.path == bad
+                            for issue in report.issues
+                        ),
+                        report.issues,
+                    )
+
     @unittest.skipIf(sys.platform == "win32", "Windows requires content rechecks")
     def test_unchanged_config_checks_do_not_read_or_parse_again(self):
-        self.write_rules('[[rules]]\nid="clean.files"\nmatch={min_file_size=0}\n')
+        self.write_rules("[[rules]]\nid=\"clean.files\"\nmatch='file_size >= 0'\n")
         snapshot = config.load_rules(self.rules_file)
         with mock.patch.object(config, "_read", side_effect=AssertionError("reread")):
             for _ in range(10):
@@ -42,7 +154,9 @@ class CleanupReviewTests(unittest.TestCase):
     def test_config_rewrite_with_restored_mtime_and_replacement_are_detected(self):
         for replacement in (False, True):
             with self.subTest(replacement=replacement):
-                self.write_rules('[[rules]]\nid="clean.files"\nmatch={is_text=true}\n')
+                self.write_rules(
+                    "[[rules]]\nid=\"clean.files\"\nmatch='is_text=true'\n"
+                )
                 snapshot = config.load_rules(self.rules_file)
                 before = self.rules_file.stat()
                 content = self.rules_file.read_text().replace("files", "other")
@@ -56,7 +170,7 @@ class CleanupReviewTests(unittest.TestCase):
                 self.assertFalse(config.configuration_unchanged(snapshot))
 
     def test_windows_config_check_keeps_content_validation(self):
-        self.write_rules('[[rules]]\nid="clean.files"\nmatch={min_file_size=0}\n')
+        self.write_rules("[[rules]]\nid=\"clean.files\"\nmatch='file_size >= 0'\n")
         snapshot = config.load_rules(self.rules_file)
         with (
             mock.patch.object(config.sys, "platform", "win32"),
@@ -78,7 +192,7 @@ class CleanupReviewTests(unittest.TestCase):
 
     def test_config_change_during_revalidation_prevents_removal(self):
         target = self.file(self.base / "cache/file.bin")
-        self.write_rules('[[rules]]\nid="clean.files"\nmatch={min_file_size=0}\n')
+        self.write_rules("[[rules]]\nid=\"clean.files\"\nmatch='file_size >= 0'\n")
         revalidate = operations._revalidate
 
         def change_after_revalidation(item):
@@ -105,7 +219,7 @@ class CleanupReviewTests(unittest.TestCase):
         for name in ("one", "two"):
             for index in range(5):
                 self.file(root / name / f"{index}.bin")
-        self.write_rules('[[rules]]\nid="clean.bundles"\nmatch={glob="*/"}\n')
+        self.write_rules('[[rules]]\nid="clean.bundles"\nmatch=\'glob="*/"\'\n')
         mounted = set()
         removed = []
         remove = operations._permanently_remove
@@ -155,7 +269,7 @@ class CleanupReviewTests(unittest.TestCase):
     def test_loaded_snapshot_reuses_one_expansion_for_selection_and_query(self):
         self.write_rules("""[[rules]]
 id="clean.files"
-match={min_file_size=0}
+match='file_size >= 0'
 """)
         with mock.patch.object(
             config, "expand_rules", wraps=conditions.expand_rules
@@ -178,10 +292,10 @@ match={min_file_size=0}
         self.file(self.base / "cache/bundle/data.bin")
         self.write_rules("""[[rules]]
 id="clean.whole"
-match={glob="bundle/"}
+match='glob="bundle/"'
 [[rules]]
 id="clean.same-age"
-match={min_file_size=0}
+match='file_size >= 0'
 """)
         plan = scan._build_plan(
             CleanRequest(

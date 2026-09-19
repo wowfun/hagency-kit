@@ -12,8 +12,13 @@ from tests import test_cleanup as fixtures
 # isort: split
 
 from hagency_cli.cli import app
+from hagency_cli.commands.cleanup_ui import QuestionaryCleanupUI
 from hagency_cli.files.cleanup import config, operations, scan
-from hagency_cli.files.cleanup.models import CACHEDIR_TAG_SIGNATURE, CleanRequest
+from hagency_cli.files.cleanup.models import (
+    CACHEDIR_TAG_SIGNATURE,
+    CleanRequest,
+    ItemDisposition,
+)
 from hagency_cli.files.cleanup.selection import CleanupSelectionError
 
 
@@ -54,10 +59,10 @@ class ProjectDefaultTests(unittest.TestCase):
         self.repository_policy()
         keep, delete = set(), set()
         for name, size, retained in (
-            ("note.txt", 10_000_000, True),
-            ("large.md", 10_000_001, False),
-            ("photo.JPG", 10_000_000, True),
-            ("large.png", 10_000_001, False),
+            ("note.txt", 1_000_000, True),
+            ("large.md", 1_000_001, False),
+            ("photo.JPG", 1_000_000, True),
+            ("large.png", 1_000_001, False),
             ("movie.MP4", 50_000_000, True),
             ("large.webm", 50_000_001, False),
             ("unknown.bin", 0, False),
@@ -91,6 +96,158 @@ class ProjectDefaultTests(unittest.TestCase):
             )
         )
         self.assertTrue((self.repo / ".local").is_dir())
+
+    def test_cli_previews_and_confirmation_explain_possible_ancestor_removal(self):
+        self.repository_policy()
+        with self.rules_file.open("a") as stream:
+            stream.write("""\n[[rules]]
+id="clean.logs_only"
+match='glob="*.log" & is_text'
+""")
+        leaf = self.file(self.repo / "logs/a.log")
+        notice = "Ancestors of removed items may also be removed"
+        preview_limit = (
+            "Preview paths and known size exclude these possible ancestor removals."
+        )
+        for rule in ("project_default", "logs_only"):
+            for interactive, flags in (
+                (False, ()),
+                (False, ("--dry-run",)),
+                (False, ("--yes", "--dry-run")),
+                (True, ("--dry-run",)),
+                (True, ()),
+            ):
+                with self.subTest(rule=rule, interactive=interactive, flags=flags):
+                    with (
+                        mock.patch.object(
+                            QuestionaryCleanupUI,
+                            "is_interactive",
+                            return_value=interactive,
+                        ),
+                        mock.patch.object(
+                            QuestionaryCleanupUI,
+                            "select",
+                            side_effect=lambda choices: tuple(
+                                choice.id for choice in choices
+                            ),
+                        ),
+                        mock.patch(
+                            "hagency_cli.commands.cleanup_ui.questionary.confirm"
+                        ) as confirm,
+                        mock.patch.object(operations, "_permanently_remove") as remove,
+                    ):
+                        confirm.return_value.unsafe_ask.return_value = False
+                        result = CliRunner().invoke(
+                            app,
+                            [
+                                "file",
+                                "clean",
+                                str(self.repo),
+                                "-r",
+                                rule,
+                                "--config",
+                                str(self.rules_file),
+                                *flags,
+                            ],
+                        )
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    self.assertEqual(
+                        result.output.count(notice),
+                        int(rule == "project_default"),
+                        result.output,
+                    )
+                    preview = not interactive or "--dry-run" in flags
+                    self.assertEqual(
+                        preview_limit in result.output,
+                        preview and rule == "project_default",
+                    )
+                    if preview:
+                        confirm.assert_not_called()
+                    else:
+                        confirm.assert_called_once()
+                    remove.assert_not_called()
+                    self.assertTrue(leaf.exists())
+                    self.assertTrue(leaf.parent.is_dir())
+
+    def test_repository_policy_removes_logs_and_only_cascades_selected_paths(self):
+        self.repository_policy()
+        root_log = self.file(self.repo / "root.log")
+        nested_log = self.file(self.repo / "logs/nested.log")
+        blocked_log = self.file(self.repo / "blocked/leaf.log")
+        blocked_keep = self.file(blocked_log.parent / "keep")
+        uppercase = self.file(self.repo / "trace.LOG")
+        named_directory = self.file(self.repo / "archive.log/keep")
+        untouched_empty = self.repo / "untouched-empty"
+        untouched_empty.mkdir()
+        tracked = self.file(self.repo / "tracked.log")
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "add", str(tracked)], check=True)
+        ui = fixtures.CleanupUI(interactive=True)
+        with mock.patch.object(
+            ui,
+            "select",
+            side_effect=lambda choices: tuple(
+                choice.id
+                for choice in choices
+                if choice.exact_path in {root_log, nested_log, blocked_log}
+            ),
+        ):
+            report = operations.clean_files(
+                CleanRequest(
+                    config=self.rules_file,
+                    rules=("project_default",),
+                    paths=(self.repo,),
+                ),
+                ui=ui,
+            )
+        self.assertEqual(report.exit_code, 0, report.results)
+        self.assertEqual(
+            set(report.selected_paths),
+            {root_log, nested_log, nested_log.parent, blocked_log},
+        )
+        self.assertFalse(root_log.exists())
+        self.assertFalse(nested_log.exists())
+        self.assertFalse(nested_log.parent.exists())
+        self.assertFalse(blocked_log.exists())
+        self.assertTrue(
+            all(
+                path.exists()
+                for path in (uppercase, named_directory, tracked, blocked_keep)
+            )
+        )
+        self.assertTrue(blocked_log.parent.exists())
+        self.assertTrue(untouched_empty.exists())
+
+    def test_failed_log_deletion_does_not_cascade_to_its_parent(self):
+        self.repository_policy()
+        failed = self.file(self.repo / "failed/first.log")
+        original = operations._permanently_remove
+
+        def reject(item):
+            if item.choice.exact_path == failed:
+                raise OSError("simulated removal failure")
+            original(item)
+
+        with mock.patch.object(operations, "_permanently_remove", reject):
+            report = self.run_rule(yes=True)
+        self.assertEqual(report.results[0].disposition, ItemDisposition.FAILED)
+        self.assertTrue(failed.exists())
+        self.assertTrue(failed.parent.exists())
+
+    def test_config_change_before_cascade_preserves_newly_empty_parent(self):
+        self.repository_policy()
+        stale = self.file(self.repo / "stale/second.log")
+        original = operations._permanently_remove
+
+        def change_config(item):
+            original(item)
+            self.rules_file.write_text(self.rules_file.read_text() + "\n# changed\n")
+
+        with mock.patch.object(operations, "_permanently_remove", change_config):
+            report = self.run_rule(yes=True)
+        self.assertFalse(stale.exists())
+        self.assertTrue(stale.parent.exists())
+        self.assertTrue(any(issue.code == "config_changed" for issue in report.issues))
 
     def test_repository_policy_targets_external_project_from_cli_path(self):
         self.repository_policy()
@@ -145,7 +302,7 @@ class ProjectDefaultTests(unittest.TestCase):
 
     def test_purge_references_keep_project_checks_and_live_revalidation(self):
         self.write_rules(
-            '[[rules]]\nid="clean.project"\nmatch={ref="purge.artifacts"}\n'
+            '[[rules]]\nid="clean.project"\nmatch=\'ref="purge.artifacts"\'\n'
         )
         root = self.base / "project"
         target = self.file(root / "node_modules/data").parent
@@ -167,7 +324,7 @@ class ProjectDefaultTests(unittest.TestCase):
 
     def test_missing_entry_disabled_ref_and_reverse_ref_fail_before_scan(self):
         self.write_rules(
-            '[[rules]]\nid="clean.project"\nmatch={ref="purge.artifacts"}\n'
+            '[[rules]]\nid="clean.project"\nmatch=\'ref="purge.artifacts"\'\n'
         )
         with mock.patch.object(
             scan, "_scan_root", side_effect=AssertionError("scanned")
@@ -179,7 +336,7 @@ class ProjectDefaultTests(unittest.TestCase):
             with self.assertRaisesRegex(CleanupSelectionError, "disabled"):
                 self.run_rule(rules=("project",), paths=(self.repo,))
         self.write_rules(
-            '[[rules]]\nid="purge.reverse"\nmatch={ref="clean.codex.versions"}\n'
+            '[[rules]]\nid="purge.reverse"\nmatch=\'ref="clean.codex.versions"\'\n'
         )
         with self.assertRaises(config.CleanupConfigError):
             config.load_rules(self.rules_file)
@@ -187,7 +344,7 @@ class ProjectDefaultTests(unittest.TestCase):
     def test_repeated_project_references_share_scan_and_keep_depth_six(self):
         self.write_rules("""[[rules]]
 id="clean.project"
-match={any=[{ref="purge.artifacts"},{ref="purge.artifacts"},{ref="purge.cachedirs"}]}
+match='ref="purge.artifacts" | ref="purge.artifacts" | ref="purge.cachedirs"'
 """)
         self.file(self.repo / "package.json", "{}")
         shallow = self.file(self.repo / "node_modules/data").parent
@@ -259,8 +416,20 @@ match={any=[{ref="purge.artifacts"},{ref="purge.artifacts"},{ref="purge.cachedir
                 ui=ui,
             )
         self.assertEqual(report.exit_code, 0, report.results)
-        self.assertEqual(removed, [artifact, remaining])
-        self.assertEqual(report.selected_paths, (artifact, remaining))
+        self.assertEqual(removed[:2], [artifact, remaining])
+        self.assertEqual(
+            removed[2:],
+            [
+                self.repo / "a/b/c/d/e/f",
+                self.repo / "a/b/c/d/e",
+                self.repo / "a/b/c/d",
+                self.repo / "a/b/c",
+                self.repo / "a/b",
+                self.repo / "a",
+                self.repo / ".local",
+            ],
+        )
+        self.assertEqual(tuple(removed), report.selected_paths)
 
     def test_tagged_local_directory_is_purged_before_media_filter(self):
         self.repository_policy()
@@ -276,15 +445,15 @@ match={any=[{ref="purge.artifacts"},{ref="purge.artifacts"},{ref="purge.cachedir
     def test_scan_options_do_not_widen_other_selected_rules(self):
         self.write_rules("""[[rules]]
 id="purge.cache"
-match={all=[{source="project"},{glob="*.cache/"}]}
+match='source="project" & glob="*.cache/"'
 [[rules]]
 id="clean.loose"
 recursive=true
 include_unverified=true
-match={all=[{ref="purge.cache"},{glob="loose.cache/"}]}
+match='ref="purge.cache" & glob="loose.cache/"'
 [[rules]]
 id="clean.strict"
-match={all=[{ref="purge.cache"},{glob="strict.cache/"}]}
+match='ref="purge.cache" & glob="strict.cache/"'
 """)
         root = self.base / "unverified"
         loose = self.file(root / "a/b/c/d/e/f/loose.cache/data").parent
@@ -323,7 +492,7 @@ match={all=[{ref="purge.cache"},{glob="strict.cache/"}]}
 
     def test_clean_cli_scan_flags_reach_project_provider(self):
         self.write_rules(
-            '[[rules]]\nid="clean.project"\nmatch={ref="purge.artifacts"}\n'
+            '[[rules]]\nid="clean.project"\nmatch=\'ref="purge.artifacts"\'\n'
         )
         root = self.base / "unverified"
         target = self.file(root / "a/b/c/d/e/f/vendor/data").parent

@@ -27,7 +27,7 @@ class CleanupYesTests(unittest.TestCase):
         self.file(root / "package.json", "{}")
         self.write_rules(f'''[[rules]]
 id="{command}.files"
-match = {{ all = [{{ glob = "*.tmp" }}, {{ min_file_size = 0 }}] }}
+match = 'glob="*.tmp" & file_size >= 0'
 ''')
         kind = CleanRequest if command == "clean" else PurgeRequest
         return kind(
@@ -91,7 +91,7 @@ exclude=["keep.tmp"]
 [[rules]]
 id="clean.recent"
 min_age_days=30
-match = { glob = 'young.tmp' }
+match = 'glob="young.tmp"'
 """
             )
         request = replace(request, rules=("files", "recent"))

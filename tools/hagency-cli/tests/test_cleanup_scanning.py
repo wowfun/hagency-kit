@@ -34,7 +34,7 @@ class LargeScanTests(unittest.TestCase):
     def request(self, *roots, command="clean", timeout=0):
         self.write_rules(f'''[[rules]]
 id="{command}.files"
-match = {{ all = [{{ glob = "*.bin" }}, {{ min_file_size = 0 }}] }}
+match = 'glob="*.bin" & file_size >= 0'
 ''')
         kind = CleanRequest if command == "clean" else PurgeRequest
         return kind(
@@ -317,14 +317,14 @@ match = {{ all = [{{ glob = "*.bin" }}, {{ min_file_size = 0 }}] }}
         root = self.base / "cache"
         self.file(root / "first.bin")
         self.file(root / "folder/second.bin")
-        for condition in ("min_file_size=0", ""):
+        for condition in ("file_size >= 0", ""):
             with self.subTest(condition=condition):
                 self.write_rules(
                     """[[rules]]
 id="clean.files"
-match = {"""
+match = '"""
                     + (condition or 'glob="**/*"')
-                    + "}"
+                    + "'"
                 )
                 events = []
                 ui = fixtures.CleanupUI()

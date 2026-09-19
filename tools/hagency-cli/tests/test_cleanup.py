@@ -16,11 +16,6 @@ from unittest import mock
 from typer.testing import CliRunner
 
 from hagency_cli.cli import app
-from hagency_cli.files.cleanup.conditions import (
-    Condition,
-    entries,
-    parse_condition,
-)
 from hagency_cli.files.cleanup import (
     agents,
     config,
@@ -28,6 +23,11 @@ from hagency_cli.files.cleanup import (
     operations,
     removal,
     scan,
+)
+from hagency_cli.files.cleanup.conditions import (
+    Condition,
+    entries,
+    parse_condition,
 )
 from hagency_cli.files.cleanup.models import (
     Activity,
@@ -243,7 +243,7 @@ enabled=false
             """[[rules]]
 id="clean.custom"
 auto_apply=true
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 """,
         )
         self.file(external.parent / "cache/a.tmp")
@@ -263,7 +263,7 @@ match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
             """[[rules]]
 id="clean.custom"
 auto_apply=true
-match = { all = [{ within = "~/cache" }, { glob = '*.tmp' }] }
+match = 'within="~/cache" & glob="*.tmp"'
 """
         )
         snapshot = config.load_rules(Path("hagency-cleanup.toml"), cwd=self.repo)
@@ -287,7 +287,7 @@ id="purge.artifacts"
 source="paths\"""",
             """[[rules]]
 id="purge.artifacts"
-match = { within = false }
+match = 'within=false'
 """,
             """[[rules]]
 id="purge.artifacts"
@@ -311,11 +311,11 @@ match = { any = [] }
 """,
             """[[rules]]
 id="purge.artifacts"
-match = { glob = 1 }
+match = 'glob=1'
 """,
             """[[rules]]
 id="purge.artifacts"
-match = { glob = false }
+match = 'glob=false'
 """,
             """[[rules]]
 id="purge.artifacts"
@@ -323,22 +323,22 @@ force=true""",
             """[[rules]]
 id="clean.new"
 auto_apply=true
-match = { all = [{ source = "unknown" }, { not = { glob = "**/*" } }] }
+match = 'source="unknown" & !glob="**/*"'
 """,
             """[[rules]]
 id="clean.new"
 auto_apply=true
-match = { all = [{ source = [] }, { not = { glob = "**/*" } }] }
+match = 'source=[] & !glob="**/*"'
 """,
             """[[rules]]
 id="clean.new"
 auto_apply=true
-match = { all = [{ within = "" }, { not = { glob = "**/*" } }] }
+match = 'within="" & !glob="**/*"'
 """,
             """[[rules]]
 id="clean.new"
 auto_apply=true
-match = { within = false }
+match = 'within=false'
 """,
             "invalid = [",
         ]
@@ -375,7 +375,7 @@ match = { within = false }
             """[[rules]]
 id="purge.artifacts"
 preselect_after_days=0
-match = { glob = 'build/' }
+match = 'glob="build/"'
 """
         )
         report = self.purge(root)
@@ -401,7 +401,7 @@ enabled=false
 id="purge.temp"
 auto_apply=true
 exclude=["important.tmp", "!important.tmp"]
-match = { all = [{ source = "project" }, { any = [{ all = [{ glob = '*.tmp' }, { not = { glob = 'keep.tmp' } }] }, { glob = 'important.tmp' }] }] }
+match = 'source="project" & ((glob="*.tmp" & !glob="keep.tmp") | glob="important.tmp")'
 """
         )
         report = self.purge(root, interactive=True)
@@ -424,11 +424,11 @@ match = { all = [{ source = "project" }, { any = [{ all = [{ glob = '*.tmp' }, {
 id="purge.exclusions"
 auto_apply=true
 exclude=["**/build/nested/keep.json"]
-match = { all = [{ source = "project" }, { not = { glob = "**/*" } }] }
+match = 'source="project" & !glob="**/*"'
 [[rules]]
 id="purge.parent"
 auto_apply=true
-match = { all = [{ source = "project" }, { glob = 'build/' }] }
+match = 'source="project" & glob="build/"'
 """
         )
         report = self.purge(root, interactive=True)
@@ -450,7 +450,7 @@ exclude=["build/"]
 id="purge.other"
 auto_apply=true
 exclude=["!build/"]
-match = { all = [{ source = "project" }, { glob = 'build/' }] }
+match = 'source="project" & glob="build/"'
 """
         )
         self.assertEqual(self.purge(root).choices, ())
@@ -463,12 +463,12 @@ match = { all = [{ source = "project" }, { glob = 'build/' }] }
             """[[rules]]
 id="clean.parent"
 auto_apply=true
-match = { all = [{ within = "cache" }, { glob = 'downloads/' }] }
+match = 'within="cache" & glob="downloads/"'
 [[rules]]
 id="clean.child"
 auto_apply=true
 exclude=["keep/"]
-match = { all = [{ within = "cache/downloads" }, { glob = '*' }] }
+match = 'within="cache/downloads" & glob="*"'
 """
         )
         report = self.clean(interactive=True)
@@ -509,7 +509,7 @@ preselect_after_days=10
 id="purge.keep-young-payload"
 auto_apply=true
 min_age_days=30
-match = { all = [{ source = "project" }, { glob = 'build/payload' }] }
+match = 'source="project" & glob="build/payload"'
 """
         )
         self.assertEqual(self.purge(root).choices, ())
@@ -609,7 +609,7 @@ include=["*"]
             """[[rules]]
 id="clean.custom"
 auto_apply=true
-match = { all = [{ within = "linked" }, { glob = '*.tmp' }] }
+match = 'within="linked" & glob="*.tmp"'
 """
         )
         self.assertEqual(self.clean().exit_code, 1)
@@ -737,7 +737,7 @@ match = { all = [{ within = "linked" }, { glob = '*.tmp' }] }
 id="clean.keep-more"
 auto_apply=true
 keep_previous=2
-match = { all = [{ source = "claude.versions" }, { glob = '*' }] }
+match = 'source="claude.versions" & glob="*"'
 """
         )
         report = self.clean("claude")
@@ -863,7 +863,7 @@ min_age_days=0
         self.write_rules(
             """[[rules]]
 id="clean.non_text_or_large"
-match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10_485_761 }, { is_text = false }] }] }
+match = 'glob="**/*" & (file_size >= 10485761 | is_text=false)'
 """
         )
         measure = scan._measure_candidate
@@ -1006,7 +1006,7 @@ match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10_485_761 }, { i
             """[[rules]]
 id="purge.files"
 auto_apply=true
-match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+match = 'source="project" & glob="*.tmp"'
 """
         )
         report = self.purge(root, interactive=True)
@@ -1120,7 +1120,7 @@ exclude=["inner/build/"]
             """[[rules]]
 id="purge.empty"
 auto_apply=true
-match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+match = 'source="project" & glob="*.tmp"'
 """
         )
         report = self.purge(root, interactive=True)
@@ -1279,7 +1279,7 @@ id="purge.ns"
 auto_apply=true
 min_age_days=7
 preselect_after_days=7
-match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+match = 'source="project" & glob="*.tmp"'
 """
         )
         with (
@@ -1378,7 +1378,7 @@ id="purge.files"
 auto_apply=true
 exclude=["/temp/keep.tmp"]
 min_age_days=7
-match = { all = [{ source = "project" }, { glob = '/temp/*.tmp' }] }
+match = 'source="project" & glob="/temp/*.tmp"'
 """
         )
         report = self.purge(root, include_unverified=True, interactive=True)
@@ -1627,7 +1627,7 @@ min_age_days=7
             """[[rules]]
 id="clean.cache"
 auto_apply=true
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 """
         )
         report = self.clean()
@@ -1704,7 +1704,7 @@ match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
             """[[rules]]
 id="clean.cache"
 auto_apply=true
-match = { all = [{ within = "data" }, { glob = '*' }] }
+match = 'within="data" & glob="*"'
 """
         )
         with mock.patch.dict(
@@ -1724,7 +1724,7 @@ match = { all = [{ within = "data" }, { glob = '*' }] }
             """[[rules]]
 id="clean.cache"
 auto_apply=true
-match = { all = [{ within = "data" }, { glob = '*' }] }
+match = 'within="data" & glob="*"'
 """
         )
         report = self.clean(interactive=True)
@@ -1765,7 +1765,7 @@ match = { all = [{ within = "data" }, { glob = '*' }] }
             """[[rules]]
 id="clean.cache"
 auto_apply=true
-match = { all = [{ within = "cache\\u007f" }, { glob = '*' }] }
+match = 'within="cache\\u007f" & glob="*"'
 """
         )
         with mock.patch.object(scan, "_agent_and_path_plan") as build:
@@ -1917,7 +1917,7 @@ match = { all = [{ within = "cache\\u007f" }, { glob = '*' }] }
 
     def test_review_config_boundaries_and_empty_override(self):
         self.rules_file.write_text("")
-        self.assertEqual(len(config.load_rules(self.rules_file).rules), 6)
+        self.assertEqual(len(config.load_rules(self.rules_file).rules), 7)
         for data in (
             b"\xef\xbb\xbfschema_version=1",
             b"x" * (config.MAX_CONFIG_BYTES + 1),
@@ -1953,7 +1953,7 @@ match = { all = [{ within = "cache\\u007f" }, { glob = '*' }] }
             """[[rules]]
 id="purge.all"
 auto_apply=true
-match = { all = [{ source = "project" }, { glob = '*/' }] }
+match = 'source="project" & glob="*/"'
 """
         )
         self.assertEqual(self.purge(root, interactive=True).choices, ())
@@ -1972,7 +1972,7 @@ match = { all = [{ source = "project" }, { glob = '*/' }] }
         self.write_rules(
             """[[rules]]
 id="clean.custom"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 [[rules]]
 id="clean.codex.versions"
 keep_previous=2
@@ -2030,12 +2030,12 @@ id="clean.custom\"""",
         self.write_rules(
             """[[rules]]
 id="clean.manual"
-match = { all = [{ glob = '*.tmp' }, { within = "cache" }] }
+match = 'glob="*.tmp" & within="cache"'
 [[rules]]
 id="clean.disabled"
 auto_apply=true
 enabled=false
-match = { not = { glob = "**/*" } }
+match = '!glob="**/*"'
 [[rules]]
 id="clean.codex.staging"
 auto_apply=false
@@ -2073,10 +2073,10 @@ auto_apply=false
             """[[rules]]
 id="clean.automatic"
 auto_apply=true
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 [[rules]]
 id="clean.manual"
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 """
         )
         snapshot = config.load_rules(self.rules_file)
@@ -2195,7 +2195,7 @@ enabled=false
     def test_clean_cli_paths_intersect_within_and_keep_glob_base(self):
         self.write_rules("""[[rules]]
 id="clean.temp"
-match={all=[{within="configured"}, {glob="nested/*.tmp"}]}
+match='within="configured" & glob="nested/*.tmp"'
 """)
         configured = self.file(self.repo / "configured/nested/original.tmp")
         outside = self.file(self.base / "elsewhere/outside.tmp")
@@ -2223,7 +2223,7 @@ match={all=[{within="configured"}, {glob="nested/*.tmp"}]}
         self.write_rules(
             """[[rules]]
 id="clean.rootless"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 """
         )
         with mock.patch.object(
@@ -2264,7 +2264,7 @@ match = { glob = '*.tmp' }
             """[[rules]]
 id="clean.legacy"
 command="clean"
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 """
         )
         with mock.patch.object(
@@ -2297,7 +2297,7 @@ match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
 [[rules]]
 id="clean.rootless"
 auto_apply=true
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 """
         )
         target = self.file(self.base / "cache/item.tmp")
@@ -2322,15 +2322,15 @@ match = { glob = '*.tmp' }
         self.write_rules(
             """[[rules]]
 id="clean.remove"
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 [[rules]]
 id="clean.exclude"
 exclude=["item.tmp"]
-match = { all = [{ within = "cache" }, { not = { glob = "**/*" } }] }
+match = 'within="cache" & !glob="**/*"'
 [[rules]]
 id="clean.young"
 min_age_days=30
-match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
+match = 'within="cache" & glob="*.tmp"'
 """
         )
         request = CleanRequest(config=self.rules_file, rules=("remove",))
@@ -2353,7 +2353,7 @@ match = { all = [{ within = "cache" }, { glob = '*.tmp' }] }
         subprocess.run(["git", "-C", str(root), "add", "tracked.tmp"], check=True)
         self.write_rules("""[[rules]]
 id="clean.temp"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 """)
         report = clean_files(
             CleanRequest(config=self.rules_file, rules=("temp",), paths=(root,)),
@@ -2367,7 +2367,7 @@ match = { glob = '*.tmp' }
         target = self.file(self.base / "cache/item.tmp")
         self.write_rules("""[[rules]]
 id="clean.temp"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 """)
         request = CleanRequest(
             config=self.rules_file, rules=("temp",), paths=(target.parent,)
@@ -2383,7 +2383,7 @@ match = { glob = '*.tmp' }
         self.assertTrue(any(issue.code == "config_changed" for issue in report.issues))
         self.write_rules("""[[rules]]
 id="clean.temp"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 """)
         report = clean_files(request, ui=CleanupUI(interactive=True))
         self.assertEqual(report.exit_code, 0)
@@ -2397,7 +2397,7 @@ match = { glob = '*.tmp' }
         self.write_rules(
             """[[rules]]
 id="purge.temp"
-match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
+match = 'source="project" & glob="*.tmp"'
 """
         )
         args = [
@@ -2423,7 +2423,7 @@ match = { all = [{ source = "project" }, { glob = '*.tmp' }] }
         self.write_rules(
             """[[rules]]
 id="clean.manual"
-match = { glob = '*.tmp' }
+match = 'glob="*.tmp"'
 [[rules]]
 id="clean.codex.staging"
 enabled=false
@@ -2537,7 +2537,7 @@ preselect_after_days=12
             """[[rules]]
 id="clean.filtered"
 auto_apply=true
-match={any=[{min_file_size="1KiB", max_file_size="4KiB"}, {is_text=true}]}
+match='(file_size >= "1KiB" & file_size <= "4KiB") | is_text=true'
 """,
         )
         self.write_rules("""[[rules]]
@@ -2547,34 +2547,29 @@ min_age_days=2
         with mock.patch.object(config, "DEFAULTS_PATH", defaults):
             rule = config.load_rules(self.rules_file).rules[0]
             self.assertEqual(
-                rule.match.data(),
-                {
-                    "any": [
-                        {"min_file_size": 1024, "max_file_size": 4096},
-                        {"is_text": True},
-                    ]
-                },
+                rule.match.expression(),
+                "(file_size >= 1024 & file_size <= 4096) | is_text",
             )
             self.assertTrue(rule.auto_apply)
             self.write_rules(
                 """[[rules]]
 id="clean.filtered"
-match={max_file_size="2KiB"}
+match='file_size <= "2KiB"'
 """
             )
             replacement = config.load_rules(self.rules_file).rules[0]
-            self.assertEqual(replacement.match.data(), {"max_file_size": 2048})
+            self.assertEqual(replacement.match.expression(), "file_size <= 2048")
             self.assertTrue(replacement.auto_apply)
         for value in (
-            {"min_file_size": True},
-            {"max_file_size": -1},
-            {"is_text": 1},
-            {"min_file_size": 2, "max_file_size": 1},
-            {"file_match": "any"},
-            {"any": []},
-            {"is_video": "false"},
-            {"is_image": []},
-            {"glob": 1},
+            "file_size >= true",
+            "file_size <= -1",
+            "is_text=1",
+            "min_file_size=2",
+            'file_match="any"',
+            "()",
+            'is_video="false"',
+            "is_image=[]",
+            "glob=1",
         ):
             with self.subTest(value=value), self.assertRaises((ValueError, TypeError)):
                 parse_condition(value, self.repo, "clean")
@@ -2637,7 +2632,7 @@ match={max_file_size="2KiB"}
         self.write_rules(
             """[[rules]]
 id="clean.text"
-match = { all = [{ glob = '**/*' }, { is_text = true }] }
+match = 'glob="**/*" & is_text=true'
 """
         )
         request = CleanRequest(
@@ -2648,7 +2643,7 @@ match = { all = [{ glob = '**/*' }, { is_text = true }] }
         self.write_rules(
             """[[rules]]
 id="clean.text"
-match = { all = [{ glob = '**/*' }, { is_text = false }] }
+match = 'glob="**/*" & is_text=false'
 """
         )
         report = clean_files(request, ui=CleanupUI())
@@ -2669,7 +2664,7 @@ match = { all = [{ glob = '**/*' }, { is_text = false }] }
         self.write_rules(
             """[[rules]]
 id="clean.files"
-match = { all = [{ glob = 'nested/' }, { all = [{ min_file_size = 4, max_file_size = 8 }, { is_text = false }] }] }
+match = 'glob="nested/" & ((file_size >= 4 & file_size <= 8) & is_text=false)'
 """
         )
         request = CleanRequest(config=self.rules_file, paths=(root,), rules=("files",))
@@ -2705,7 +2700,7 @@ match = { all = [{ glob = 'nested/' }, { all = [{ min_file_size = 4, max_file_si
             """[[rules]]
 id="clean.non_text_or_large"
 exclude=["**/keep.bin"]
-match = { all = [{ glob = 'nested/' }, { any = [{ min_file_size = 10_485_761 }, { is_text = false }] }] }
+match = 'glob="nested/" & (file_size >= 10485761 | is_text=false)'
 """
         )
         request = CleanRequest(
@@ -2736,10 +2731,10 @@ match = { all = [{ glob = 'nested/' }, { any = [{ min_file_size = 10_485_761 }, 
         }
         for fields, names in (
             (
-                "any=[{min_file_size=4, max_file_size=8}, {is_text=false}]",
+                "(file_size >= 4 & file_size <= 8) | is_text=false",
                 {"lower.txt", "upper.txt", "small.bin"},
             ),
-            ("min_file_size=4\nmax_file_size=8", {"lower.txt", "upper.txt"}),
+            ("file_size >= 4 & file_size <= 8", {"lower.txt", "upper.txt"}),
             ("is_text=false", {"small.bin"}),
             ("is_text=true", {"small.txt", "lower.txt", "upper.txt", "large.txt"}),
         ):
@@ -2747,9 +2742,9 @@ match = { all = [{ glob = 'nested/' }, { any = [{ min_file_size = 10_485_761 }, 
                 self.write_rules(
                     """[[rules]]
 id="purge.files"
-match = { all = [{any=[{glob="*.txt"},{glob="*.bin"}]}, {"""
-                    + fields.replace("\n", ", ")
-                    + "}] }"
+match = '(glob="*.txt" | glob="*.bin") & ("""
+                    + fields
+                    + ")'"
                 )
                 report = purge_space(
                     PurgeRequest(
@@ -2766,7 +2761,7 @@ match = { all = [{any=[{glob="*.txt"},{glob="*.bin"}]}, {"""
         self.write_rules(
             """[[rules]]
 id="clean.files"
-match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text = false }] }] }
+match = 'glob="**/*" & (file_size >= 10 | is_text=false)'
 """
         )
         for name, size in (
@@ -2795,11 +2790,11 @@ match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text =
         self.write_rules(
             """[[rules]]
 id="clean.whole"
-match = { glob = 'bundle/' }
+match = 'glob="bundle/"'
 [[rules]]
 id="clean.files"
 min_age_days=30
-match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text = false }] }] }
+match = 'glob="**/*" & (file_size >= 10 | is_text=false)'
 """
         )
         for name, size, count in (
@@ -2823,16 +2818,16 @@ match = { all = [{ glob = '**/*' }, { any = [{ min_file_size = 10 }, { is_text =
         empty = self.file(root / "nested/empty", "")
         nonempty = self.file(root / "nested/nonempty", "x")
         for fields, expected in (
-            ("min_file_size=0", {empty, nonempty}),
-            ("max_file_size=0", {empty}),
-            ("min_file_size=1\nmax_file_size=1", {nonempty}),
+            ("file_size >= 0", {empty, nonempty}),
+            ("file_size <= 0", {empty}),
+            ("file_size >= 1 & file_size <= 1", {nonempty}),
         ):
             self.write_rules(
                 """[[rules]]
 id="clean.files"
-match = { """
-                + fields.replace("\n", ", ")
-                + " }"
+match = '"""
+                + fields
+                + "'"
             )
             report = clean_files(
                 CleanRequest(config=self.rules_file, paths=(root,), rules=("files",)),
@@ -2850,7 +2845,7 @@ match = { """
         self.write_rules(
             """[[rules]]
 id="clean.sparse"
-match = { all = [{ glob = '*.bin' }, { min_file_size = "1MiB", max_file_size = "1MiB" }] }
+match = 'glob="*.bin" & (file_size >= "1MiB" & file_size <= "1MiB")'
 """
         )
         report = clean_files(
@@ -2869,7 +2864,7 @@ match = { all = [{ glob = '*.bin' }, { min_file_size = "1MiB", max_file_size = "
         self.write_rules(
             """[[rules]]
 id="purge.text"
-match = { all = [{ source = "project" }, { glob = '**/*' }, { is_text = true }] }
+match = 'source="project" & glob="**/*" & is_text=true'
 """
         )
         request = PurgeRequest(config=self.rules_file, paths=(root,), rules=("text",))
@@ -2887,10 +2882,10 @@ match = { all = [{ source = "project" }, { glob = '**/*' }, { is_text = true }] 
         self.file(root / "bundle/payload.bin", "x" * 20)
         text = """[[rules]]
 id="clean.whole"
-match = { glob = 'bundle/' }
+match = 'glob="bundle/"'
 [[rules]]
 id="clean.filtered"
-match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text = false }] }] }
+match = 'glob="**/*" & (file_size >= 10 & is_text=false)'
 """
         self.write_rules(text)
         request = CleanRequest(
@@ -2912,11 +2907,11 @@ match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text =
         self.write_rules(
             """[[rules]]
 id="clean.whole"
-match = { glob = 'bundle/' }
+match = 'glob="bundle/"'
 [[rules]]
 id="clean.binary"
 min_age_days=30
-match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text = false }] }] }
+match = 'glob="**/*" & (file_size >= 10 & is_text=false)'
 """
         )
         request = CleanRequest(
@@ -2932,7 +2927,7 @@ match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = 10 }, { is_text =
         self.write_rules(
             """[[rules]]
 id="clean.filtered"
-match = { all = [{ glob = '*.txt' }, { all = [{ max_file_size = 10 }, { is_text = true }] }] }
+match = 'glob="*.txt" & (file_size <= 10 & is_text=true)'
 """
         )
         for length in (6, 11):
@@ -2960,7 +2955,7 @@ match = { all = [{ glob = '*.txt' }, { all = [{ max_file_size = 10 }, { is_text 
         self.write_rules(
             """[[rules]]
 id="clean.filtered"
-match = { all = [{ glob = '*.bin' }, { max_file_size = 10 }] }
+match = 'glob="*.bin" & file_size <= 10'
 """
         )
         measure = scan._measure_candidate
@@ -2988,7 +2983,7 @@ match = { all = [{ glob = '*.bin' }, { max_file_size = 10 }] }
         self.write_rules(
             """[[rules]]
 id="clean.filtered"
-match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = "1.5MiB", max_file_size = "2MB" }, { is_text = false }] }] }
+match = 'glob="**/*" & ((file_size >= "1.5MiB" & file_size <= "2MB") & is_text=false)'
 """
         )
         result = CliRunner().invoke(
@@ -2996,9 +2991,9 @@ match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = "1.5MiB", max_fil
         )
         self.assertEqual(result.exit_code, 0, result.output)
         for line in (
-            '"min_file_size": 1572864',
-            '"max_file_size": 2000000',
-            '"is_text": false',
+            "file_size >= 1572864",
+            "file_size <= 2000000",
+            "!is_text",
         ):
             self.assertIn(line, result.output)
 
@@ -3013,7 +3008,7 @@ match = { all = [{ glob = '**/*' }, { all = [{ min_file_size = "1.5MiB", max_fil
         self.write_rules(
             """[[rules]]
 id="clean.filtered"
-match = { all = [{ glob = '*.txt' }, { all = [{ min_file_size = 0 }, { is_text = true }] }] }
+match = 'glob="*.txt" & (file_size >= 0 & is_text=true)'
 """
         )
         report = clean_files(

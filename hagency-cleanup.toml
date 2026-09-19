@@ -39,27 +39,25 @@ auto_apply = false
 recursive = true
 include_unverified = true
 # Supply project roots: hgc file clean -r project_default ./ --dry-run
-# Purge the entire project first; filter remaining .local files afterwards.
+# Purge the entire project first, then remove logs and empty directories.
 
-[rules.match]
-any = [
-  { ref = "purge.artifacts" },
-  { ref = "purge.cachedirs" },
-  { all = [
-    { glob = "/.local/**" },
-    { not = { any = [
-      { all = [{ any = [{ is_text = true }, { is_image = true }] }, { max_file_size = "10MB" }] },
-      { all = [{ is_video = true }, { max_file_size = "50MB" }] },
-    ] } },
-  ] },
-]
+match = '''
+  ref="purge.artifacts"
+  | ref="purge.cachedirs"
+  | ref="clean.empty_directories"
+  | (glob="*.log" & is_text)
+  | (glob="/.local/**" & !(
+      ((is_text | is_image) & file_size <= 1MB)
+      | (is_video & file_size <= 50MB)
+    ))
+'''
 
 # Optional examples; new rules default to explicit-only (--rule).
 # [[rules]]
 # id = "clean.media"
-# match = { any = [{ is_image = true }, { is_video = true }] }
+# match = 'is_image | is_video'
 #
 # [[rules]]
 # id = "clean.cached-media"
 # exclude = ["keep/**"]
-# match = { all = [{ within = ".local/cache" }, { ref = "clean.media" }] }
+# match = 'within=".local/cache" & ref="clean.media"'

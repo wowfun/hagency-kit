@@ -277,6 +277,7 @@ def _scan_root(
         rule.include_unverified for rule in rules
     )
     fixed_scopes = all(rule.root is not None for rule in rules)
+    is_windows = sys.platform == "win32"
     scopes_by_root: dict[Path, tuple[RuleScope, ...]] = {}
     registered_roots: set[Path] = set()
     path_index = ScopeIndex(path_scopes) if path_scopes is not None else None
@@ -323,7 +324,12 @@ def _scan_root(
                 try:
                     if path in covered_directories:
                         continue
-                    info = entry.stat(follow_symlinks=False)
+                    # Windows DirEntry.stat() omits device and inode identity.
+                    info = (
+                        path.stat(follow_symlinks=False)
+                        if is_windows
+                        else entry.stat(follow_symlinks=False)
+                    )
                     is_directory = stat.S_ISDIR(info.st_mode)
                     if (
                         stat.S_ISLNK(info.st_mode)
@@ -337,6 +343,10 @@ def _scan_root(
                     ):
                         continue
                     if is_directory:
+                        if not info.st_ino:
+                            raise OSError(
+                                f"stable filesystem identity is unavailable for {path}"
+                            )
                         if info.st_dev != root_identity.device or _is_mount(path):
                             issues.append(
                                 CleanupIssue(
@@ -767,16 +777,32 @@ def _plan_with_rules(
     if isinstance(request, PurgeRequest):
         candidates, issues, roots, _ = _project_plan(request, rules, now_ns)
     else:
-        if not sys.platform.startswith("linux"):
+        if sys.platform == "win32":
+            unsupported = tuple(rule for rule in rules if rule.agent is not None)
+        elif sys.platform.startswith("linux"):
+            unsupported = ()
+        else:
+            unsupported = rules
+        if unsupported:
+            labels = tuple(
+                dict.fromkeys(f"{rule.id} [{rule.source}]" for rule in unsupported)
+            )
+            names = ", ".join(
+                label if len(label) <= 160 else label[:157] + "..."
+                for label in labels[:5]
+            )
+            if len(labels) > 5:
+                names += f", ... ({len(labels) - 5} more)"
+            reason = (
+                "Selected Agent cleanup rules require Linux/WSL"
+                if sys.platform == "win32"
+                else "file clean supports Linux/WSL and Windows project/path rules"
+            )
             return CleanupPlan(
                 (),
                 (),
                 (
-                    CleanupIssue(
-                        "unsupported_platform",
-                        None,
-                        "file clean currently supports Linux/WSL",
-                    ),
+                    CleanupIssue("unsupported_platform", None, f"{reason}: {names}"),
                 ),
                 snapshot,
                 command,

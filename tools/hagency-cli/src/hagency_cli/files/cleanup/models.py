@@ -11,6 +11,9 @@ from hagency_cli.files.cleanup.conditions import Condition, entries
 MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 
 
+AGENTS = ("codex", "claude", "copilot")
+
+
 MAX_SCAN_DEPTH = 6
 
 
@@ -256,7 +259,8 @@ class ScanRule(CleanupRule):
 
     @property
     def agent(self) -> str | None:
-        return self.source.split(".")[0] if "." in self.source else None
+        agent, separator, _ = self.source.partition(".")
+        return agent if separator and agent in AGENTS else None
 
 
 @dataclass(frozen=True)

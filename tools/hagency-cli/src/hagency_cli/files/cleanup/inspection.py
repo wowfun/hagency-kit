@@ -471,6 +471,8 @@ def _measure_candidate(
                 hook(current, current != path)
             checkpoint()
             info = current.stat(follow_symlinks=False)
+            if not info.st_ino:
+                raise OSError(f"stable filesystem identity is unavailable for {current}")
             if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
                 return (
                     None,
@@ -511,9 +513,8 @@ def _measure_candidate(
                     (),
                 )
             identity = (info.st_dev, info.st_ino)
-            if not info.st_ino or identity not in seen:
-                if info.st_ino:
-                    seen.add(identity)
+            if identity not in seen:
+                seen.add(identity)
                 blocks = getattr(info, "st_blocks", None)
                 allocated = (
                     blocks * 512
@@ -521,7 +522,7 @@ def _measure_candidate(
                     else info.st_size
                 )
                 total += allocated
-                if info.st_ino and info.st_nlink > 1 and not stat.S_ISDIR(info.st_mode):
+                if info.st_nlink > 1 and not stat.S_ISDIR(info.st_mode):
                     hardlink_entries.append(_HardlinkEntry(identity, allocated))
             newest = max(newest, info.st_mtime_ns)
             if not stat.S_ISDIR(info.st_mode):

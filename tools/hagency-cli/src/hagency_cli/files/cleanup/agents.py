@@ -16,9 +16,9 @@ from hagency_cli.files.cleanup.inspection import (
     _resolve_path,
     checkpoint,
 )
+from hagency_cli.files.cleanup.models import AGENTS as AGENTS
 from hagency_cli.files.cleanup.models import _unsafe_text
 
-AGENTS = ("codex", "claude", "copilot")
 SOURCE_TIMEOUT = 60.0
 
 

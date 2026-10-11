@@ -852,6 +852,9 @@ def space_purge_cli(
 ) -> None:
     """Find and permanently remove rebuildable project artifacts.
 
+    Windows supports previews and permanent deletion with the same Git, link,
+    junction, mount and stable filesystem identity checks.
+
     Scans dependency directories, build output, caches, and valid CACHEDIR.TAG
     directories. Explicit PATH values replace saved and automatic roots for this
     invocation. Otherwise a nonempty per-user space-purge-paths file wins; missing
@@ -1024,7 +1027,15 @@ def clean_files_cli(
         ),
     ] = False,
 ) -> None:
-    """Inspect obsolete Agent versions and configured caches on Linux/WSL.
+    """Inspect project artifacts, configured paths and obsolete Agent versions.
+
+    Project, cachedir-tag and paths rules support Linux/WSL and Windows.
+    Agent sources require Linux/WSL. On Windows, selecting any Agent source,
+    including through automatic rules, stops the entire operation before scanning.
+    Windows requires explicit --rule selection of project/path rules. Use purge
+    for project artifacts or clean -r empty_directories ./ with packaged defaults.
+    The project_default rule requires this repository's hagency-cleanup.toml;
+    wheel installations outside a Hagency workspace use only packaged defaults.
 
     Defaults to enabled auto_apply rules. Repeat --rule/-r to select only named
     rules; the clean. prefix is optional. Add -r auto to include automatic rules.
@@ -1078,6 +1089,8 @@ def clean_files_cli(
       hgc file clean --dry-run
       hgc file clean --agent codex --agent claude
       hgc file clean --config ./hagency-cleanup.toml --dry-run
+      hgc file clean -r empty_directories ./ --dry-run
+      hgc file clean -r project_default ./ --dry-run
       hgc file clean ./cache -r temp-files --dry-run
     """
     if agent is not None and rule is not None:

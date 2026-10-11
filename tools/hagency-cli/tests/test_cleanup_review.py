@@ -186,8 +186,16 @@ match='ref="purge.bundles" | ref="purge.retained"'
         self.assertTrue(config.configuration_unchanged(snapshot))
         self.rules_file.write_text("schema_version=1\n")
         self.assertFalse(config.configuration_unchanged(snapshot))
+
+    def test_optional_config_becoming_dangling_symlink_is_detected(self):
         self.rules_file.unlink()
-        self.rules_file.symlink_to(self.base / "absent-target")
+        snapshot = config.load_rules(cwd=self.repo)
+        try:
+            self.rules_file.symlink_to(self.base / "absent-target")
+        except OSError as exc:
+            if sys.platform == "win32" and exc.winerror == 1314:
+                self.skipTest("Windows symlink creation privilege is unavailable")
+            raise
         self.assertFalse(config.configuration_unchanged(snapshot))
 
     def test_config_change_during_revalidation_prevents_removal(self):

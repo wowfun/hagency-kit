@@ -5,6 +5,7 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -81,11 +82,21 @@ class CleanupTests(unittest.TestCase):
         (self.repo / "hagency-config.toml").write_text("invalid = [")
         self.rules_file = self.repo / "hagency-cleanup.toml"
         self.rules_file.write_text("schema_version = 1\n")
+        test_path = "/usr/bin:/bin"
+        if sys.platform == "win32":
+            git = WHICH("git")
+            system_directory = (
+                Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
+            )
+            test_directories = [str(system_directory)]
+            if git:
+                test_directories.insert(0, str(Path(git).parent))
+            test_path = os.pathsep.join(test_directories)
         self.enterContext(mock.patch.object(Path, "home", return_value=self.home))
         self.enterContext(
             mock.patch.dict(
                 os.environ,
-                {"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+                {"HOME": str(self.home), "PATH": test_path},
                 clear=True,
             )
         )
@@ -1032,6 +1043,7 @@ exclude=["inner/build/"]
         self.assertEqual(report.choices, ())
         self.assertTrue(target.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux mountinfo")
     def test_linux_bind_mounts_are_pruned_even_when_ismount_returns_false(self):
         root = self.project()
         mount = root / "bind mount"
@@ -1042,9 +1054,12 @@ exclude=["inner/build/"]
             + " rw - tmpfs tmpfs rw\n"
         )
         real_open = Path.open
+        mountinfo_reads = 0
 
         def open_mountinfo(path, *args, **kwargs):
+            nonlocal mountinfo_reads
             if path == Path("/proc/self/mountinfo"):
+                mountinfo_reads += 1
                 return io.StringIO(table)
             return real_open(path, *args, **kwargs)
 
@@ -1053,6 +1068,8 @@ exclude=["inner/build/"]
             mock.patch.object(os.path, "ismount", return_value=False),
         ):
             report = self.purge(root, recursive=True)
+        self.assertGreater(mountinfo_reads, 0)
+        self.assertEqual(report.exit_code, 0, report.issues)
         self.assertEqual(report.choices, ())
         self.assertTrue(target.exists())
 
@@ -1138,6 +1155,7 @@ match = 'source="project" & glob="*.tmp"'
         self.assertEqual(report.exit_code, 0)
         self.assertEqual(report.choices, ())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux fd mounts")
     def test_mount_change_when_opening_candidate_prevents_removal(self):
         root = self.project()
         target = self.artifact(root)
@@ -1147,8 +1165,9 @@ match = 'source="project" & glob="*.tmp"'
 
         with mock.patch.object(
             removal, "_fd_mount_id", side_effect=mount_id, create=True
-        ):
+        ) as mount_ids:
             report = self.purge(root, interactive=True)
+        mount_ids.assert_called()
         self.assertEqual(report.exit_code, 1)
         self.assertTrue((target / "payload").exists())
 

@@ -99,21 +99,26 @@ class SpacePurgeTests(unittest.TestCase):
         descendants = sorted(
             path.rglob("*"), key=lambda child: len(child.parts), reverse=True
         )
-        for child in descendants:
-            os.utime(child, (timestamp, timestamp), follow_symlinks=False)
-        os.utime(path, (timestamp, timestamp), follow_symlinks=False)
+        for child in [*descendants, path]:
+            if os.utime in os.supports_follow_symlinks:
+                os.utime(child, (timestamp, timestamp), follow_symlinks=False)
+            elif child.is_symlink():
+                self.skipTest("setting symlink timestamps is unsupported")
+            else:
+                os.utime(child, (timestamp, timestamp))
 
     def all_choice_ids(self, choices: tuple[CleanupCandidate, ...]) -> tuple[str, ...]:
         return tuple(choice.id for choice in choices)
 
     def test_platform_config_paths_and_fallbacks(self) -> None:
         home = self.base / "home"
+        xdg = home / "config"
 
         self.assertEqual(
             purge_config_path(
-                environ={"XDG_CONFIG_HOME": "/tmp/xdg"}, platform="linux", home=home
+                environ={"XDG_CONFIG_HOME": str(xdg)}, platform="linux", home=home
             ),
-            Path("/tmp/xdg/hagency/space-purge-paths"),
+            xdg / "hagency/space-purge-paths",
         )
         self.assertEqual(
             purge_config_path(
@@ -362,7 +367,10 @@ class SpacePurgeTests(unittest.TestCase):
 
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
+            mock.patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                clear=False,
+            ),
         ):
             report = purge_space(
                 PurgeRequest(dry_run=True), ui=FakePurgeUI(interactive=False)
@@ -393,7 +401,10 @@ class SpacePurgeTests(unittest.TestCase):
 
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
+            mock.patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                clear=False,
+            ),
         ):
             report = purge_space(
                 PurgeRequest(dry_run=True), ui=FakePurgeUI(interactive=False)
@@ -423,7 +434,10 @@ class SpacePurgeTests(unittest.TestCase):
 
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
+            mock.patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                clear=False,
+            ),
         ):
             report = purge_space(
                 PurgeRequest(paths=(explicit_root,), dry_run=True),
@@ -553,7 +567,9 @@ class SpacePurgeTests(unittest.TestCase):
             capture_output=True,
         )
         scan_root = repository / "packages"
-        tracked_project = self.make_project(scan_root, ":(glob)project")
+        # Windows forbids ':'; bracket patterns still exercise literal pathspecs.
+        project_name = "[glob]project" if os.name == "nt" else ":(glob)project"
+        tracked_project = self.make_project(scan_root, project_name)
         tracked_artifact = self.make_artifact(tracked_project, "dist")
         subprocess.run(
             ["git", "-C", str(repository), "add", "-f", "."],
@@ -923,7 +939,10 @@ class SpacePurgeTests(unittest.TestCase):
 
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}, clear=False),
+            mock.patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                clear=False,
+            ),
         ):
             report = purge_space(
                 PurgeRequest(dry_run=True), ui=FakePurgeUI(interactive=False)
@@ -940,7 +959,9 @@ class SpacePurgeTests(unittest.TestCase):
         configured_root = home / "Work"
         self.make_project(configured_root, "project")
         xdg = home / "config"
-        expected_config = xdg / "hagency/space-purge-paths"
+        expected_config = purge_config_path(
+            environ={"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)}, home=home
+        )
 
         def edit_config(
             command: list[str], *, check: bool
@@ -956,6 +977,7 @@ class SpacePurgeTests(unittest.TestCase):
                 os.environ,
                 {
                     "XDG_CONFIG_HOME": str(xdg),
+                    "APPDATA": str(xdg),
                     "VISUAL": "code --wait",
                     "EDITOR": "vi",
                 },

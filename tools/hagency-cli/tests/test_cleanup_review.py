@@ -147,7 +147,9 @@ match='ref="purge.bundles" | ref="purge.retained"'
     def test_unchanged_config_checks_do_not_read_or_parse_again(self):
         self.write_rules("[[rules]]\nid=\"clean.files\"\nmatch='file_size >= 0'\n")
         snapshot = config.load_rules(self.rules_file)
-        with mock.patch.object(config, "_read", side_effect=AssertionError("reread")):
+        with mock.patch.object(
+            config, "_read_contents", side_effect=AssertionError("reread")
+        ):
             for _ in range(10):
                 self.assertTrue(config.configuration_unchanged(snapshot))
 
@@ -171,13 +173,18 @@ match='ref="purge.bundles" | ref="purge.retained"'
 
     def test_windows_config_check_keeps_content_validation(self):
         self.write_rules("[[rules]]\nid=\"clean.files\"\nmatch='file_size >= 0'\n")
-        snapshot = config.load_rules(self.rules_file)
-        with (
-            mock.patch.object(config.sys, "platform", "win32"),
-            mock.patch.object(config, "_read", wraps=config._read) as read,
-        ):
-            self.assertTrue(config.configuration_unchanged(snapshot))
-            self.assertEqual(read.call_count, len(snapshot.files))
+        with mock.patch.object(config.sys, "platform", "win32"):
+            snapshot = config.load_rules(self.rules_file)
+            with (
+                mock.patch.object(
+                    config, "_read_contents", wraps=config._read_contents
+                ) as read,
+                mock.patch.object(
+                    config.tomllib, "loads", side_effect=AssertionError("reparsed TOML")
+                ),
+            ):
+                self.assertTrue(config.configuration_unchanged(snapshot))
+                self.assertEqual(read.call_count, len(snapshot.files))
 
     def test_missing_optional_config_must_stay_missing(self):
         self.rules_file.unlink(missing_ok=True)

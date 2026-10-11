@@ -267,6 +267,8 @@ class RuleScope:
 
 @dataclass(frozen=True)
 class ConfigSignature:
+    """Process-local config identity and digest for the host platform."""
+
     identity: tuple[int, ...]
     digest: str
 

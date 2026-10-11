@@ -37,17 +37,26 @@ class CleanupConfigError(ValueError):
 
 
 def _config_identity(info: os.stat_result) -> tuple[int, ...]:
+    # Windows stat() and fstat() can expose different meanings of ctime.
+    # Birth time is comparable across both; Python 3.11 lacks it and uses hashing.
+    stable_time = (
+        getattr(info, "st_birthtime_ns", 0)
+        if sys.platform == "win32"
+        else info.st_ctime_ns
+    )
     return (
         info.st_dev,
         info.st_ino,
         info.st_mode,
         info.st_size,
         info.st_mtime_ns,
-        info.st_ctime_ns,
+        stable_time,
     )
 
 
-def _read(path: Path, *, optional: bool = False) -> tuple[dict, ConfigSignature | None]:
+def _read_contents(
+    path: Path, *, optional: bool = False
+) -> tuple[bytes, ConfigSignature | None]:
     try:
         if _unsafe_text(str(path)):
             raise CleanupConfigError("unsafe characters in cleanup config path")
@@ -66,18 +75,30 @@ def _read(path: Path, *, optional: bool = False) -> tuple[dict, ConfigSignature 
         identity = _config_identity(after)
         if (
             _config_identity(before) != identity
+            # These two timestamps come from the same API and remain comparable.
+            or before.st_ctime_ns != after.st_ctime_ns
             or _config_identity(path.stat()) != identity
         ):
             raise CleanupConfigError(f"cleanup config changed while reading: {path}")
         signature = ConfigSignature(identity, hashlib.sha256(data).hexdigest())
-        return tomllib.loads(data.decode("utf-8")), signature
+        return data, signature
     except FileNotFoundError as exc:
         if optional and not path.is_symlink():
-            return {}, None
+            return b"", None
         raise CleanupConfigError(f"missing cleanup config: {path}") from exc
     except CleanupConfigError:
         raise
     except (OSError, ValueError, RecursionError) as exc:
+        raise CleanupConfigError(f"cannot read cleanup config {path}: {exc}") from exc
+
+
+def _read(path: Path, *, optional: bool = False) -> tuple[dict, ConfigSignature | None]:
+    data, signature = _read_contents(path, optional=optional)
+    if signature is None:
+        return {}, None
+    try:
+        return tomllib.loads(data.decode("utf-8")), signature
+    except (ValueError, RecursionError) as exc:
         raise CleanupConfigError(f"cannot read cleanup config {path}: {exc}") from exc
 
 
@@ -219,10 +240,11 @@ def configuration_unchanged(snapshot: RulesSnapshot) -> bool:
             if _config_identity(info) != signature.identity:
                 return False
             # POSIX ctime detects in-place rewrites even with restored mtime.
-            # Windows ctime can be creation time; retain content checks there,
-            # and when the filesystem cannot supply a stable inode identity.
+            # Windows identity uses creation time, so hashing is mandatory to
+            # catch same-size rewrites with restored mtime. Missing inodes also
+            # require this content check.
             if sys.platform == "win32" or not info.st_ino:
-                if _read(path)[1] != signature:
+                if _read_contents(path)[1] != signature:
                     return False
         return True
     except (CleanupConfigError, OSError):

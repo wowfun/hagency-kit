@@ -322,6 +322,8 @@ hgc file purge ./cache --include-unverified --dry-run
 hgc file purge --paths
 ```
 
+Windows supports both purge previews and permanent deletion, with the same Git, link, junction, mount and filesystem-identity protections.
+
 Candidate discovery defaults to **depth 6**, with each scan root at depth 0. `-R` / `--recursive` removes this limit. Discovery uses an explicit stack, deduplicates directory identities, prunes child mount points (including Linux bind mounts), and never descends into whole artifact candidates, even when they are protected. Automatic home-root discovery still checks project markers within two levels.
 
 Positional `PATH...` values are temporary scan roots for that invocation and replace both the saved path list and automatic discovery. Without positional paths, a nonempty per-user path file replaces automatic discovery; a missing or effectively empty file restores the automatic roots. `--paths` is exclusive with positional paths, `--dry-run`, `--recursive`, `--include-unverified`, `--config`, `--rule`, `--scan-timeout`, and `--yes`. Use it by itself to create or edit this file, show which configured roots exist, and reopen the effective list after the editor exits. It uses `$VISUAL`, then `$EDITOR`, then `notepad.exe` on Windows, `open -W -t` on macOS, or `vi` elsewhere. Blank lines and `#` comments are ignored, and each entry must be an absolute or `~` path.
@@ -338,12 +340,22 @@ Purge deletes selected artifacts permanently rather than moving them to Trash or
 
 ## Agent and cache cleanup
 
-`hgc file clean` supports **Linux/WSL**. It checks Codex, Claude Code, and Copilot by default, plus configured `paths` rules with `auto_apply = true`:
+`hgc file clean` supports project, `cachedir-tag`, and generic `paths` rules on **Linux/WSL and Windows**. Agent version and staging sources require **Linux/WSL**. By default, automatic rules include Codex, Claude Code, and Copilot, plus configured `paths` rules with `auto_apply = true`:
 
 ```sh
 hgc file clean --dry-run
 hgc file clean --agent codex --agent claude
 hgc file clean --config ./hagency-cleanup.toml --dry-run
+hgc file clean -r project_default ./ --dry-run
+```
+
+On Windows, `clean` requires explicit `--rule/-r` selection of project/path rules: the builtin automatic rules include Agent sources, so a bare `hgc file clean` fails. If any selected branch uses an Agent source, including one selected through `-r auto`, the entire operation stops before scanning with `unsupported_platform`, lists up to five incompatible rules and sources (with an omitted count and shortened long labels), and exits with status 1. Supported rules are not partially executed in that invocation. macOS clean support remains unavailable.
+
+`clean.project_default` is defined in this repository's `hagency-cleanup.toml`, not in the packaged defaults. A wheel installation outside a Hagency workspace can use `purge` for project artifacts or explicitly select the builtin `clean.empty_directories` rule. Additional clean project/path rules require a repository configuration or `--config`.
+
+```sh
+hgc file purge ./ --dry-run
+hgc file clean -r empty_directories ./ --dry-run
 ```
 
 Repeat `--agent codex|claude|copilot` to select Agent sources. This does not disable automatic generic path branches. `--agent` and `--rule` are mutually exclusive. Inspection reads local files and same-user `/proc` state; it never starts an Agent or installer and never connects to the network. If an eligible version disappears after a complete inventory, only that candidate is skipped; an incomplete inventory or uncertain source state prevents cleanup of that source. Each Agent source has an independent 60-second scan budget, checked during traversal, process inspection and bounded Git queries. Generic paths/project scanning is unlimited by default. Operating-system filesystem calls can still block independently of these checkpoints.
@@ -367,9 +379,13 @@ Sessions, authentication, configuration, plugin installations, worktree bodies a
 
 Purge and clean share `CleanupRule`, `CleanupCandidate`, `CleanupPlan`, `CleanupReport` and `CleanupUI` through `files/cleanup`. Rules combine [packaged defaults](src/hagency_cli/files/cleanup/defaults.toml) with **one repository file** named [`hagency-cleanup.toml`](../../hagency-cleanup.toml), beside `hagency-config.toml` and intended for Git tracking.
 
-Both commands accept `--config PATH`. Without it, the nearest current-directory ancestor containing `hagency-config.toml` selects the workspace; otherwise an editable installation may select its source repository. Only that repository's `hagency-cleanup.toml` is read. A wheel outside a workspace uses builtins. A missing automatic rules file also uses builtins; a missing explicit file or an invalid discovered file stops before scanning. Workspace discovery does not parse `hagency-config.toml` business contents. The selected TOML is trusted configuration and may be a symlink; its target state is checked again before deletion. POSIX checks device, inode, mode, size, mtime and ctime against the state verified when reading the file; any change stops deletion. Windows and filesystems without a stable inode also reread and hash the contents when that state is unchanged. Relative rule roots use the selected file's containing directory, including when the file is a symlink.
+Both commands require stable filesystem identities for scan roots, candidates, and their contents. Directories whose filesystem reports a zero inode are not traversed; each affected directory is reported as an incomplete scan rather than silently deduplicated by its missing identity. A missing identity inside a whole-directory candidate also prevents deletion.
+
+Both commands accept `--config PATH`. Without it, the nearest current-directory ancestor containing `hagency-config.toml` selects the workspace; otherwise an editable installation may select its source repository. Only that repository's `hagency-cleanup.toml` is read. A wheel outside a workspace uses builtins. A missing automatic rules file also uses builtins; a missing explicit file or an invalid discovered file stops before scanning. Workspace discovery does not parse `hagency-config.toml` business contents. The selected TOML is trusted configuration and may be a symlink; its target state is checked again before deletion. POSIX checks device, inode, mode, size, mtime and ctime against the state verified when reading the file; any change stops deletion. Windows checks device, inode, mode, size, mtime and creation time (`st_birthtime_ns` when available, otherwise a fixed zero), avoiding incompatible `stat()`/`fstat()` ctime values. Windows and filesystems without a stable inode also reread and hash the contents when that state is unchanged. Relative rule roots use the selected file's containing directory, including when the file is a symlink.
 
 Cleanup rule discovery is independent of `purge PATH...` and the saved `space-purge-paths` list. The commands never search scan targets for rules and never read a user configuration directory for cleanup rules. Paths declared by custom rules resolve against the selected TOML's directory; `~` expands to the current home. Explicit scan roots and custom rule roots may be outside the home directory, including a parent such as `/home`; they are not restricted to the invoking user's projects. Choose roots that describe the intended scope. A scan root that contains the home directory (such as `/home`) disables preselection for all of its candidates. On systems with effective user IDs, a foreign-owned entry protects the entire candidate containing it. Filesystem roots, home itself and linked roots remain rejected; blank CLI scan paths are argument errors.
+
+Each configuration read also compares the descriptor's ctime before and after reading, without comparing it to the pathname's ctime on Windows. Content rechecks retain the bounded read, identity checks and SHA-256 comparison; they do not parse TOML again after the rules have been loaded.
 
 A minimal repository override:
 

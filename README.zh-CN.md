@@ -18,7 +18,7 @@ hgc skill add workspace:skills/analyze-diff
 
 Skill 默认安装到调用目录的 `.agents/skills`；使用 `--dir /path/to/project` 指定其他项目，或用 `--global` 安装到 `~/.agents/skills`。Workspace 按 `--root`、当前目录及其父目录、editable 安装所用的 Hagency Kit 源码仓库顺序查找。Wheel 安装在 workspace 外运行时需要指定 `--root`。
 
-通过 `hgc COMMAND --help` 和 `hgc COMMAND SUBCOMMAND --help` 查看完整操作说明。[Hagency CLI 使用指南（英文）](tools/hagency-cli/README.md) 集中说明配置、source 与 profile、SFTP 与离线传输、清理、模型代理、排错和开发。使用 `hgc --install-completion` 安装 shell 补全。
+通过 `hgc COMMAND --help` 和 `hgc COMMAND SUBCOMMAND --help` 查看完整操作说明。[Hagency CLI 文档索引（英文）](tools/hagency-cli/README.md#documentation) 提供配置、source 与 profile、SFTP 与离线传输、清理、模型代理、排错和开发的主题文档入口。使用 `hgc --install-completion` 安装 shell 补全。
 
 ## Skills
 

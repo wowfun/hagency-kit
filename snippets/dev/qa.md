@@ -4,10 +4,11 @@ Conduct a comprehensive, in-depth, and adversarial review of all uncommitted cha
 - avoidable performance and resource overhead, including redundant validation, cloning, allocation, I/O, IPC round trips, thread or task spawning, latency, and CPU cost
 - unnecessary complexity, including unreachable defensive paths, duplicate logic, and convoluted control flow
 - dead code, duplication, and maintenance burden
+- UI/UX and design quality, including clarity, consistency, accessibility, responsiveness, and cognitive load; flag anything that does not clarify intent, enable action, or add meaningful value
 
 ---
 
-Conduct a comprehensive, in-depth, and adversarial audit of <repo>'s architecture, codebase, and test suite, and provide prioritized MUST and SHOULD recommendations, covering areas including, but not limited to:
+Conduct a comprehensive, in-depth, and adversarial audit of <repo>'s architecture, codebase, UI/UX and design, and test suite, and provide prioritized MUST and SHOULD recommendations, covering areas including, but not limited to:
 ...
 
 ---

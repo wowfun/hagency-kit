@@ -110,19 +110,19 @@ def sync_sources_with_progress(
             failures.append(source.name)
             reanchor_candidates.append(source.name)
             emit_event(
-                progress, f"Error: source {source.name} failed: {exc}", error=True
+                progress, f"Error: source {source.name} failed: {exc}", severity="error"
             )
         except (SourceSyncError, GitCommandError) as exc:
             failures.append(source.name)
             emit_event(
-                progress, f"Error: source {source.name} failed: {exc}", error=True
+                progress, f"Error: source {source.name} failed: {exc}", severity="error"
             )
         except subprocess.CalledProcessError as exc:
             failures.append(source.name)
             emit_event(
                 progress,
                 f"Error: source {source.name} failed: {format_called_process_error(exc)}",
-                error=True,
+                severity="error",
             )
 
     if failures:

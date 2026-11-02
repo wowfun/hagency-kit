@@ -187,6 +187,7 @@ def pack_sync_bundle(
     exclude: Sequence[str] = (),
     dry_run: bool = False,
     progress: Progress | None = None,
+    warning: Progress | None = None,
 ) -> PackReport:
     emit = progress or (lambda _message: None)
     output = Path(
@@ -221,7 +222,7 @@ def pack_sync_bundle(
     mode = BundleMode.GIT_PATCH if git_changed else BundleMode.FULL
 
     for path in skipped_symlinks:
-        emit(f"warning: skipped symlink: {path.as_posix()}")
+        (warning or emit)(f"Warning: skipped symlink: {path.as_posix()}")
     if git_changed and not selected_paths and not deletions:
         emit("no packable Git changes")
         return PackReport(

@@ -2177,7 +2177,7 @@ class FileSyncTests(unittest.TestCase):
             (PurePosixPath("shortcut"),),
         )
         self.assertTrue(
-            any("warning: skipped symlink: shortcut" in line for line in messages)
+            any("Warning: skipped symlink: shortcut" in line for line in messages)
         )
         self.assertEqual(
             (target / "nested" / "run.sh").read_bytes(), script.read_bytes()
@@ -2585,6 +2585,7 @@ class FileSyncTests(unittest.TestCase):
         bundle = self.root / "bundle.zip"
         identity = self.root / "not-used"
         with mock.patch.object(commands_file_module, "pack_sync_bundle") as pack_mock:
+            pack_mock.side_effect = lambda *args, warning, **kwargs: warning("Warning: skipped symlink: shortcut")
             pack_result = CliRunner().invoke(
                 cli.app,
                 [
@@ -2608,6 +2609,8 @@ class FileSyncTests(unittest.TestCase):
             )
 
         self.assertEqual(pack_result.exit_code, 0, pack_result.stderr)
+        self.assertEqual(pack_result.stderr, "Warning: skipped symlink: shortcut\n")
+        self.assertNotIn("Warning:", pack_result.stdout)
         pack_mock.assert_called_once_with(
             self.root,
             profile=None,
@@ -2618,6 +2621,7 @@ class FileSyncTests(unittest.TestCase):
             exclude=["*.tmp", "build/"],
             dry_run=True,
             progress=print,
+            warning=mock.ANY,
         )
 
         with mock.patch.object(commands_file_module, "apply_sync_bundle") as apply_mock:

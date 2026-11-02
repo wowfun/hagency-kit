@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import fields
 from typing import Any
 
+from hagency_cli.commands.shared import diagnostic
 from hagency_cli.files.cleanup.conditions import Condition, entries, walk
 from hagency_cli.files.cleanup.models import (
     CleanupPlan,
@@ -101,7 +101,10 @@ def _render_issues(issues: Iterable[Any]) -> None:
         level = "Error" if issue.is_failure else "Warning"
         code = f" [{issue.code}]" if issue.code else ""
         path = f" ({issue.path})" if issue.path is not None else ""
-        print(_display_text(f"{level}{code}{path}: {issue.message}"), file=sys.stderr)
+        diagnostic(
+            _display_text(f"{level}{code}{path}: {issue.message}"),
+            "error" if issue.is_failure else "warning",
+        )
 
 
 def _selected_unknown_count(report: CleanupReport) -> int:
@@ -157,10 +160,11 @@ def _render_results(report: CleanupReport) -> None:
             else ""
         )
         message = f" - {result.message}" if result.message else ""
-        output = sys.stderr if prefix == "failed" else sys.stdout
-        print(
-            _display_text(f"{prefix}: {result.exact_path}{size}{message}"), file=output
-        )
+        line = _display_text(f"{prefix}: {result.exact_path}{size}{message}")
+        if prefix == "failed":
+            diagnostic(line, "error")
+        else:
+            print(line)
 
 
 def render_cleanup_report(
@@ -188,7 +192,7 @@ def render_cleanup_report(
         return
     if not report.choices:
         if report.failed:
-            print(f"{action} incomplete; see reported errors.", file=sys.stderr)
+            diagnostic(f"{action} incomplete; see reported errors.", "error")
         else:
             print(f"No {report.command} candidates found.")
         return
@@ -214,7 +218,7 @@ def render_cleanup_report(
 def render_paths_edit_report(report: PathsEditReport) -> None:
     _render_issues(report.issues)
     if report.failed:
-        print(f"Failed to update purge paths: {report.config_path}", file=sys.stderr)
+        diagnostic(f"Failed to update purge paths: {report.config_path}", "error")
     else:
         action = "unchanged" if report.before_roots == report.after_roots else "updated"
         print(f"Purge paths {action}: {report.config_path}")

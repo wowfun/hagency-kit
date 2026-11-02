@@ -12,7 +12,7 @@ from hagency_cli.commands.cleanup_render import (
     render_paths_edit_report,
 )
 from hagency_cli.commands.completion import complete_directory
-from hagency_cli.commands.shared import command_errors, die, make_app
+from hagency_cli.commands.shared import command_errors, diagnostic, die, make_app
 from hagency_cli.files.cleanup.agents import AGENTS
 from hagency_cli.files.cleanup.config import CleanupConfigError, load_rules
 from hagency_cli.files.cleanup.models import (
@@ -337,6 +337,7 @@ def pack_sync_bundle_command(
             exclude=exclude or (),
             dry_run=dry_run,
             progress=print,
+            warning=lambda message: diagnostic(message, "warning"),
         )
     except (FileSyncConfigError, FileSyncError, OSError) as exc:
         die(str(exc))

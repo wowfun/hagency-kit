@@ -2,6 +2,8 @@
 
 `hgc` manages Hagency workspaces, skill sources, skill installation, reusable profiles, project file transfers, artifact cleanup, and a local model proxy. Each command's `--help` includes its prerequisites, defaults, effects, and examples, including when no workspace is available.
 
+Warnings and errors go to stderr. On a terminal, warnings appear in yellow and errors in red. Redirect stderr or set `NO_COLOR` for plain text.
+
 ## Install and get started
 
 Requires Python 3.11 or newer. From the Hagency Kit repository root:

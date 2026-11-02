@@ -62,6 +62,7 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn(
             ("diagnostic", True), [(event.message, event.error) for event in events]
         )
+        self.assertTrue(all(event.severity is None for event in events))
         with self.assertRaises(subprocess.CalledProcessError) as error:
             run([sys.executable, "-c", code + "; sys.exit(1)"])
         self.assertEqual(error.exception.stderr, "diagnostic\n")

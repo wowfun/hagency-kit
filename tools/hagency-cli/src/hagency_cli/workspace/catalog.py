@@ -50,14 +50,14 @@ def list_all_skill_rows(
             emit_event(
                 progress,
                 f"Warning: skipping missing source {source_name}: {source.path}",
-                error=True,
+                severity="warning",
             )
             continue
         if not source.path.is_dir():
             emit_event(
                 progress,
                 f"Warning: skipping non-directory source {source_name}: {source.path}",
-                error=True,
+                severity="warning",
             )
             continue
         skip_roots = skill_skip_roots(source_name, sources)

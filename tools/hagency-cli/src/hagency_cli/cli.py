@@ -29,6 +29,9 @@ app = make_app(
     or --config, independently of their cleanup targets.
     Installation destinations resolve from the invocation directory.
 
+    Warnings and errors go to stderr. Terminals display warnings in yellow and
+    errors in red. Set NO_COLOR for plain text.
+
     Use hgc COMMAND --help, then hgc COMMAND SUBCOMMAND --help for prerequisites,
     defaults, effects, and examples. Help works without a workspace or network.
     The Hagency CLI README contains full configuration and troubleshooting

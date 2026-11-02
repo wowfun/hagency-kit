@@ -7,8 +7,8 @@ import json
 import math
 import os
 import secrets
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -304,9 +304,6 @@ def _control_lock(paths: ServicePaths) -> Iterator[None]:
     descriptor = os.open(paths.lock, os.O_CREAT | os.O_RDWR, 0o600)
     locked = False
     try:
-        if os.fstat(descriptor).st_size == 0:
-            os.write(descriptor, b"\0")
-            os.fsync(descriptor)
         try:
             _lock_descriptor(descriptor, platform=os.name)
         except OSError as exc:

@@ -242,13 +242,13 @@ class ModelProxyDaemonTests(unittest.TestCase):
         active = 0
         max_active = 0
         active_lock = threading.Lock()
-        real_write = daemon.os.write
+        real_lock = daemon._lock_descriptor
 
-        def block_first_write(descriptor: int, data: bytes) -> int:
+        def delay_first_lock(descriptor: int, *, platform: str) -> None:
             if not first_claim_created.is_set():
                 first_claim_created.set()
                 release_first_claim.wait(timeout=5)
-            return real_write(descriptor, data)
+            real_lock(descriptor, platform=platform)
 
         def blocking_read(_path: Path):
             nonlocal active, max_active
@@ -271,7 +271,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
             mock.patch.dict(
                 os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
             ),
-            mock.patch.object(daemon.os, "write", side_effect=block_first_write),
+            mock.patch.object(daemon, "_lock_descriptor", side_effect=delay_first_lock),
             mock.patch.object(daemon, "_read_state", side_effect=blocking_read),
         ):
             first = threading.Thread(target=stop)

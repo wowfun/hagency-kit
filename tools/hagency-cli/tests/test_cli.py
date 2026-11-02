@@ -3724,6 +3724,145 @@ class CliTests(unittest.TestCase):
         self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
         self.assertIn("local-source\texternal-one\tother/external-one", stdout)
 
+    def test_archive_discovery_exact_paths_and_completion(self):
+        for folder in ("Archive", "ARCHIVED", "deprecated", "archive-tools"):
+            self.write_skill(self.root / "skills" / folder / folder.lower())
+        self.write_skill(self.root / "skills/deprecated/local-one")
+        rows, stderr = self.run_cli("skill", "list", "-s", "workspace")
+        self.assertEqual(stderr, "")
+        self.assertIn("archive-tools/archive-tools", rows)
+        for folder in ("Archive", "ARCHIVED", "deprecated"):
+            self.assertNotIn(f"skills/{folder}/", rows)
+        for words in ("hgc skill add ", "hgc skill add ./skills/"):
+            values, stderr = self.complete_bash(words, 3)
+            self.assertFalse(any("deprecated" in value for value in values))
+            self.assertEqual(stderr, "")
+        for args in (("local-one",), ("workspace", "--all")):
+            stdout, stderr = self.run_cli("skill", "add", *args, "--dry-run")
+            self.assertNotIn("deprecated", stdout + stderr)
+        for value in ("archived", "./skills/ARCHIVED", "workspace:skills/Archive"):
+            self.run_cli("skill", "add", value, "--dry-run", expected=1)
+        for args in (
+            ("workspace:skills/deprecated/local-one",),
+            ("workspace", "--skill", "skills/deprecated/local-one"),
+            ("./skills/deprecated/local-one",),
+        ):
+            stdout, stderr = self.run_cli("skill", "add", *args, "--dry-run")
+            self.assertIn("local-one", stdout)
+            self.assertIn(
+                "Warning: deprecated skill workspace:skills/deprecated/local-one",
+                stderr,
+            )
+        _, error = self.run_cli(
+            "skill",
+            "add",
+            "./skills/Archive",
+            "--skill",
+            "skills/deprecated/local-one",
+            "--dry-run",
+            expected=1,
+        )
+        self.assertIn("outside the input directory", error)
+
+    def test_archived_local_alias_reports_one_warning(self):
+        checkout = self.root / "local-source"
+        registered = self.root / "archive/registered"
+        alias = self.root / "deprecated/input"
+        for link in (registered, alias):
+            link.parent.mkdir()
+            directory_link(link, checkout)
+        self.config_path.write_text('[source.skills]\npath = "archive/registered"\n')
+        stdout, stderr = self.run_cli("skill", "add", "./deprecated/input/nested/external-one", "--dry-run")
+        self.assertIn("external-one", stdout)
+        self.assertEqual(stderr.count("Warning:"), 1, stderr)
+        self.assertIn("deprecated", stderr)
+
+    def test_archived_directory_link_cannot_escape_its_source(self):
+        external = self.root / "outside-source"
+        self.write_skill(external)
+        alias = self.root / "local-source/archive/alias"
+        alias.parent.mkdir()
+        if os.name == "nt":
+            workspace_skills_module.create_windows_junction(alias, external)
+        else:
+            alias.symlink_to(external, target_is_directory=True)
+        for value in ("local-source:archive/alias", "./local-source/archive/alias"):
+            _, error = self.run_cli("skill", "add", value, "-p", "target", expected=1)
+            self.assertIn("outside source", error)
+            self.assertFalse((self.root / "target").exists())
+
+    def test_source_inspection_is_offline_and_isolates_invalid_entries(self):
+        with self.config_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                '\n[source.bad]\npath = 1\n[source.empty]\npath = "empty"\n'
+                '[source.missing]\npath = "missing"\n[source.file]\npath = "file"\n'
+                '[source.old]\npath = "old"\n[source.marked]\npath = "ARCHIVED/root"\n'
+            )
+        self.append_remote_source("not-synced")
+        (self.root / "empty").mkdir()
+        (self.root / "file").touch()
+        self.write_skill(self.root / "old/deprecated/example")
+        self.write_skill(self.root / "ARCHIVED/root/example")
+        self.write_skill(self.root / "local-source/archive/retired")
+        with mock.patch(
+            "subprocess.Popen", side_effect=AssertionError("must stay offline")
+        ):
+            stdout, stderr = self.run_cli("source", "list")
+            for reason in (
+                "invalid source bad",
+                "missing local source missing",
+                "is not a directory",
+                "contains no SKILL.md",
+                "deprecated source marked",
+                "contains only archived",
+                "hgc source sync not-synced",
+            ):
+                self.assertIn(reason, stderr)
+            self.assertNotIn("local-source", stderr)
+            self.assertIn("local-source", stdout)
+            self.assertNotIn("bad\t", stdout)
+            self.assertEqual(self.run_cli("source", "show", "local-source")[1], "")
+            _, stderr = self.run_cli("source", "show", "bad", expected=1)
+            self.assertIn("source bad path must be a string", stderr)
+
+    def test_diagnostic_colors_follow_stderr_and_no_color(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+
+        self.append_remote_source("not-synced")
+        with mock.patch.dict(os.environ), contextlib.chdir(self.root):
+            os.environ.pop("NO_COLOR", None)
+            for stream, mute in (
+                (Terminal(), False),
+                (io.StringIO(), False),
+                (Terminal(), True),
+            ):
+                if mute:
+                    os.environ["NO_COLOR"] = ""
+                with (
+                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stderr(stream),
+                ):
+                    for args, code in (
+                        (["source", "show", "not-synced"], 0),
+                        (["source", "show", "unknown"], 1),
+                        (["--bad-option"], 2),
+                    ):
+                        with self.assertRaises(SystemExit) as exit_:
+                            cli.main(args)
+                        self.assertEqual(exit_.exception.code, code)
+                output = stream.getvalue()
+                self.assertIn("Warning:", output)
+                self.assertIn("Error:", output)
+                self.assertIn("Usage:", output)
+                if stream.isatty() and not mute:
+                    self.assertIn("\x1b[33mWarning:", output)
+                    self.assertIn("\x1b[31mError: No such option", output)
+                    self.assertIn("\x1b[31mError: unknown source", output)
+                else:
+                    self.assertNotIn("\x1b", output)
+
     def test_skill_list_default_skips_missing_sources_with_warning(self) -> None:
         self.append_remote_source("remote-source")
 

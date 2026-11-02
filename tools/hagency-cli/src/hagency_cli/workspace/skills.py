@@ -4,7 +4,9 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path, PureWindowsPath
 from typing import Literal, Protocol
 
@@ -18,6 +20,8 @@ from hagency_cli.workspace.errors import (
 )
 from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.sources import Source
+
+ARCHIVE_DIRS = {"archived", "archive", "deprecated"}
 
 SKIP_DISCOVERY_DIRS = {
     ".agents",
@@ -59,16 +63,16 @@ def iter_skill_name_matches(
     skill_name: str,
     sources: dict[str, Source],
     workspace_root: Path,
+    scans: dict[str, SkillScan] | None = None,
 ) -> list[tuple[str, Path]]:
-    workspace = workspace_source(workspace_root)
-    source_roots = {source.path for source in sources.values()}
-    candidates = {"workspace": workspace, **sources}
+    scans = (
+        scans if scans is not None else workspace_skill_scans(workspace_root, sources)
+    )
     matches: list[tuple[str, Path]] = []
-    for source_name, source in candidates.items():
-        if not source.path.exists() or not source.path.is_dir():
+    for source_name, scan in scans.items():
+        if not scan.source.path.is_dir():
             continue
-        skip_roots = source_roots if source_name == "workspace" else None
-        for target in discover_skill_dirs(source.path, skip_roots=skip_roots):
+        for target in scan.active:
             if target.name == skill_name:
                 matches.append((source_name, target))
     return matches
@@ -104,6 +108,8 @@ def resolve_skill_reference(
     value: str,
     sources: dict[str, Source],
     workspace_root: Path,
+    *,
+    scans: dict[str, SkillScan] | None = None,
 ) -> tuple[str, str | None]:
     source_selector = split_source_selector_reference(value, sources)
     if source_selector is not None:
@@ -112,8 +118,21 @@ def resolve_skill_reference(
     if value == "workspace" or value in sources:
         return (value, None)
 
-    matches = iter_skill_name_matches(value, sources, workspace_root)
+    scans = (
+        scans if scans is not None else workspace_skill_scans(workspace_root, sources)
+    )
+    matches = iter_skill_name_matches(value, sources, workspace_root, scans)
     if not matches:
+        archived = [
+            f"{scan.source.name}:{source_relative_selector(scan.source, path)}"
+            for scan in scans.values()
+            for path in scan.archived
+            if path.name == value
+        ]
+        if archived:
+            fail(
+                f"unknown source or skill: {value}; deprecated skills require an exact path: {', '.join(archived)}"
+            )
         unsynced = sorted(
             source.name
             for source in sources.values()
@@ -135,29 +154,147 @@ def resolve_skill_reference(
     return (source_name, value)
 
 
+def is_archived_path(path: Path) -> bool:
+    return any(
+        part.casefold() in ARCHIVE_DIRS for part in Path(os.path.normpath(path)).parts
+    )
+
+
+def is_archived_location(path: Path) -> bool:
+    return is_archived_path(path) or is_archived_path(path.resolve())
+
+
+def _linked_directory(path: Path, canonical: Path) -> bool:
+    if os.name != "nt":
+        return path.is_symlink()
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    if not info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    # Cloud files may be reparse points without redirecting the directory.
+    return (
+        info.st_reparse_tag
+        in {stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT}
+        or path.resolve() != canonical
+    )
+
+
+def _iter_skill_dirs(
+    root: Path, skip_roots: set[Path], *, pruned: list[Path] | None
+) -> Iterator[Path]:
+    resolved_root = root.resolve()
+    if any(resolved_root.is_relative_to(skip) for skip in skip_roots):
+        return
+    if pruned is not None and (
+        is_archived_path(root) or is_archived_path(resolved_root)
+    ):
+        pruned.append(root)
+        return
+
+    for current, dirnames, filenames in os.walk(root):
+        parent = Path(current)
+        canonical_parent = resolved_root / parent.relative_to(root)
+        children = []
+        for name in dirnames:
+            child = parent / name
+            canonical = canonical_parent / name
+            if name in SKIP_DISCOVERY_DIRS or _linked_directory(child, canonical):
+                continue
+            # With directory links pruned, descendants share the canonical root.
+            if canonical in skip_roots:
+                continue
+            if pruned is not None and name.casefold() in ARCHIVE_DIRS:
+                pruned.append(child)
+            else:
+                children.append(name)
+        dirnames[:] = children
+        marker = parent / "SKILL.md"
+        if "SKILL.md" in filenames and marker.is_file():
+            location = marker.resolve()
+            if location.is_relative_to(resolved_root) and not any(
+                location.is_relative_to(skip) for skip in skip_roots
+            ):
+                yield parent
+
+
+def _walk_skills(
+    root: Path, skip_roots: set[Path], *, pruned: list[Path] | None
+) -> list[Path]:
+    return sorted(_iter_skill_dirs(root, skip_roots, pruned=pruned), key=str)
+
+
+def source_skill_content(source: Source) -> Literal["active", "archived", "empty"]:
+    """Probe a registered source, stopping at the first skill in either category."""
+    archives: list[Path] = []
+    if next(_iter_skill_dirs(source.path, set(), pruned=archives), None) is not None:
+        return "active"
+    for root in archives:
+        if next(_iter_skill_dirs(root, set(), pruned=None), None) is not None:
+            return "archived"
+    return "empty"
+
+
+class SkillScan:
+    """A command-local inventory. Scan archived subtrees only for diagnostics."""
+
+    def __init__(self, source: Source, skip_roots: set[Path] | None = None):
+        self.source = source
+        self.skip_roots = {path.resolve() for path in (skip_roots or set())}
+        self._archive_roots: list[Path] = []
+        self._explicit_subtrees: dict[Path, list[Path]] = {}
+
+    @cached_property
+    def active(self) -> list[Path]:
+        return _walk_skills(
+            self.source.path, self.skip_roots, pruned=self._archive_roots
+        )
+
+    @cached_property
+    def archived(self) -> list[Path]:
+        # Populate the pruned roots even when diagnostics are requested first.
+        _ = self.active
+        return [
+            path
+            for root in self._archive_roots
+            for path in _walk_skills(root, self.skip_roots, pruned=None)
+        ]
+
+    def paths_under(self, path: Path) -> list[Path]:
+        root = path.resolve()
+        if not self.contains(path) or is_archived_location(path):
+            return []
+        if root == self.source.path.resolve():
+            return self.active
+        # An explicit subtree can be inside a directory normally skipped at the
+        # source root. Preserve scoped discovery there without broadening queries.
+        relative = root.relative_to(self.source.path.resolve())
+        if SKIP_DISCOVERY_DIRS.intersection(relative.parts):
+            if root not in self._explicit_subtrees:
+                self._explicit_subtrees[root] = _walk_skills(
+                    root, self.skip_roots, pruned=[]
+                )
+            return self._explicit_subtrees[root]
+        return [
+            target for target in self.active if target.resolve().is_relative_to(root)
+        ]
+
+    def contains(self, path: Path) -> bool:
+        target = path.resolve()
+        return target.is_relative_to(self.source.path.resolve()) and not any(
+            target.is_relative_to(skip) for skip in self.skip_roots
+        )
+
+
 def discover_skill_dirs(
     root: Path, *, skip_roots: set[Path] | None = None
 ) -> list[Path]:
-    matches: list[Path] = []
-    resolved_skips = {path.resolve() for path in (skip_roots or set())}
-    for current, dirnames, filenames in os.walk(root):
-        current_path = Path(current).resolve()
-        if any(current_path.is_relative_to(skip_root) for skip_root in resolved_skips):
-            dirnames[:] = []
-            continue
-        dirnames[:] = [name for name in dirnames if name not in SKIP_DISCOVERY_DIRS]
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if not any(
-                (Path(current) / name).resolve().is_relative_to(skip_root)
-                for skip_root in resolved_skips
-            )
-        ]
-        if "SKILL.md" not in filenames:
-            continue
-        matches.append(Path(current))
-    return sorted(matches, key=lambda path: str(path))
+    return _walk_skills(root, {path.resolve() for path in skip_roots or ()}, pruned=[])
+
+
+def deprecated_skill_message(source: Source, path: Path) -> str:
+    return f"deprecated skill {source.name}:{source_relative_selector(source, path)} ({path})"
 
 
 def validate_skill_selector(source: Source, selector: str) -> Path:
@@ -186,33 +323,6 @@ def validate_skill_selector(source: Source, selector: str) -> Path:
     return target
 
 
-def discover_skill_links(
-    source: Source,
-    *,
-    prefix: str | None = None,
-    skip_roots: set[Path] | None = None,
-) -> list[tuple[str, Path]]:
-    root = source.path
-    if prefix:
-        root = validate_skill_selector(source, prefix)
-        if not root.exists():
-            fail(f"skill prefix for source {source.name} does not exist: {root}")
-        if (root / "SKILL.md").exists():
-            matches = [root]
-        else:
-            matches = discover_skill_dirs(root, skip_roots=skip_roots)
-    else:
-        matches = discover_skill_dirs(root, skip_roots=skip_roots)
-
-    if not matches:
-        prefix_text = f" under prefix {prefix!r}" if prefix else ""
-        fail(
-            f"no SKILL.md files found in source {source.name}{prefix_text}: {source.path}"
-        )
-
-    return [(target.name, target) for target in matches]
-
-
 def require_unique_link_names(links: list[tuple[str, Path]]) -> None:
     seen: dict[str, Path] = {}
     for name, target in links:
@@ -233,31 +343,97 @@ def workspace_source(workspace_root: Path) -> Source:
     return Source(name="workspace", path=workspace_root, remote=None)
 
 
+def discover_skill_links(
+    source: Source,
+    *,
+    prefix: str | None = None,
+    skip_roots: set[Path] | None = None,
+    scan: SkillScan | None = None,
+    progress: Progress | None = None,
+    warning_context: str = "",
+) -> list[tuple[str, Path]]:
+    scan = scan or SkillScan(source, skip_roots)
+    if prefix is None:
+        matches = [(path.name, path) for path in scan.active]
+        if not matches:
+            if scan.archived:
+                fail(
+                    f"source {source.name} contains only deprecated skills; select an exact skill path"
+                )
+            fail(f"no SKILL.md files found in source {source.name}: {source.path}")
+        return matches
+
+    target = validate_skill_selector(source, prefix)
+    if not target.exists():
+        fail(f"skill prefix for source {source.name} does not exist: {target}")
+    if not scan.contains(target):
+        fail(
+            f"skill selector {prefix!r} is outside source {source.name}'s discovery scope"
+        )
+    marker = target / "SKILL.md"
+    if marker.is_file():
+        if not scan.contains(marker):
+            fail(
+                f"SKILL.md for selector {prefix!r} is outside source {source.name}'s discovery scope"
+            )
+        matches = [(target.name, target)]
+        if is_archived_location(target):
+            emit_event(
+                progress,
+                f"Warning: {warning_context}{deprecated_skill_message(source, target)}",
+                severity="warning",
+            )
+    else:
+        root = target.resolve()
+        if is_archived_path(target) or is_archived_path(root):
+            fail(f"deprecated directory {target}: select an exact skill path")
+        matches = [(path.name, path) for path in scan.paths_under(target)]
+        if not matches:
+            fail(
+                f"no SKILL.md files found in source {source.name} under prefix {prefix!r}: {source.path}"
+            )
+    return matches
+
+
 def resolve_selector(
     source: Source,
     selector: str,
     *,
     skip_roots: set[Path] | None = None,
     allow_name_conflicts: bool = False,
+    scan: SkillScan | None = None,
+    progress: Progress | None = None,
+    warning_context: str = "",
 ) -> list[tuple[str, Path]]:
-    prefix_root = validate_skill_selector(source, selector)
+    target = validate_skill_selector(source, selector)
+    scan = scan or SkillScan(source, skip_roots)
     if selector == "*":
-        links = discover_skill_links(source, skip_roots=skip_roots)
+        matches = discover_skill_links(source, scan=scan)
         if not allow_name_conflicts:
-            require_unique_link_names(links)
-        return links
-
-    if prefix_root.exists():
-        matches = discover_skill_links(source, prefix=selector, skip_roots=skip_roots)
+            require_unique_link_names(matches)
+        return matches
+    if target.exists():
+        matches = discover_skill_links(
+            source,
+            prefix=selector,
+            scan=scan,
+            progress=progress,
+            warning_context=warning_context,
+        )
     else:
-        matches = [
-            (name, path)
-            for name, path in discover_skill_links(source, skip_roots=skip_roots)
-            if name == selector
-        ]
+        matches = [(path.name, path) for path in scan.active if path.name == selector]
         if not matches:
+            archived = [
+                path for path in scan.archived if path.name == Path(selector).name
+            ]
+            hint = ""
+            if archived:
+                paths = ", ".join(
+                    source_relative_selector(source, path) for path in archived
+                )
+                hint = f"; deprecated candidates require an exact path: {paths}"
             fail(
-                f"skill selector {selector!r} for source {source.name} matched no candidates"
+                f"skill selector {selector!r} for source {source.name} matched no candidates{hint}"
             )
 
     if len(matches) > 1 and not allow_name_conflicts:
@@ -535,3 +711,12 @@ def skill_skip_roots(source_name: str, sources: dict) -> set[Path] | None:
     if source_name == "workspace":
         return {source.path for source in sources.values()}
     return None
+
+
+def workspace_skill_scans(
+    root: Path, sources: dict[str, Source]
+) -> dict[str, SkillScan]:
+    return {
+        name: SkillScan(source, skill_skip_roots(name, sources))
+        for name, source in {"workspace": workspace_source(root), **sources}.items()
+    }

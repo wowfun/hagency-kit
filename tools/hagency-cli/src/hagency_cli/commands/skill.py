@@ -32,6 +32,7 @@ skill_app = make_app(
     editable-installed Hagency Kit checkout. --checkout-dir affects source
     discovery; installation destinations resolve from the invocation directory.
 
+    Discovery skips archive, archived and deprecated directory segments.
     Sync sources first when you need updated content. Installation obtains only
     missing checkouts. Discovery is not an installed-skill inventory, and there
     is no uninstall or installation tracking.
@@ -167,6 +168,9 @@ def skill_add_cli(
     Installation uses symlinks, or junctions on Windows, and refuses to overwrite
     independent directories. Existing links of the selected type may be retargeted.
 
+    Discovery skips archived, archive and deprecated directories (case-insensitive).
+    An exact path to an archived SKILL.md directory can be installed with a warning.
+
     Repeat --skill for source-relative selectors or use --all; they are mutually
     exclusive and cannot accompany an exact skill input. Selectors must stay inside
     the source. One discovered skill installs directly; multiple skills need TTY
@@ -264,6 +268,8 @@ def skill_list_cli(
     skills. --profile restricts discovery to that profile's selectors. Filters
     can be combined. Output columns are source, name, selector, and path.
 
+    Discovery excludes archived, archive and deprecated directories. A profile
+    can explicitly select an exact archived skill path and receive a warning.
     This is a discovery view, not an installed-skill inventory. It does not fetch
     missing checkouts; run hgc source sync to obtain or refresh remote sources.
 

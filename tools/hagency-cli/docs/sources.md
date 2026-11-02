@@ -16,7 +16,9 @@ hgc source sync --profile dev --slice 1,3:
 
 `source add` requires an existing workspace. Pass a name with `--path` for a local source, a name with `--url` for a remote source, or a Git URL to infer the name. If that name is occupied, URL inference tries `owner/repo`; `--name` overrides inference. `--ref` and `--remote-name` require a remote URL. `--sync` writes the registry first and then synchronizes; a sync failure retains the registration. `--dry-run` previews both stages without fetching or writing.
 
-`source list` prints name, type, resolved path, URL, and ref. `source show NAME` prints one source's configured and resolved values. Both read local configuration without fetching missing checkouts.
+`source list` prints name, type, resolved path, URL, and ref. `source show NAME` prints one source's configured and resolved values. Both inspect local content and send warnings to stderr. Inspection stops at the first active skill. Proving that a source is empty or contains only archived skills can require walking the full checkout. A missing remote checkout includes a sync command. Other diagnostics distinguish missing local paths, non-directories, empty sources and deprecated sources. A source is deprecated if its path contains an archive directory segment or it contains only archived skills. A mixed source with active skills is healthy.
+
+A malformed source entry produces a warning in `list` while valid entries still appear. `show` resolves only the named entry and exits with an error if that entry is malformed. Invalid TOML or shared defaults prevent either command from proceeding.
 
 With no names or `--profile`, sync selects all configured sources; explicit names and profile sources combine. Local source paths are checked without fetching. `--slice/-s` applies after selection using 1-based indexes and inclusive ranges such as `4:`, `2:4`, `:3`, or `1,3:`. Failures are reported per source while other selected sources continue. Retry failed names or slices; no resume state is saved. Transient Git network failures are retried automatically, with a five-minute deadline per Git command.
 

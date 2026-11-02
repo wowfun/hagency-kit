@@ -9,7 +9,14 @@ from hagency_cli.commands.completion import (
     complete_profile,
     complete_source,
 )
-from hagency_cli.commands.shared import command_errors, die, make_app, render_event
+from hagency_cli.commands.shared import (
+    command_errors,
+    diagnostic,
+    die,
+    make_app,
+    render_event,
+)
+from hagency_cli.workspace.catalog import source_health_warning
 from hagency_cli.workspace.context import (
     load_registry,
     load_sources,
@@ -51,9 +58,14 @@ def source_kind(source) -> str:
 
 def source_list_command(*, root_value: str | None, checkout_dir: str | None) -> None:
     root = workspace_root_arg(root_value)
-    sources = load_sources(root, checkout_dir)
+    invalid: dict[str, str] = {}
+    sources = load_sources(root, checkout_dir, invalid=invalid)
+    for name, issue in invalid.items():
+        diagnostic(f"Warning: invalid source {name}: {issue}", "warning")
     print("name\ttype\tpath\turl\tref")
     for name, source in sources.items():
+        if issue := source_health_warning(source):
+            diagnostic(f"Warning: {issue}", "warning")
         remote = source.remote
         print(
             "\t".join(
@@ -73,10 +85,14 @@ def source_show_command(
 ) -> None:
     root = workspace_root_arg(root_value)
     registry = load_registry(root)
-    sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
+    sources = resolve_sources(
+        registry, repo_root=root, checkout_override=checkout_dir, only=name
+    )
     source = sources.get(name)
     if source is None:
         die(f"unknown source: {name}")
+    if issue := source_health_warning(source):
+        diagnostic(f"Warning: {issue}", "warning")
     raw_source = raw_source_by_name(registry, name) or {}
     remote = source.remote
     raw_remote = raw_source.get("remote") or {}
@@ -118,7 +134,8 @@ def source_list_cli(
 
     Requires a Hagency workspace. Output columns are name, type, path, url, and
     ref; local sources use '-' for remote fields. Missing checkouts can still be
-    listed. --checkout-dir changes path resolution for this invocation only.
+    listed. Invalid entries, unavailable paths, empty or deprecated sources warn
+    on stderr. --checkout-dir changes path resolution for this invocation only.
     This command does not fetch repositories or edit the registry.
 
     \b
@@ -155,7 +172,8 @@ def source_show_cli(
     """Show one configured source and its resolved path.
 
     Requires a registered source in a Hagency workspace. Prints local/remote
-    settings without fetching the checkout or editing the configuration.
+    settings and reports local availability, empty sources and deprecation on
+    stderr. An invalid selected entry fails. This checks only the named source.
     --checkout-dir overrides checkout discovery for this invocation only.
 
     \b

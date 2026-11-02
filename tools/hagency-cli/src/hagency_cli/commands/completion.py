@@ -16,6 +16,7 @@ from hagency_cli.workspace.discovery import (
     resolve_workspace_root,
     workspace_config_path,
 )
+from hagency_cli.workspace.skills import is_archived_location
 from hagency_cli.workspace.source_inputs import (
     classify_skill_input,
     is_explicit_path,
@@ -180,7 +181,7 @@ def complete_profile(ctx: typer.Context, incomplete: str) -> list[tuple[str, str
 
 def complete_skill_add(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
     if is_explicit_path(incomplete):
-        return complete_directory(incomplete)
+        return _complete_path(incomplete, directories_only=True, skills_only=True)
     catalog = _quiet_catalog(ctx)
     if catalog is None:
         return []
@@ -273,7 +274,9 @@ def complete_file(incomplete: str) -> list[tuple[str, str]]:
     return _complete_path(incomplete, directories_only=False)
 
 
-def _complete_path(incomplete: str, *, directories_only: bool) -> list[tuple[str, str]]:
+def _complete_path(
+    incomplete: str, *, directories_only: bool, skills_only: bool = False
+) -> list[tuple[str, str]]:
     raw = incomplete or "./"
     expanded = expand_path(raw, Path.cwd())
     directory = expanded if raw.endswith(("/", "\\")) else expanded.parent
@@ -285,6 +288,7 @@ def _complete_path(incomplete: str, *, directories_only: bool) -> list[tuple[str
                 for child in directory.iterdir()
                 if (not directories_only or child.is_dir())
                 and child.name.startswith(name_prefix)
+                and (not skills_only or not is_archived_location(child))
             ),
             key=lambda child: child.name,
         )

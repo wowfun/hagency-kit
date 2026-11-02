@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -164,9 +165,25 @@ def resolve_local_input(
     registry: dict,
     root: Path,
 ) -> SourceSelection:
-    path = expand_path(value, cwd).resolve()
+    input_path = expand_path(value, cwd)
+    path = input_path.resolve()
     if not path.is_dir():
         fail(f"local source is not a directory: {path}")
+    # Check the source named by the input before a directory link can make the
+    # resolved path appear to belong to another source (or a new registration).
+    logical_path = Path(os.path.abspath(input_path))
+    owners = [
+        (len(prefix.parts), source)
+        for source in (Source("workspace", root, None), *sources.values())
+        for prefix in {source.path, source.path.resolve()}
+        if logical_path.is_relative_to(prefix)
+    ]
+    if owners:
+        _, owner = max(owners, key=lambda entry: entry[0])
+        if not path.is_relative_to(owner.path.resolve()):
+            fail(
+                f"local path {input_path} resolves outside source {owner.name}: {path}"
+            )
     matches = [
         source
         for source in sources.values()
@@ -176,12 +193,12 @@ def resolve_local_input(
         if source_name == "workspace":
             if not path.is_relative_to(root.resolve()):
                 fail(f"local path is outside workspace: {path}")
-            return SourceSelection(Source("workspace", root, None), path)
+            return SourceSelection(Source("workspace", root, None), input_path)
         validate_source_name(source_name)
         if source_name in sources:
             if sources[source_name] not in matches:
                 fail(f"local path is outside source {source_name}: {path}")
-            return SourceSelection(sources[source_name], path)
+            return SourceSelection(sources[source_name], input_path)
     elif matches:
         depth = max(len(source.path.resolve().parts) for source in matches)
         matches = [
@@ -193,13 +210,14 @@ def resolve_local_input(
                 + ", ".join(s.name for s in matches)
                 + "; use --source-name"
             )
-        return SourceSelection(matches[0], path)
+        return SourceSelection(matches[0], input_path)
     elif path.is_relative_to(root.resolve()):
-        return SourceSelection(Source("workspace", root, None), path)
-    return _new_source(
+        return SourceSelection(Source("workspace", root, None), input_path)
+    selection = _new_source(
         name=source_name or path.name,
         entry={"path": str(path)},
         registry=registry,
         root=root,
         checkout_dir=None,
     )
+    return SourceSelection(selection.source, input_path, selection.new_entry)

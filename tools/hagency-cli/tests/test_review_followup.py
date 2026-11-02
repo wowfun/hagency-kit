@@ -27,7 +27,8 @@ from hagency_cli.files.sync.models import FileSyncError, SyncDirection
 from hagency_cli.files.sync.operations import sync_workspace_files
 from hagency_cli.files.sync.sftp import SFTPRemote
 from hagency_cli.workspace import git
-from hagency_cli.workspace.catalog import list_profile_selected_links
+from hagency_cli.workspace.catalog import list_profile_selected_links, source_health_warning
+from hagency_cli.workspace.skills import SkillScan
 from hagency_cli.workspace.config import read_toml, write_toml
 from hagency_cli.workspace.errors import SourceBatchError, WorkspaceError
 from hagency_cli.workspace.operations.skills import add_skills
@@ -240,6 +241,25 @@ class ReviewFollowupTests(unittest.TestCase):
             write_toml(config, {"skill": {"demo": {"include": [None]}}})
         self.assertEqual(config.read_text(), "name = 'original'\n")
         self.assertFalse((self.root / ".config.toml.tmp").exists())
+
+    def test_discovery_resolves_markers_without_resolving_each_plain_directory(self):
+        for index in range(24):
+            (self.root / str(index) / "nested").mkdir(parents=True)
+        (self.root / "0/SKILL.md").write_text("demo")
+        source = Source("fixture", self.root, None)
+        with mock.patch.object(Path, "resolve", autospec=True, side_effect=Path.resolve) as resolve:
+            self.assertEqual(SkillScan(source).active, [self.root / "0"])
+        self.assertLess(resolve.call_count, 5)
+
+    def test_source_health_stops_at_first_active_skill(self):
+        (self.root / "SKILL.md").write_text("demo")
+
+        def walk(root):
+            yield str(root), [], ["SKILL.md"]
+            self.fail("scanned past an active skill")
+
+        with mock.patch("hagency_cli.workspace.skills.os.walk", walk):
+            self.assertIsNone(source_health_warning(Source("fixture", self.root, None)))
 
     def test_empty_profile_include_retains_existing_all_skills_semantics(self):
         skill = self.root / "demo"

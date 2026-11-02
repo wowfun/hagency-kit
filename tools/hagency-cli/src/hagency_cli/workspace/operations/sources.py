@@ -4,7 +4,6 @@ import subprocess
 
 from hagency_cli.workspace.config import render_toml, write_toml
 from hagency_cli.workspace.context import (
-    default_sync_depth,
     load_registry,
     workspace_root_arg,
 )
@@ -27,6 +26,7 @@ from hagency_cli.workspace.sources import (
     SourceSyncError,
     add_source_entry,
     build_source_entry,
+    default_sync_depth,
     infer_owner_source_name_from_url,
     is_git_url,
     raw_source_by_name,

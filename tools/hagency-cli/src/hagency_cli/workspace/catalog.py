@@ -8,13 +8,19 @@ from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.skills import (
     discover_skill_dirs,
     discover_skill_links,
+    is_archived_location,
     resolve_selector,
     skill_skip_roots,
     skill_source,
     source_relative_selector,
+    source_skill_content,
     workspace_source,
 )
-from hagency_cli.workspace.sources import Source, require_source_path
+from hagency_cli.workspace.sources import (
+    Source,
+    require_source_path,
+    source_path_warning,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,20 @@ def catalog_entry(
 ) -> SkillCatalogEntry:
     selector = source_relative_selector(source, target)
     return SkillCatalogEntry(source_name, name, selector, target.resolve())
+
+
+def source_health_warning(source: Source) -> str | None:
+    path = source.path
+    if unavailable := source_path_warning(source):
+        return unavailable
+    if is_archived_location(path):
+        return f"deprecated source {source.name} is under an archive directory: {path}"
+    content = source_skill_content(source)
+    if content == "active":
+        return None
+    if content == "archived":
+        return f"deprecated source {source.name} contains only archived skills: {path}"
+    return f"source {source.name} contains no SKILL.md files: {path}"
 
 
 def list_all_skill_rows(

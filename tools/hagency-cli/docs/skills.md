@@ -11,6 +11,8 @@ hgc skill list --source repo --root ./kit
 hgc skill list --profile dev
 ```
 
+Discovery skips entire directory segments named `archive`, `archived` or `deprecated`, ignoring case. Names such as `archive-tools` remain discoverable. Bare names, subtrees, `--all`, interactive pickers and completion use the same rule. To install an archived skill, give its exact directory, for example `hgc skill add workspace:skills/deprecated/git-collab-flow`. This emits a warning. Shell completion omits archived paths, so type or paste the exact directory. Pointing at an archive parent does not select its descendants.
+
 Repeat `--source` to narrow discovery; it can be combined with `--profile`. Output columns are source, name, selector, and path. Run `source sync` before discovery when remote content is missing or needs updating. Installation uses the [destination rules](configuration.md#installation-destinations).
 
 ```sh

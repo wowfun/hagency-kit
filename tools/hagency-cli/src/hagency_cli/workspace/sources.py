@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Any
 from urllib.parse import urlparse, urlsplit
 
 from hagency_cli.paths import expand_path
-from hagency_cli.workspace.errors import SourceNotReadyError, fail
+from hagency_cli.workspace.errors import SourceNotReadyError, WorkspaceError, fail
 from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.git import git_ok, git_process, run
 
@@ -45,6 +46,15 @@ class Source:
     remote: Remote | None
 
 
+def default_sync_depth(registry: dict) -> int | None:
+    depth = registry.get("defaults", {}).get("depth")
+    if depth is None:
+        return None
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth <= 0:
+        fail("defaults.depth must be a positive integer")
+    return depth
+
+
 def configured_checkout_dir(
     defaults: dict,
     *,
@@ -59,7 +69,12 @@ def configured_checkout_dir(
 
 
 def resolve_sources(
-    registry: dict, *, repo_root: Path, checkout_override: str | None
+    registry: dict,
+    *,
+    repo_root: Path,
+    checkout_override: str | None,
+    only: str | None = None,
+    invalid: dict[str, str] | None = None,
 ) -> dict[str, Source]:
     if "sources" in registry:
         fail("legacy [[sources]] config is no longer supported; use [source.<name>]")
@@ -80,54 +95,75 @@ def resolve_sources(
     checkout_dir = (
         expand_path(checkout_dir_value, repo_root) if checkout_dir_value else None
     )
+    default_sync_depth(registry)
     default_remote_name = defaults.get("remote_name", "origin")
     default_remote_ref = defaults.get("remote_ref", "main")
 
     sources: dict[str, Source] = {}
     for name, raw_source in source_entries.items():
-        if name in sources:
-            fail(f"duplicate source name: {name}")
-
-        if not isinstance(raw_source, dict):
-            fail(f"source {name} must be a table")
-        if "path" in raw_source and not isinstance(raw_source["path"], str):
-            fail(f"source {name} path must be a string")
-        raw_remote = raw_source.get("remote")
-        if raw_remote is not None:
-            if not isinstance(raw_remote, dict):
-                fail(f"source {name} remote must be a table")
-            for field in ("url", "name", "ref"):
-                if field in raw_remote and not isinstance(raw_remote[field], str):
-                    fail(f"source {name} remote.{field} must be a string")
-        remote = None
-        if raw_remote:
-            url = raw_remote.get("url")
-            if not url:
-                fail(f"source {name} remote is missing required field: url")
-            validate_git_url(url, allow_local=True)
-            remote = Remote(
-                name=raw_remote.get("name") or default_remote_name,
-                url=url,
-                ref=raw_remote.get("ref") or default_remote_ref,
+        if only is not None and name != only:
+            continue
+        try:
+            sources[name] = _resolve_source(
+                name,
+                raw_source,
+                repo_root,
+                checkout_dir,
+                default_remote_name,
+                default_remote_ref,
             )
+        except WorkspaceError as exc:
+            if invalid is None:
+                raise
+            invalid[name] = str(exc)
+    return sources
 
-        raw_path = raw_source.get("path")
-        if raw_path:
-            path = expand_path(raw_path, repo_root)
-        elif remote and checkout_dir:
-            path = checkout_dir / name
-        else:
-            fail(
-                f"source {name} needs path, or remote plus a configured checkout directory"
-            )
 
-        sources[name] = Source(
-            name=name,
-            path=path,
-            remote=remote,
+def _resolve_source(
+    name: str,
+    raw_source: object,
+    repo_root: Path,
+    checkout_dir: Path | None,
+    default_remote_name: str,
+    default_remote_ref: str,
+) -> Source:
+    validate_source_name(name)
+    if not isinstance(raw_source, dict):
+        fail(f"source {name} must be a table")
+    if "path" in raw_source and not isinstance(raw_source["path"], str):
+        fail(f"source {name} path must be a string")
+    if "\0" in raw_source.get("path", ""):
+        fail(f"source {name} path contains a null character")
+    raw_remote = raw_source.get("remote")
+    if raw_remote is not None:
+        if not isinstance(raw_remote, dict):
+            fail(f"source {name} remote must be a table")
+        for field in ("url", "name", "ref"):
+            if field in raw_remote and not isinstance(raw_remote[field], str):
+                fail(f"source {name} remote.{field} must be a string")
+    remote = None
+    if raw_remote is not None:
+        url = raw_remote.get("url")
+        if not url:
+            fail(f"source {name} remote is missing required field: url")
+        validate_git_url(url, allow_local=True)
+        remote = Remote(
+            name=raw_remote.get("name") or default_remote_name,
+            url=url,
+            ref=raw_remote.get("ref") or default_remote_ref,
         )
 
-    return sources
+    raw_path = raw_source.get("path")
+    if raw_path:
+        path = expand_path(raw_path, repo_root)
+    elif remote and checkout_dir:
+        path = checkout_dir / name
+    else:
+        fail(
+            f"source {name} needs path, or remote plus a configured checkout directory"
+        )
+
+    return Source(name, path, remote)
 
 
 def raw_source_by_name(registry: dict, name: str) -> dict | None:
@@ -575,6 +611,17 @@ def sync_source(
         dry_run=dry_run,
         progress=progress,
     )
+
+
+def source_path_warning(source: Source) -> str | None:
+    if not source.path.exists():
+        if source.remote:
+            command = shlex.join(["hgc", "source", "sync", source.name])
+            return f"source {source.name} is not synced: {source.path}; run: {command}"
+        return f"missing local source {source.name}: {source.path}"
+    if not source.path.is_dir():
+        return f"source {source.name} is not a directory: {source.path}"
+    return None
 
 
 def require_source_path(source: Source) -> None:

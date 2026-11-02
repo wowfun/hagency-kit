@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from hagency_cli.workspace.config import write_toml
-from hagency_cli.workspace.context import default_sync_depth, load_registry
+from hagency_cli.workspace.context import load_registry
 from hagency_cli.workspace.discovery import (
     resolve_workspace_root,
     workspace_config_path,
@@ -24,17 +24,20 @@ from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.skills import (
     SkillConflictUI,
     SkillLinkCandidate,
-    validate_skills_dir,
+    SkillScan,
     default_link_mode,
-    discover_skill_dirs,
     install_skill,
+    is_archived_location,
     resolve_link_name_conflicts,
     resolve_selector,
     resolve_skill_install_dir,
     resolve_skill_reference,
     skill_skip_roots,
     skill_source,
+    source_relative_selector,
     validate_skill_selector,
+    validate_skills_dir,
+    workspace_skill_scans,
     workspace_source,
 )
 from hagency_cli.workspace.source_inputs import (
@@ -47,6 +50,7 @@ from hagency_cli.workspace.sources import (
     Source,
     SourceSyncError,
     add_source_entry,
+    default_sync_depth,
     require_source_path,
     resolve_sources,
     sync_source,
@@ -121,39 +125,46 @@ def _select_candidates(
     selectors: tuple[str, ...],
     all_skills: bool,
     exact: str | None,
-    sources: dict[str, Source],
+    scan: SkillScan,
     ui: SkillSelectionUI | None,
     dry_run: bool,
     progress: Progress | None,
 ) -> tuple[SkillLinkCandidate, ...]:
     source = selection.source
-    skip = skill_skip_roots(source.name, sources)
     if exact is not None:
-        links = resolve_selector(source, exact, skip_roots=skip)
+        links = resolve_selector(source, exact, scan=scan, progress=progress)
         if len(links) != 1:
             fail(
                 f"skill reference {source.name + ':' + exact!r} matched {len(links)} skills; choose one exact SOURCE:selector"
             )
         return (SkillLinkCandidate(links[0][0], source.name, links[0][1]),)
     scope = selection.scope_root.resolve()
+    available_paths = scan.paths_under(selection.scope_root)
     available = tuple(
-        SkillLinkCandidate(path.name, source.name, path)
-        for path in discover_skill_dirs(scope, skip_roots=skip)
+        SkillLinkCandidate(path.name, source.name, path) for path in available_paths
     )
-    if not available:
-        fail(f"no SKILL.md files found in source {source.name}: {scope}")
     if selectors:
         selected = []
-        allowed = {candidate.target.resolve() for candidate in available}
+        allowed = {path.resolve() for path in available_paths}
         for selector in selectors:
             for name, path in resolve_selector(
-                source, selector, skip_roots=skip, allow_name_conflicts=True
+                source,
+                selector,
+                scan=scan,
+                allow_name_conflicts=True,
+                progress=progress,
             ):
-                if path.resolve() not in allowed:
+                target = path.resolve()
+                archived = is_archived_location(path)
+                if not target.is_relative_to(scope) or (
+                    target not in allowed and not archived
+                ):
                     fail(
                         f"skill selector {selector!r} is outside the input directory: {scope}"
                     )
                 selected.append(SkillLinkCandidate(name, source.name, path))
+    elif not available:
+        fail(f"no SKILL.md files found in source {source.name}: {scope}")
     elif all_skills or len(available) == 1:
         selected = list(available)
     elif dry_run:
@@ -225,6 +236,7 @@ def add_skills(
         skills_path, skills_root, global_install, cwd, default_root=cwd
     )
     validate_skills_dir(destination)
+    scans = workspace_skill_scans(root, sources)
     parsed = classify_skill_input(skill, sources)
     exact = parsed.selector
     if parsed.kind in {"selector", "name"} and (selectors or all_skills):
@@ -233,7 +245,7 @@ def add_skills(
         if source_name is not None:
             fail("--source-name is only supported with a URL or local path")
         if parsed.kind == "name":
-            name, exact = resolve_skill_reference(skill, sources, root)
+            name, exact = resolve_skill_reference(skill, sources, root, scans=scans)
         else:
             name = parsed.value
         source = skill_source(name, sources, workspace_source(root))
@@ -308,12 +320,30 @@ def add_skills(
     require_source_path(source)
     if ref is not None:
         _check_requested_ref(source, ref)
+    # A local directory naming the archived skill itself is an exact selection.
+    if (
+        parsed.kind == "path"
+        and not selectors
+        and is_archived_location(selection.scope_root)
+        and (selection.scope_root / "SKILL.md").is_file()
+    ):
+        if selection.scope_root.is_relative_to(source.path):
+            exact = selection.scope_root.relative_to(source.path).as_posix()
+        else:
+            exact = source_relative_selector(source, selection.scope_root)
+            if not is_archived_location(source.path / exact):
+                emit_event(
+                    progress,
+                    f"Warning: deprecated skill path {selection.scope_root}",
+                    severity="warning",
+                )
     selected = _select_candidates(
         selection,
         selectors=selectors,
         all_skills=all_skills,
         exact=exact,
-        sources=sources,
+        scan=scans.get(source.name)
+        or SkillScan(source, skill_skip_roots(source.name, sources)),
         ui=ui,
         dry_run=dry_run,
         progress=progress,

@@ -413,6 +413,18 @@ def git_query_timeout() -> float:
     return min(10, remaining)
 
 
+def git_index_key(name: bytes | str) -> bytes:
+    # An index may also contain byte names that cannot be checked out on Windows.
+    if os.name != "nt":
+        return os.fsencode(name)
+    raw = name.encode("utf-8", "surrogatepass") if isinstance(name, str) else name
+    return (
+        raw.decode("utf-8", "surrogateescape")
+        .casefold()
+        .encode("utf-8", "surrogateescape")
+    )
+
+
 def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | None]:
     try:
         checkpoint()
@@ -432,7 +444,7 @@ def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | N
                 "ls-files",
                 "-z",
                 "--",
-                relative,
+                *([] if os.name == "nt" else [relative]),
             ],
             capture_output=True,
             check=False,
@@ -448,6 +460,11 @@ def _git_tracked_state(path: Path, git_root: Path) -> tuple[bool | None, str | N
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         return None, detail or f"git exited with {result.returncode}"
+    if os.name == "nt" and relative != ".":
+        name = git_index_key(relative)
+        prefix = name + b"/"
+        tracked = (git_index_key(raw) for raw in result.stdout.split(b"\0") if raw)
+        return any(item == name or item.startswith(prefix) for item in tracked), None
     return bool(result.stdout), None
 
 
@@ -472,7 +489,9 @@ def _measure_candidate(
             checkpoint()
             info = current.stat(follow_symlinks=False)
             if not info.st_ino:
-                raise OSError(f"stable filesystem identity is unavailable for {current}")
+                raise OSError(
+                    f"stable filesystem identity is unavailable for {current}"
+                )
             if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
                 return (
                     None,

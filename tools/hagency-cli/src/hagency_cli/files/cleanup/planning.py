@@ -153,7 +153,11 @@ class PlanningSession:
                     # One byte string per index record, without materializing all
                     # parent directories. Prefix queries use the sorted file list.
                     tracked = tuple(
-                        sorted(raw for raw in result.stdout.split(b"\0") if raw)
+                        sorted(
+                            inspection.git_index_key(raw)
+                            for raw in result.stdout.split(b"\0")
+                            if raw
+                        )
                     )
                     inspection.checkpoint()
                     self.tracked[root] = (tracked, None)
@@ -168,7 +172,7 @@ class PlanningSession:
         relative = path.relative_to(root).as_posix()
         if relative == ".":
             return bool(tracked), None
-        name = os.fsencode(relative)
+        name = inspection.git_index_key(relative)
         index = bisect_left(tracked, name)
         if index < len(tracked) and tracked[index] == name:
             return True, None

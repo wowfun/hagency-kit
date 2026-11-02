@@ -242,9 +242,9 @@ match = 'glob="*.bin" & file_size >= 0'
 
     def test_git_cache_preserves_literal_names_and_worktree_index(self):
         root = self.base / "repo-files"
-        special = self.file(root / "[x]*.bin")
+        special = self.file(root / ("[x].bin" if os.name == "nt" else "[x]*.bin"))
         other = self.file(root / "x-file.bin")
-        newline = self.file(root / "line\nbreak.bin")
+        spaced = self.file(root / ("line break.bin" if os.name == "nt" else "line\nbreak.bin"))
         self.git(root, "init", "-q")
         self.git(root, "add", "--all")
         self.git(
@@ -261,15 +261,33 @@ match = 'glob="*.bin" & file_size >= 0'
         self.git(root, "worktree", "add", "--detach", str(worktree))
         with planning.planning_session(0, None) as session:
             for repository in (root, worktree):
-                for name in (special.name, other.name, newline.name):
+                for name in (special.name, other.name, spaced.name):
                     self.assertEqual(
                         session.git_tracked(repository / name, repository), (True, None)
                     )
+                if os.name == "nt":
+                    alternate = repository / other.name.upper()
+                    self.assertEqual(session.git_tracked(alternate, repository), (True, None))
+                    self.assertEqual(inspection._git_tracked_state(alternate, repository), (True, None))
                 self.assertEqual(
                     session.git_tracked(repository / "unknown.bin", repository),
                     (False, None),
                 )
             self.assertEqual(session.git_queries, 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows index case matching")
+    def test_windows_git_protection_accepts_foreign_index_byte_names(self):
+        root = self.base / "foreign-index"
+        tracked = self.file(root / "MiXeD.txt")
+        self.git(root, "init", "-q")
+        self.git(root, "add", tracked.name)
+        blob = self.git(root, "rev-parse", f":{tracked.name}").stdout.strip()
+        subprocess.run(["git", "-C", str(root), "update-index", "-z", "--index-info"],
+                       input=b"100644 " + blob + b"\t\xff.bin\0", check=True)
+        with planning.planning_session(0, None) as session:
+            for lookup in (session.git_tracked, inspection._git_tracked_state):
+                self.assertEqual(lookup(root / "mixed.txt", root), (True, None))
+                self.assertEqual(lookup(root / "other.txt", root), (False, None))
 
     def test_git_failure_is_cached_and_never_allows_candidates(self):
         target = self.file(self.base / "git/a.bin")

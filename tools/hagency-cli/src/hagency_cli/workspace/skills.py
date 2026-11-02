@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -339,7 +340,14 @@ def default_link_mode() -> str:
 
 
 def is_junction(path: Path) -> bool:
-    return hasattr(path, "is_junction") and path.is_junction()
+    if hasattr(path, "is_junction"):
+        return path.is_junction()
+    if os.name != "nt":
+        return False
+    try:
+        return path.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 def junction_failure_message(link: Path, target: Path, error: BaseException) -> str:
@@ -376,8 +384,9 @@ def create_windows_junction(link: Path, target: Path) -> None:
 
 def validate_skills_dir(skills_dir: Path) -> None:
     for candidate in (skills_dir, *skills_dir.parents):
-        if candidate.is_symlink() and not candidate.exists():
-            fail(f"skills destination is a broken symlink: {candidate}")
+        if not candidate.exists() and os.path.lexists(candidate):
+            kind = "junction" if is_junction(candidate) else "symlink"
+            fail(f"skills destination is a broken {kind}: {candidate}")
         if candidate.exists():
             if not candidate.is_dir():
                 fail(f"skills destination is not a directory: {candidate}")
@@ -407,7 +416,7 @@ def install_skill(
     link = skills_dir / name
 
     if link_mode == "copy":
-        if link.is_symlink() or link.exists():
+        if os.path.lexists(link):
             fail(f"refusing to overwrite existing skill destination: {link}")
         emit_event(progress, f"copy {real_target} -> {link}")
         if not dry_run:

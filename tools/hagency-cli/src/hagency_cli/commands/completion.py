@@ -291,12 +291,13 @@ def _complete_path(incomplete: str, *, directories_only: bool) -> list[tuple[str
     except OSError:
         return []
 
-    raw_parent = raw if raw.endswith(("/", "\\")) else str(Path(raw).parent)
-    if raw_parent == ".":
-        raw_parent = ""
+    # Keep the typed prefix (including "./") and use slash for Bash on Windows.
+    separator = "/" if os.environ.get("_HGC_COMPLETE") == "complete_bash" else os.sep
+    end = max(raw.rfind("/"), raw.rfind("\\") if os.name == "nt" else -1) + 1
+    prefix = raw[:end] if incomplete else ""
     return [
         (
-            str(Path(raw_parent) / child.name) + (os.sep if child.is_dir() else ""),
+            prefix + child.name + (separator if child.is_dir() else ""),
             "directory" if child.is_dir() else "file",
         )
         for child in children

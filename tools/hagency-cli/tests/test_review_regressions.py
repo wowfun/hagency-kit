@@ -21,9 +21,9 @@ from typer.testing import CliRunner
 
 
 if __package__:
-    from .support import LocalSFTPRemote
+    from .support import LocalSFTPRemote, directory_link
 else:
-    from support import LocalSFTPRemote
+    from support import LocalSFTPRemote, directory_link
 
 
 class ReviewRegressionTests(unittest.TestCase):
@@ -56,7 +56,7 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_selector_rejects_parent_absolute_and_symlink_escapes(self):
         outside = self.skill(self.root / "secret")
-        (self.source / "escape").symlink_to(outside, target_is_directory=True)
+        directory_link(self.source / "escape", outside)
         source = Source("local", self.source, None)
         for selector in (
             "../secret",
@@ -72,7 +72,7 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_selectors_keep_nested_and_internal_symlink_paths_working(self):
         inside = self.skill(self.source / "nested/inside")
-        (self.source / "alias").symlink_to(inside, target_is_directory=True)
+        directory_link(self.source / "alias", inside)
         source = Source("local", self.source, None)
         for selector in ("inside", "nested/inside", "./nested/inside", "alias"):
             with self.subTest(selector=selector):

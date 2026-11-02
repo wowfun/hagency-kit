@@ -104,9 +104,9 @@ class FakeRemote:
 
 
 if __package__:
-    from .support import LocalSFTPAdapter, LocalSFTPRemote
+    from .support import LocalSFTPAdapter, LocalSFTPRemote, file_symlink, try_file_symlink
 else:
-    from support import LocalSFTPAdapter, LocalSFTPRemote
+    from support import LocalSFTPAdapter, LocalSFTPRemote, file_symlink, try_file_symlink
 
 
 class FileSyncTests(unittest.TestCase):
@@ -1092,7 +1092,7 @@ class FileSyncTests(unittest.TestCase):
         (self.root / "keep" / "drop.tmp").write_text("x", encoding="utf-8")
         (self.root / ".git").mkdir()
         (self.root / ".git" / "config").write_text("x", encoding="utf-8")
-        os.symlink("keep/a.txt", self.root / "link")
+        file_symlink(self.root / "link", "keep/a.txt")
 
         result = scan_local(self.root, IgnoreMatcher((".git", "*.tmp", ".vscode")))
 
@@ -1102,7 +1102,7 @@ class FileSyncTests(unittest.TestCase):
         )
         self.assertEqual(result.entries[PurePosixPath("link")].kind, EntryKind.SYMLINK)
         self.assertEqual(
-            result.entries[PurePosixPath("link")].link_target, "keep/a.txt"
+            result.entries[PurePosixPath("link")].link_target, os.readlink(self.root / "link")
         )
 
     def test_local_scanner_keeps_negated_child_when_parent_is_traversable(
@@ -1575,19 +1575,13 @@ class FileSyncTests(unittest.TestCase):
             """
         )
 
-        sync_workspace_files(
-            self.root,
-            SyncDirection.LOCAL_TO_REMOTE,
-            remote_factory=lambda config: LocalSFTPRemote(config, remote_store),
-        )
-
-        self.assertEqual(
-            stat.S_IMODE((remote_store / "ancestor").stat().st_mode), 0o750
-        )
-        self.assertEqual(
-            stat.S_IMODE((remote_store / "ancestor" / "remote").stat().st_mode),
-            0o750,
-        )
+        remote = LocalSFTPRemote(load_sftp_config(self.root), remote_store)
+        with mock.patch.object(remote.adapter, "chmod", wraps=remote.adapter.chmod) as chmod:
+            sync_workspace_files(self.root, SyncDirection.LOCAL_TO_REMOTE, remote_factory=lambda config: remote)
+        for directory in ("/ancestor", "/ancestor/remote"):
+            self.assertIn(mock.call(directory, 0o750), chmod.call_args_list)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE((remote_store / directory.lstrip("/")).stat().st_mode), 0o750)
 
     def test_remote_directory_creation_omits_none_mode(self) -> None:
         self.write_config('{"name":"default-mode","host":"host","remotePath":"/new"}')
@@ -2154,7 +2148,7 @@ class FileSyncTests(unittest.TestCase):
         binary.write_bytes(b"\x00\x01\xff")
         mtime_ns = 1_700_000_000_123_456_789
         os.utime(script, ns=(mtime_ns, mtime_ns))
-        (source / "shortcut").symlink_to("nested/run.sh")
+        has_link = try_file_symlink(source / "shortcut", "nested/run.sh")
         bundle = self.root / "full.zip"
         messages: list[str] = []
 
@@ -2174,11 +2168,9 @@ class FileSyncTests(unittest.TestCase):
 
         self.assertEqual(
             report.manifest.skipped_symlinks,
-            (PurePosixPath("shortcut"),),
+            (PurePosixPath("shortcut"),) if has_link else (),
         )
-        self.assertTrue(
-            any("Warning: skipped symlink: shortcut" in line for line in messages)
-        )
+        self.assertEqual(any("Warning: skipped symlink: shortcut" in line for line in messages), has_link)
         self.assertEqual(
             (target / "nested" / "run.sh").read_bytes(), script.read_bytes()
         )
@@ -2353,7 +2345,7 @@ class FileSyncTests(unittest.TestCase):
         (source / "old-name.txt").rename(source / "new-name.txt")
         (source / "untracked.txt").write_text("untracked", encoding="utf-8")
         (source / "ignored.txt").write_text("ignored", encoding="utf-8")
-        (source / "link").symlink_to("stable.txt")
+        has_link = try_file_symlink(source / "link", "stable.txt")
         bundle = self.root / "git-patch.zip"
         report = pack_sync_bundle(
             source,
@@ -2373,7 +2365,7 @@ class FileSyncTests(unittest.TestCase):
         )
         self.assertEqual(
             report.manifest.skipped_symlinks,
-            (PurePosixPath("link"),),
+            (PurePosixPath("link"),) if has_link else (),
         )
 
         def make_target(name: str) -> Path:

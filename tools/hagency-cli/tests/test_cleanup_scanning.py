@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import sys
 import unittest
 from dataclasses import replace
 from unittest import mock
@@ -372,7 +373,8 @@ match = '"""
         size.assert_called_once_with(17)
         self.assertEqual(len(stream.getvalue().removeprefix("\r\033[2K")), 39)
 
-    def test_agent_budget_remains_independent_and_cancelled_partial_scan_fails(self):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Agent inventory requires Linux")
+    def test_agent_budget_remains_independent(self):
         root = self.base / "staging"
         root.mkdir()
         budgets = []
@@ -394,6 +396,7 @@ match = '"""
         self.assertEqual(budgets, [60])
         self.assertEqual(report.exit_code, 0)
 
+    def test_cancelled_partial_scan_fails(self):
         target = self.file(self.base / "cache/a.bin")
         request = self.request(target.parent)
         deduplicate = scan._drop_duplicate_and_nested
@@ -463,7 +466,7 @@ match = '"""
                 )
             self.assertEqual(canonical.call_count, 100_000)
         output = (
-            b"\0".join(os.fsencode(path.relative_to(target.parent)) for path in paths)
+            b"\0".join(os.fsencode(path.relative_to(target.parent).as_posix()) for path in paths)
             + b"\0"
         )
         with (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ import hagency_cli.workspace.operations.sources as workspace_operations_sources_
 import hagency_cli.workspace.skills as workspace_skills_module
 import hagency_cli.workspace.sources as workspace_sources_module
 from hagency_cli import cli
+from tests.support import directory_link
 from hagency_cli.commands.shared import render_event
 from hagency_cli.workspace.errors import WorkspaceError
 
@@ -66,6 +68,12 @@ class CliTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def assert_default_skill_link(self, path: Path) -> None:
+        if os.name == "nt":
+            self.assertTrue(workspace_skills_module.is_junction(path), path)
+        else:
+            self.assertTrue(path.is_symlink(), path)
 
     def write_skill(self, path: Path, name: str | None = None) -> None:
         path.mkdir(parents=True, exist_ok=True)
@@ -800,14 +808,14 @@ class CliTests(unittest.TestCase):
     def test_bash_completion_respects_root_checkout_and_directory_context(self) -> None:
         outside = self.root / "outside"
         outside.mkdir()
-        words = f"hgc source show --root {self.root} "
+        words = f"hgc source show --root {shlex.quote(self.root.as_posix())} "
         values, _stderr = self.complete_bash(words, 5, cwd=outside)
         self.assertEqual(values, ["local-source"])
 
         checkout_override = self.root / "other-checkouts"
         self.write_skill(checkout_override / "remote-source" / "skills" / "remote-one")
         self.append_remote_source()
-        words = f"hgc skill add --root {self.root} --checkout-dir {checkout_override} remote"
+        words = f"hgc skill add --root {shlex.quote(self.root.as_posix())} --checkout-dir {shlex.quote(checkout_override.as_posix())} remote"
         values, _stderr = self.complete_bash(words, 7, cwd=outside)
         self.assertIn("remote-one", values)
         self.assertIn("remote-source:skills/remote-one", values)
@@ -863,7 +871,7 @@ class CliTests(unittest.TestCase):
 
         home = self.root / "isolated-home"
         home.mkdir()
-        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
             stdout, stderr = self.run_main("--install-completion", "bash")
         self.assertEqual(stderr, "")
         self.assertIn("bash completion installed", stdout)
@@ -1087,10 +1095,8 @@ class CliTests(unittest.TestCase):
                 r"C:\Users\me\project",
             )
 
-        self.assertEqual(
-            paths_module.normalize_windows_shell_path("/c/Users/me/project"),
-            "/c/Users/me/project",
-        )
+        with mock.patch.object(paths_module.os, "name", "posix"):
+            self.assertEqual(paths_module.normalize_windows_shell_path("/c/Users/me/project"), "/c/Users/me/project")
 
     def test_checkout_directory_selection_uses_platform_specific_default(self) -> None:
         defaults = {
@@ -2544,8 +2550,8 @@ class CliTests(unittest.TestCase):
         stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("local-one", stdout)
         self.assertIn("external-one", stdout)
-        self.assertTrue((target / ".agents" / "skills" / "local-one").is_symlink())
-        self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
+        self.assert_default_skill_link(target / ".agents" / "skills" / "local-one")
+        self.assert_default_skill_link(target / ".agents" / "skills" / "external-one")
 
     def test_profile_init_path_is_exact_absolute_skills_directory(self) -> None:
         profile_path = self.root / "profiles" / "content" / "config.toml"
@@ -2565,7 +2571,7 @@ class CliTests(unittest.TestCase):
         self.run_cli("profile", "apply", "--path", str(skills_dir), "content")
 
         destination = skills_dir / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -2602,7 +2608,7 @@ class CliTests(unittest.TestCase):
         )
 
         destination = invocation_cwd / "shared" / "skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertFalse((self.root / "shared").exists())
 
     def test_profile_init_relative_dir_uses_invocation_cwd_with_explicit_root(
@@ -2635,7 +2641,7 @@ class CliTests(unittest.TestCase):
         )
 
         destination = invocation_cwd / "project" / ".agents" / "skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertFalse((self.root / "project").exists())
 
     def test_profile_init_requires_a_destination(self) -> None:
@@ -2696,7 +2702,11 @@ class CliTests(unittest.TestCase):
 
     def test_install_commands_reject_broken_skills_destination_symlink(self) -> None:
         destination = self.root / "broken-skills"
-        destination.symlink_to(self.root / "missing-skills", target_is_directory=True)
+        target = self.root / "missing-skills"
+        target.mkdir()
+        directory_link(destination, target)
+        target.rmdir()
+        kind = "junction" if os.name == "nt" else "symlink"
         commands = (
             ("profile", "apply", "--path", str(destination), "content"),
             ("skill", "add", "external-one", "--path", str(destination)),
@@ -2706,10 +2716,10 @@ class CliTests(unittest.TestCase):
             with self.subTest(command=command):
                 _stdout, stderr = self.run_cli(*command, expected=1)
                 self.assertIn(
-                    f"skills destination is a broken symlink: {destination}", stderr
+                    f"skills destination is a broken {kind}: {destination}", stderr
                 )
 
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertFalse(destination.exists())
 
     def test_profile_init_copy_mode_creates_independent_skill_directory(self) -> None:
@@ -2760,7 +2770,7 @@ class CliTests(unittest.TestCase):
             "profile", "apply", "-d", str(target), "content", "--dry-run"
         )
 
-        self.assertIn("link", stdout)
+        self.assertIn("junction" if os.name == "nt" else "link", stdout)
         self.assertNotIn("ln -s", stdout)
         self.assertFalse((target / ".agents" / "skills" / "external-one").exists())
 
@@ -3338,7 +3348,7 @@ class CliTests(unittest.TestCase):
 
         stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
-        self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
+        self.assert_default_skill_link(target / ".agents" / "skills" / "external-one")
 
     def test_skill_include_star_and_exclude(self) -> None:
         self.write_skill(self.root / "local-source" / "nested" / "external-two")
@@ -3360,7 +3370,7 @@ class CliTests(unittest.TestCase):
         stdout, _stderr = self.run_cli("profile", "apply", "-d", str(target), "content")
         self.assertIn("external-one", stdout)
         self.assertNotIn("external-two", stdout)
-        self.assertTrue((target / ".agents" / "skills" / "external-one").is_symlink())
+        self.assert_default_skill_link(target / ".agents" / "skills" / "external-one")
         self.assertFalse((target / ".agents" / "skills" / "external-two").exists())
 
     def test_skill_add_installs_unique_name_under_invocation_cwd(self) -> None:
@@ -3373,8 +3383,9 @@ class CliTests(unittest.TestCase):
 
         destination = invocation_cwd / ".agents" / "skills" / "external-one"
         self.assertEqual(stderr, "")
-        self.assertIn(f"link {destination} ->", stdout)
-        self.assertTrue(destination.is_symlink())
+        action = "junction" if os.name == "nt" else "link"
+        self.assertIn(f"{action} {destination} ->", stdout)
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -3396,7 +3407,7 @@ class CliTests(unittest.TestCase):
         )
 
         destination = invocation_cwd / ".agents" / "skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -3408,7 +3419,7 @@ class CliTests(unittest.TestCase):
         self.run_cli("skill", "add", "external-one", "-p", str(skills_dir))
 
         destination = skills_dir / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -3429,7 +3440,7 @@ class CliTests(unittest.TestCase):
         )
 
         destination = invocation_cwd / "shared" / "skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertFalse((self.root / "shared").exists())
 
     def test_skill_add_path_expands_user_home(self) -> None:
@@ -3439,7 +3450,7 @@ class CliTests(unittest.TestCase):
             self.run_cli("skill", "add", "external-one", "--path", "~/shared-skills")
 
         destination = home / "shared-skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -3451,7 +3462,7 @@ class CliTests(unittest.TestCase):
         self.run_cli("skill", "add", "external-one", "-d", str(target_workspace))
 
         destination = target_workspace / ".agents" / "skills" / "external-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
@@ -3480,7 +3491,7 @@ class CliTests(unittest.TestCase):
             self.run_cli("skill", "add", "local-one", "--global", cwd=invocation_cwd)
 
         destination = home / ".agents" / "skills" / "local-one"
-        self.assertTrue(destination.is_symlink())
+        self.assert_default_skill_link(destination)
         self.assertEqual(
             destination.resolve(), (self.root / "skills" / "local-one").resolve()
         )
@@ -3501,7 +3512,8 @@ class CliTests(unittest.TestCase):
         )
 
         destination = invocation_cwd / "planned" / "skills" / "external-one"
-        self.assertIn(f"link {destination} ->", stdout)
+        action = "junction" if os.name == "nt" else "link"
+        self.assertIn(f"{action} {destination} ->", stdout)
         self.assertFalse((invocation_cwd / "planned").exists())
 
     def test_skill_add_rejects_source_only_wildcard_and_ambiguous_references(
@@ -3574,7 +3586,8 @@ class CliTests(unittest.TestCase):
             cwd=invocation_cwd,
             expected=1,
         )
-        self.assertIn("refusing to overwrite non-symlink", stderr)
+        mode = "junction" if os.name == "nt" else "symlink"
+        self.assertIn(f"refusing to overwrite non-{mode}", stderr)
         self.assertEqual((destination / "keep.txt").read_text(encoding="utf-8"), "keep")
 
     def test_skill_add_uses_windows_junction_materialization(self) -> None:

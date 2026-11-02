@@ -2,10 +2,35 @@
 
 import os
 import shutil
+import unittest
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 from hagency_cli.files.sync.sftp import SFTPRemote
+
+
+def directory_link(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        from hagency_cli.workspace.skills import create_windows_junction
+
+        create_windows_junction(link, target)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def try_file_symlink(link: Path, target: str | Path) -> bool:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            return False
+        raise
+    return True
+
+
+def file_symlink(link: Path, target: str | Path) -> None:
+    if not try_file_symlink(link, target):
+        raise unittest.SkipTest("creating file symbolic links requires Windows symlink privilege")
 
 
 class LocalSFTPAdapter:

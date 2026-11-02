@@ -16,6 +16,8 @@ from unittest import mock
 
 from typer.testing import CliRunner
 
+from tests.support import directory_link, file_symlink
+
 from hagency_cli.cli import app
 from hagency_cli.files.cleanup import (
     agents,
@@ -82,21 +84,22 @@ class CleanupTests(unittest.TestCase):
         (self.repo / "hagency-config.toml").write_text("invalid = [")
         self.rules_file = self.repo / "hagency-cleanup.toml"
         self.rules_file.write_text("schema_version = 1\n")
-        test_path = "/usr/bin:/bin"
+        environment = {"HOME": str(self.home), "USERPROFILE": str(self.home), "PATH": "/usr/bin:/bin"}
         if sys.platform == "win32":
             git = WHICH("git")
             system_directory = (
                 Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32"
             )
-            test_directories = [str(system_directory)]
+            environment["SystemRoot"] = str(system_directory.parent)
+            test_directories = [str(system_directory), str(system_directory / "WindowsPowerShell/v1.0")]
             if git:
                 test_directories.insert(0, str(Path(git).parent))
-            test_path = os.pathsep.join(test_directories)
+            environment["PATH"] = os.pathsep.join(test_directories)
         self.enterContext(mock.patch.object(Path, "home", return_value=self.home))
         self.enterContext(
             mock.patch.dict(
                 os.environ,
-                {"HOME": str(self.home), "PATH": test_path},
+                environment,
                 clear=True,
             )
         )
@@ -139,7 +142,10 @@ class CleanupTests(unittest.TestCase):
         timestamp = (time.time() if now is None else now) - days * 86400
         paths = [path, *path.rglob("*")] if path.is_dir() else [path]
         for child in paths:
-            os.utime(child, (timestamp, timestamp), follow_symlinks=False)
+            if os.utime in os.supports_follow_symlinks:
+                os.utime(child, (timestamp, timestamp), follow_symlinks=False)
+            elif not inspection._is_link_or_reparse(child):
+                os.utime(child, (timestamp, timestamp))
 
     def purge(
         self,
@@ -162,13 +168,15 @@ class CleanupTests(unittest.TestCase):
             ui=CleanupUI(interactive=interactive, hook=hook),
         )
 
-    def clean(self, agent="codex", *, interactive=False, hook=None, dry_run=False):
+    def clean(self, agent="codex", *, rules=(), interactive=False, hook=None, dry_run=False):
         return clean_files(
-            CleanRequest(agents=(agent,), config=self.rules_file, dry_run=dry_run),
+            CleanRequest(agents=() if rules else (agent,), rules=rules, config=self.rules_file, dry_run=dry_run),
             ui=CleanupUI(interactive=interactive, hook=hook),
         )
 
     def versions(self, agent, versions, current, *, root=None):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("Agent version inventory requires Linux/WSL")
         root = root or agents.source_roots(agent + ".versions")[0]
         entries = {}
         for version in versions:
@@ -263,7 +271,7 @@ match = 'within="cache" & glob="*.tmp"'
         self.assertEqual(
             entries(snapshot.rules[-1].match)[0].root, external.parent / "cache"
         )
-        report = clean_files(CleanRequest(config=external), ui=CleanupUI())
+        report = clean_files(CleanRequest(config=external, rules=("custom",)), ui=CleanupUI())
         self.assertEqual(
             [choice.exact_path for choice in report.choices],
             [external.parent / "cache/a.tmp"],
@@ -371,6 +379,7 @@ match = 'within=false'
         with self.assertRaises(config.CleanupConfigError):
             config.load_rules(cwd=self.repo)
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires os.mkfifo")
     def test_fifo_config_fails_without_blocking(self):
         self.rules_file.unlink()
         os.mkfifo(self.rules_file)
@@ -482,7 +491,7 @@ exclude=["keep/"]
 match = 'within="cache/downloads" & glob="*"'
 """
         )
-        report = self.clean(interactive=True)
+        report = self.clean(rules=("parent", "child"), interactive=True)
         self.assertTrue(keep.exists())
         self.assertTrue((self.repo / "cache/downloads").exists())
         self.assertFalse((self.repo / "cache/downloads/remove.tmp").exists())
@@ -588,22 +597,21 @@ match = 'source="project" & glob="build/payload"'
         self.assertTrue((root / "dist").exists())
 
     def test_generic_rules_cannot_remove_agent_state_or_versions(self):
-        versions = self.versions("codex", ["1.0.0", "1.1.0", "1.2.0"], "1.2.0")
+        release = self.file(self.home / ".codex/packages/standalone/releases/1.0.0/bin/codex")
         state = self.file(self.home / ".codex/auth.json")
-        self.write_rules(f'''[[rules]]
+        self.write_rules('''[[rules]]
 id="clean.codex.versions"
 enabled=false
 [[rules]]
 id="clean.bypass"
 auto_apply=true
-source="paths"
-root="{self.home / ".codex"}"
-include=["*"]
+match = 'within="~/.codex" & glob="*"'
 ''')
-        report = self.clean(interactive=True)
+        report = self.clean(rules=("bypass",), interactive=True)
         self.assertEqual(report.choices, ())
         self.assertTrue(state.exists())
-        self.assertTrue(all(path.exists() for path in versions.values()))
+        self.assertTrue(release.exists())
+        self.assertTrue(any(issue.code == "protected" for issue in report.issues))
 
     def test_generic_linked_root_and_git_tracked_file_are_protected(self):
         root = self.project()
@@ -611,11 +619,11 @@ include=["*"]
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "a.tmp"], check=True)
         self.write_rules(
-            f'[[rules]]\nid="clean.custom"\nauto_apply=true\nsource="paths"\nroot="{root}"\ninclude=["*.tmp"]\n'
+            f'[[rules]]\nid="clean.custom"\nauto_apply=true\nmatch=\'within="{root.as_posix()}" & glob="*.tmp"\'\n'
         )
-        self.assertEqual(self.clean().choices, ())
+        self.assertEqual(self.clean(rules=("custom",)).choices, ())
         link = self.repo / "linked"
-        link.symlink_to(root, target_is_directory=True)
+        directory_link(link, root)
         self.write_rules(
             """[[rules]]
 id="clean.custom"
@@ -623,7 +631,7 @@ auto_apply=true
 match = 'within="linked" & glob="*.tmp"'
 """
         )
-        self.assertEqual(self.clean().exit_code, 1)
+        self.assertEqual(self.clean(rules=("custom",)).exit_code, 1)
 
     def test_codex_keeps_current_rollback_pending_and_unknown_versions(self):
         versions = self.versions(
@@ -657,6 +665,7 @@ match = 'within="linked" & glob="*.tmp"'
         self.assertEqual(report.choices, ())
         self.assertTrue(all(path.exists() for path in versions.values()))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_codex_installation_flock_and_directory_lock_prevent_deletion(self):
         import fcntl
 
@@ -672,6 +681,7 @@ match = 'within="linked" & glob="*.tmp"'
         self.assertEqual(report.exit_code, 1)
         self.assertTrue(versions["1.0.0"].exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_codex_holds_lock_during_actual_removal(self):
         import fcntl
 
@@ -822,6 +832,7 @@ min_age_days=0
         self.assertEqual(report.exit_code, 1)
         self.assertTrue(versions["2.0.0"].exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_occupied_staging_is_retained(self):
         staging = self.artifact(
             agents.source_roots("codex.staging")[1], "openai-bundled.staging-old"
@@ -1092,6 +1103,7 @@ exclude=["inner/build/"]
         self.assertEqual(report.exit_code, 0)
         self.assertTrue(target.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_process_detection_uses_native_executable_when_argv_is_uninformative(self):
         executable = self.home / ".local/share/claude/versions/2.0.0"
         executable.parent.mkdir(parents=True)
@@ -1111,6 +1123,7 @@ exclude=["inner/build/"]
             process.terminate()
             process.wait(timeout=5)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_occupancy_detection_sees_current_process_open_file(self):
         target = self.artifact(self.home, "staging")
         real_scandir = os.scandir
@@ -1145,6 +1158,7 @@ match = 'source="project" & glob="*.tmp"'
         self.assertEqual(report.known_bytes, 0)
         self.assertFalse(target.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_absent_agent_roots_do_not_require_process_access(self):
         with mock.patch.object(
             agents,
@@ -1188,6 +1202,7 @@ match = 'source="project" & glob="*.tmp"'
             )
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_agent_script_after_many_node_flags_blocks_cleanup(self):
         versions = self.versions("copilot", ["1.0.0", "1.1.0", "1.2.0"], "1.2.0")
         args = [b"node", *([b"--flag"] * 12), os.fsencode(versions["1.0.0"] / "app.js")]
@@ -1200,6 +1215,7 @@ match = 'source="project" & glob="*.tmp"'
             any("copilot is running" in issue.message for issue in report.issues)
         )
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux Agent inspection")
     def test_truncated_process_arguments_are_unknown(self):
         self.fake_process(b"node\0" + b"x" * (128 * 1024) + b"\0/copilot/app.js\0")
         self.assertIn("unknown", PROCESS_CHECK("copilot") or "")
@@ -1449,7 +1465,7 @@ exclude=["/inner/build/keep"]
         subprocess.run(["git", "init", "-q", str(project)], check=True)
         subprocess.run(["git", "-C", str(project), "add", "orphan"], check=True)
         linked = root / "node_modules"
-        linked.symlink_to(self.repo, target_is_directory=True)
+        directory_link(linked, self.repo)
         mounted = self.artifact(root, "dist")
         real_mount = scan._is_mount
         with mock.patch.object(
@@ -1460,7 +1476,7 @@ exclude=["/inner/build/keep"]
             report = self.purge(root, include_unverified=True, interactive=True)
         self.assertEqual(report.choices, ())
         self.assertTrue(all(target.exists() for target in targets))
-        self.assertTrue(linked.is_symlink())
+        self.assertEqual(linked.resolve(), self.repo)
         self.assertTrue(mounted.exists())
 
     def test_unverified_opt_in_still_rechecks_project_ownership(self):
@@ -1649,14 +1665,14 @@ auto_apply=true
 match = 'within="cache" & glob="*.tmp"'
 """
         )
-        report = self.clean()
+        report = self.clean(rules=("cache",))
         self.assertEqual(len(report.choices), 1)
         self.assertFalse(report.choices[0].preselected)
         self.old(target)
-        self.assertTrue(self.clean().choices[0].preselected)
+        self.assertTrue(self.clean(rules=("cache",)).choices[0].preselected)
         with self.rules_file.open("a") as stream:
             stream.write("preselect_after_days=0\nmin_age_days=1\n")
-        self.assertTrue(self.clean().choices[0].preselected)
+        self.assertTrue(self.clean(rules=("cache",)).choices[0].preselected)
 
     def test_review_broad_scan_root_requires_manual_selection(self):
         target = self.artifact(self.project())
@@ -1667,6 +1683,7 @@ match = 'within="cache" & glob="*.tmp"'
         self.assertTrue(any(issue.code == "broad_root" for issue in report.issues))
         self.assertTrue(target.exists())
 
+    @unittest.skipUnless(hasattr(os, "geteuid"), "requires os.geteuid")
     def test_review_foreign_owned_descendant_protects_whole_candidate(self):
         root = self.project()
         target = self.artifact(root)
@@ -1729,7 +1746,7 @@ match = 'within="data" & glob="*"'
         with mock.patch.dict(
             os.environ, {"CODEX_HOME": str(self.repo / "parent/../data")}
         ):
-            report = self.clean(interactive=True)
+            report = self.clean(rules=("cache",), interactive=True)
         self.assertEqual(report.choices, ())
         self.assertTrue(any(issue.code == "protected" for issue in report.issues))
         self.assertTrue(target.exists())
@@ -1738,7 +1755,7 @@ match = 'within="data" & glob="*"'
     def test_review_symlinked_agent_home_protects_its_real_target(self):
         target = self.file(self.repo / "data/auth.json")
         alias = self.home / ".codex"
-        alias.symlink_to(target.parent, target_is_directory=True)
+        directory_link(alias, target.parent)
         self.write_rules(
             """[[rules]]
 id="clean.cache"
@@ -1746,7 +1763,7 @@ auto_apply=true
 match = 'within="data" & glob="*"'
 """
         )
-        report = self.clean(interactive=True)
+        report = self.clean(rules=("cache",), interactive=True)
         self.assertEqual(report.choices, ())
         self.assertTrue(target.exists())
 
@@ -1793,6 +1810,7 @@ match = 'within="cache\\u007f" & glob="*"'
         self.assertEqual(report.issues[0].code, "config_error")
         build.assert_not_called()
 
+    @unittest.skipIf(os.name == "nt", "POSIX subtree symlink removal")
     def test_review_whole_directory_removal_does_not_follow_child_symlinks(self):
         for fallback in (False, True):
             with self.subTest(fallback=fallback):
@@ -1810,6 +1828,7 @@ match = 'within="cache\\u007f" & glob="*"'
                 self.assertFalse(target.exists())
                 self.assertTrue(sentinel.exists())
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires os.mkfifo")
     def test_review_fifo_child_prevents_deletion(self):
         root = self.project()
         target = self.artifact(root)
@@ -1946,8 +1965,10 @@ match = 'within="cache\\u007f" & glob="*"'
                 report = self.clean()
                 self.assertEqual(report.exit_code, 1)
                 self.assertEqual(report.issues[0].code, "config_error")
+
+    def test_config_symlink_loop_is_rejected(self):
         self.rules_file.unlink()
-        self.rules_file.symlink_to(self.rules_file)
+        file_symlink(self.rules_file, self.rules_file)
         self.assertEqual(self.clean().issues[0].code, "config_error")
 
     def test_review_builtin_rules_changes_stop_deletion(self):
@@ -2367,7 +2388,7 @@ match = 'within="cache" & glob="*.tmp"'
         root = self.project()
         tracked = self.file(root / "tracked.tmp")
         linked = root / "link.tmp"
-        linked.symlink_to(tracked)
+        file_symlink(linked, tracked)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "tracked.tmp"], check=True)
         self.write_rules("""[[rules]]
@@ -3021,7 +3042,7 @@ match = 'glob="**/*" & ((file_size >= "1.5MiB" & file_size <= "2MB") & is_text=f
         tracked = self.file(root / "tracked.txt")
         removable = self.file(root / "temporary.txt")
         linked = root / "linked.txt"
-        linked.symlink_to(tracked)
+        file_symlink(linked, tracked)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "add", "tracked.txt"], check=True)
         self.write_rules(

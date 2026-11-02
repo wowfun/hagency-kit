@@ -50,6 +50,8 @@ uv build --out-dir /tmp/hagency-cli-dist
 git diff --check
 ```
 
+Run the suite on native Windows and Linux/WSL. Windows installation tests exercise directory junctions. Tests that require Linux Agent inventory, POSIX-only system calls or the privilege to create file symlinks report the missing capability as a skip.
+
 The suite includes command and alias help, CLI `main()` parsing and command removal, dependency and lazy-import boundaries, workspace discovery, local Git acquisition/update behavior, selection/cancellation, dry runs, installation modes, SFTP credential/Git protection, bundle validation before writes, cleanup configuration discovery, rule matching, Agent version retention/occupancy, frozen-plan revalidation, and proxy lifecycle coverage. Mocks target the module that owns each dependency.
 
 Release validation also installs the wheel in an isolated environment outside a Hagency workspace and tests an isolated editable installation. Native filesystem behavior is established only for the host platform; mocked Windows/macOS branches do not establish native execution, and local/fake transports do not establish live SFTP or upstream provider behavior.

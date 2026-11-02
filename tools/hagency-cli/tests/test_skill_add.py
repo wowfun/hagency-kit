@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -656,8 +657,8 @@ class SkillAddTests(unittest.TestCase):
         self.registry["source"]["named"] = {"path": str(source)}
         self.save()
         for words, index, expected in [
-            (f"hgc skill add -r {self.root} ", 5, "named"),
-            (f"hgc skill add named -r {self.root} --skill ", 7, "one"),
+            (f"hgc skill add -r {shlex.quote(self.root.as_posix())} ", 5, "named"),
+            (f"hgc skill add named -r {shlex.quote(self.root.as_posix())} --skill ", 7, "one"),
         ]:
             with mock.patch(
                 "subprocess.run", side_effect=AssertionError("completion is read-only")

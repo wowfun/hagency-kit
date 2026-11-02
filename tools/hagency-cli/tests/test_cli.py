@@ -3791,6 +3791,109 @@ class CliTests(unittest.TestCase):
             self.assertIn("outside source", error)
             self.assertFalse((self.root / "target").exists())
 
+    def test_profile_list_prunes_archive_and_scans_shared_source_once(self):
+        archive = self.root / "local-source/Archive"
+        self.write_skill(archive / "external-one")
+        for name in ("content", "another"):
+            profile = self.root / "profiles" / name
+            profile.mkdir(exist_ok=True)
+            (profile / "config.toml").write_text(
+                f'name = "{name}"\n[skill.local-source]\ninclude = ["external-one"]\n',
+                encoding="utf-8",
+            )
+        visited = []
+        walk = os.walk
+
+        def track(root):
+            for row in walk(root):
+                visited.append(Path(row[0]))
+                yield row
+
+        with mock.patch.object(workspace_skills_module.os, "walk", track):
+            _, stderr = self.run_cli("profile", "list")
+        self.assertEqual(stderr, "")
+        self.assertEqual(visited.count(self.root / "local-source"), 1)
+        self.assertNotIn(archive, visited)
+
+    def test_profile_reports_all_invalid_references_before_writes(self):
+        self.append_remote_source("not-synced")
+        self.write_skill(self.root / "skills/deprecated/old")
+        config = self.root / "profiles/content/config.toml"
+        config.write_text(
+            'name = "content"\n[skill.workspace]\n'
+            'include = ["local-one", "skills/deprecated/old", "missing"]\n'
+            'exclude = ["../escape"]\n[skill.gone]\ninclude = ["former"]\n'
+            "[skill.not-synced]\n",
+            encoding="utf-8",
+        )
+        for args in (
+            ("profile", "list"),
+            ("profile", "show", "content"),
+            ("profile", "apply", "content", "-d", "target", "-cp"),
+            ("profile", "apply", "content", "-d", "target", "--dry-run"),
+        ):
+            stdout, stderr = self.run_cli(
+                *args, expected=1 if args[1] == "apply" else 0
+            )
+            for issue in (
+                "profile content",
+                "deprecated skill",
+                "'missing'",
+                "'../escape'",
+                "unknown source: gone",
+                "'former'",
+                "hgc source sync not-synced",
+            ):
+                self.assertIn(issue, stderr)
+            if args[1] == "show":
+                self.assertEqual(tomllib.loads(stdout), self.read_profile())
+            self.assertFalse((self.root / "target").exists())
+        for ref in ("workspace:missing", "gone", "not-synced"):
+            self.run_cli("profile", "update", "content", "-RS", ref)
+        self.assertEqual(
+            self.read_profile()["skill"],
+            {
+                "workspace": {
+                    "include": ["local-one", "skills/deprecated/old"],
+                    "exclude": ["../escape"],
+                }
+            },
+        )
+
+    def test_remove_stale_include_alongside_wildcard(self):
+        config = self.root / "profiles/content/config.toml"
+        config.write_text(
+            'name = "content"\n[skill.workspace]\ninclude = ["*", "gone"]\n'
+        )
+        self.run_cli("profile", "update", "content", "-RS", "workspace:gone")
+        self.assertEqual(self.read_profile()["skill"]["workspace"], {"include": ["*"]})
+        _, stderr = self.run_cli("profile", "show", "content")
+        self.assertEqual(stderr, "")
+        config.write_text(
+            'name = "content"\n[skill.workspace]\ninclude = ["*", "local-one"]\n'
+        )
+        self.run_cli("profile", "update", "content", "-RS", "workspace:local-one")
+        self.assertEqual(
+            self.read_profile()["skill"]["workspace"],
+            {"include": ["*"], "exclude": ["local-one"]},
+        )
+
+    def test_profile_explicit_archive_is_applicable_with_warning(self):
+        self.write_skill(self.root / "skills/deprecated/old")
+        for args in (
+            ("profile", "add", "old", "-AS", "workspace:skills/deprecated/old"),
+            ("profile", "update", "old", "-AS", "workspace:skills/deprecated/old"),
+            ("skill", "list", "-p", "old"),
+            ("profile", "apply", "old", "-cp", "-p", "installed"),
+        ):
+            _, stderr = self.run_cli(*args)
+            self.assertIn("deprecated skill workspace:skills/deprecated/old", stderr)
+        self.assertTrue((self.root / "installed/old/SKILL.md").is_file())
+        self.append_remote_source("not-synced")
+        _, stderr = self.run_cli("profile", "add", "later", "-AS", "not-synced:item")
+        self.assertIn("unverified", stderr)
+        self.assertIn("hgc source sync not-synced", stderr)
+
     def test_source_inspection_is_offline_and_isolates_invalid_entries(self):
         with self.config_path.open("a", encoding="utf-8") as handle:
             handle.write(

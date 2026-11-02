@@ -8,14 +8,18 @@ from typing import Any
 from hagency_cli.workspace.errors import fail
 
 
-def read_toml(path: Path) -> dict:
+def read_toml_document(path: Path) -> tuple[str, dict]:
     if not path.exists():
         fail(f"missing config: {path}")
     try:
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+        text = path.read_text(encoding="utf-8")
+        return text, tomllib.loads(text)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         fail(f"cannot read config {path}: {exc}")
+
+
+def read_toml(path: Path) -> dict:
+    return read_toml_document(path)[1]
 
 
 def write_toml(path: Path, data: dict) -> None:
@@ -101,6 +105,8 @@ def render_toml(data: dict) -> str:
             append_scalar_lines(lines, remote, ["url", "name", "ref"])
 
     for name, raw_skill in data.get("skill", {}).items():
+        if not isinstance(raw_skill, dict):
+            fail(f"profile skill {name} must be a table")
         if lines:
             lines.append("")
         lines.append(toml_table(["skill", name]))

@@ -13,13 +13,14 @@ from hagency_cli.commands.completion import (
 )
 from hagency_cli.commands.shared import (
     command_errors,
+    diagnostic,
     make_app,
     render_event,
     require_at_most_one,
     require_exactly_one,
 )
-from hagency_cli.workspace.config import render_toml
-from hagency_cli.workspace.context import workspace_root_arg
+from hagency_cli.workspace.config import read_toml_document
+from hagency_cli.workspace.context import load_sources, workspace_root_arg
 from hagency_cli.workspace.operations.profiles import (
     add_profile,
     apply_profile_to_directory,
@@ -27,11 +28,13 @@ from hagency_cli.workspace.operations.profiles import (
     update_profile,
 )
 from hagency_cli.workspace.profiles import (
+    inspect_profile,
     list_profile_configs,
+    profile_config_path,
     profile_skill_names,
-    read_profile_config,
+    require_profile_schema,
 )
-from hagency_cli.workspace.skills import LinkMode
+from hagency_cli.workspace.skills import LinkMode, SkillScan, workspace_skill_scans
 
 profile_app = make_app(
     help_text="""Manage reusable skill selections in profiles/NAME/config.toml.
@@ -56,10 +59,23 @@ profile_app = make_app(
 )
 
 
+def _report_profile(
+    name: str, profile: dict, scans: dict[str, SkillScan], invalid: dict[str, str]
+) -> None:
+    result = inspect_profile(
+        name, profile, scans, invalid_sources=invalid, progress=render_event
+    )
+    for problem in result.problems:
+        diagnostic(f"Warning: {problem}", "warning")
+
+
 def profile_list_command(*, root_value: str | None) -> None:
     root = workspace_root_arg(root_value)
+    invalid: dict[str, str] = {}
+    scans = workspace_skill_scans(root, load_sources(root, None, invalid=invalid))
     print("name\tdescription\tskills")
-    for name, profile in list_profile_configs(root):
+    for name, profile in list_profile_configs(root, progress=render_event):
+        _report_profile(name, profile, scans, invalid)
         description = profile.get("description") or "-"
         skills = ",".join(profile_skill_names(profile)) or "-"
         print(f"{name}\t{description}\t{skills}")
@@ -67,8 +83,12 @@ def profile_list_command(*, root_value: str | None) -> None:
 
 def profile_show_command(*, name: str, root_value: str | None) -> None:
     root = workspace_root_arg(root_value)
-    profile = read_profile_config(root, name)
-    print(render_toml(profile).rstrip())
+    text, profile = read_toml_document(profile_config_path(root, name))
+    require_profile_schema(profile)
+    invalid: dict[str, str] = {}
+    scans = workspace_skill_scans(root, load_sources(root, None, invalid=invalid))
+    _report_profile(name, profile, scans, invalid)
+    print(text.rstrip())
 
 
 @profile_app.command("ls", short_help="Alias for list.")
@@ -90,7 +110,8 @@ def profile_list_cli(
     Requires a Hagency workspace. Reads profiles/NAME/config.toml and prints name,
     description, and skills columns. The skills column lists selected source names,
     not individual installed skills. Use hgc skill list --profile NAME to discover
-    that profile's skills. This command does not sync or apply profiles.
+    that profile's skills. Local checks warn on stderr about stale and deprecated
+    references. This command does not sync or apply profiles.
 
     \b
     Examples:
@@ -158,7 +179,8 @@ def profile_add_cli(
     skills/subtrees; both require --add-skill. A source without includes selects
     all its discovered skills. An exact skill reference supplies an include
     selector automatically. --dry-run prints the proposed TOML without writes.
-    Creating a profile does not install skills; use hgc profile apply afterward.
+    Exact archived skill paths warn when selected. Unsynced remote skills are
+    marked unverified. Creating a profile does not install skills; use hgc profile apply afterward.
 
     \b
     Examples:
@@ -256,6 +278,8 @@ def profile_update_cli(
     Repeat --include/-i and --exclude/-e for source-relative skills/subtrees.
     These options and --replace require --add-skill. Missing source content must
     be obtained with hgc source sync before selector validation.
+    A saved source or exact include can be removed even if its skill has moved
+    or the source no longer exists. Exact archived paths warn when selected.
     --dry-run prints updated TOML without writes. Existing installations are
     unchanged; apply the profile separately to materialize its current selection.
 
@@ -341,8 +365,8 @@ def profile_show_cli(
     """Print one workspace profile configuration as TOML.
 
     Requires profiles/NAME/config.toml in the resolved Hagency workspace. Shows
-    saved source/include/exclude selections without resolving or installing their
-    skills. Use hgc skill list --profile NAME to inspect discovered candidates.
+    saved TOML on stdout. Local source/include/exclude checks report invalid or
+    deprecated references on stderr. Use hgc skill list --profile NAME to inspect discovered candidates.
 
     \b
     Examples:
@@ -428,6 +452,9 @@ def profile_apply_cli(
     Explicit Windows symlinks may require an elevated terminal. Existing links of
     the selected type can be retargeted; independent directories are not overwritten.
     Unselected installations remain in place; there is no tracking or pruning.
+
+    Invalid references are reported together before any installation, including
+    during --dry-run. Exact archived skills remain selectable with a warning.
 
     Duplicate skill names prompt for a source path in a TTY without changing the
     profile. Non-TTY use fails with guidance to narrow its include selectors.

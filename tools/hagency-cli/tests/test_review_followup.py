@@ -27,7 +27,8 @@ from hagency_cli.files.sync.models import FileSyncError, SyncDirection
 from hagency_cli.files.sync.operations import sync_workspace_files
 from hagency_cli.files.sync.sftp import SFTPRemote
 from hagency_cli.workspace import git
-from hagency_cli.workspace.catalog import list_profile_selected_links, source_health_warning
+from hagency_cli.workspace.catalog import source_health_warning
+from hagency_cli.workspace.profiles import inspect_profile
 from hagency_cli.workspace.skills import SkillScan
 from hagency_cli.workspace.config import read_toml, write_toml
 from hagency_cli.workspace.errors import SourceBatchError, WorkspaceError
@@ -266,11 +267,12 @@ class ReviewFollowupTests(unittest.TestCase):
         skill.mkdir()
         (skill / "SKILL.md").write_text("fixture")
         source = Source("fixture", self.root, None)
-        self.assertEqual(
-            list_profile_selected_links({"include": []}, source),
-            list_profile_selected_links({"include": ["*"]}, source),
-        )
-        self.assertEqual(len(list_profile_selected_links({"include": []}, source)), 1)
+        for include in ([], ["*"]):
+            with self.subTest(include=include):
+                result = inspect_profile("demo", {"skill": {"fixture": {"include": include}}},
+                                         {"fixture": SkillScan(source)})
+                self.assertEqual(result.problems, [])
+                self.assertEqual([link.target for link in result.links], [skill])
 
     def test_vanishing_root_component_becomes_a_reported_issue(self):
         with mock.patch.object(

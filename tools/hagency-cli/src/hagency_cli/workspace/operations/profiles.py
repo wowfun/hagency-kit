@@ -4,7 +4,7 @@ from pathlib import Path
 
 from hagency_cli.workspace.config import render_toml
 from hagency_cli.workspace.context import load_sources, workspace_root_arg
-from hagency_cli.workspace.errors import fail
+from hagency_cli.workspace.errors import SkillReferenceError, WorkspaceError, fail
 from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.profiles import (
     apply_profile,
@@ -23,8 +23,10 @@ from hagency_cli.workspace.skills import (
     SkillConflictUI,
     SkillLinkCandidate,
     resolve_link_mode,
+    resolve_selector,
     resolve_skill_install_dir,
     resolve_skill_reference,
+    workspace_skill_scans,
 )
 
 
@@ -44,7 +46,8 @@ def apply_profile_to_directory(
 
     invocation_cwd = Path.cwd()
     root = workspace_root_arg(root_value)
-    sources = load_sources(root, checkout_dir)
+    invalid: dict[str, str] = {}
+    sources = load_sources(root, checkout_dir, invalid=invalid)
     profile = read_profile_config(root, name)
     skills_dir = resolve_skill_install_dir(
         skills_path,
@@ -59,6 +62,8 @@ def apply_profile_to_directory(
         root,
         skills_dir,
         link_mode=resolve_link_mode(copy, link_mode),
+        profile_name=name,
+        invalid_sources=invalid,
         dry_run=dry_run,
         conflict_ui=conflict_ui,
         progress=progress,
@@ -107,14 +112,22 @@ def add_profile(
     include, exclude = validate_profile_skill_args(include, exclude, add_skill)
     sources = load_sources(root, checkout_dir) if add_skill else {}
     if add_skill:
+        scans = workspace_skill_scans(root, sources)
         add_skill, inferred_include = resolve_skill_reference(
             add_skill,
             sources,
             root,
+            scans=scans,
         )
         include = with_inferred_include(include, inferred_include)
         validate_profile_skill_selectors(
-            add_skill, sources, root, include=include, exclude=exclude
+            add_skill,
+            sources,
+            root,
+            include=include,
+            exclude=exclude,
+            progress=progress,
+            scan=scans[add_skill],
         )
     profile = build_profile_config(
         name,
@@ -133,6 +146,69 @@ def add_profile(
     write_profile_config(root, name, profile)
     emit_event(progress, f"added profile: {name}")
     return profile
+
+
+def _resolve_removal(
+    profile: dict,
+    value: str,
+    root: Path,
+    checkout_dir: str | None,
+) -> tuple[str, str | None]:
+    saved = profile.get("skill", {})
+    if value in saved:
+        return value, None
+    name, separator, selector = value.partition(":")
+    matches = []
+    for source_name, config in saved.items():
+        if separator and name != source_name or not isinstance(config, dict):
+            continue
+        includes = config.get("include")
+        if (
+            isinstance(includes, list)
+            and (selector if separator else value) in includes
+        ):
+            matches.append(source_name)
+    if len(matches) == 1:
+        return matches[0], selector if separator else value
+    if matches:
+        raise SkillReferenceError(value, tuple(f"{name}:{value}" for name in matches))
+
+    sources = load_sources(root, checkout_dir)
+    scans = workspace_skill_scans(root, sources)
+    name, selector = resolve_skill_reference(value, sources, root, scans=scans)
+    if selector is not None:
+        validate_profile_skill_selectors(
+            name, sources, root, include=[selector], exclude=None, scan=scans[name]
+        )
+    return name, selector
+
+
+def _wildcard_exclusion_needed(
+    profile: dict, source_name: str, selector: str, root: Path, checkout_dir: str | None
+) -> bool:
+    entry = profile.get("skill", {}).get(source_name, {})
+    includes = entry.get("include", []) if isinstance(entry, dict) else []
+    if (
+        not isinstance(includes, list)
+        or selector == "*"
+        or selector not in includes
+        or "*" not in includes
+    ):
+        return True
+    # A literal include alongside "*" needs an exclude only if the wildcard
+    # would still install it. A stale exclude would itself block application.
+    sources = load_sources(root, checkout_dir, invalid={})
+    scan = workspace_skill_scans(root, sources).get(source_name)
+    if scan is None or not scan.source.path.is_dir():
+        return False
+    try:
+        matches = resolve_selector(
+            scan.source, selector, scan=scan, allow_name_conflicts=True
+        )
+    except WorkspaceError:
+        return False
+    active = {path.resolve() for path in scan.active}
+    return any(path.resolve() in active for _, path in matches)
 
 
 def update_profile(
@@ -154,29 +230,35 @@ def update_profile(
     if replace and not add_skill:
         fail("--replace requires --add-skill")
     profile = read_profile_config(root, name)
-    sources = load_sources(root, checkout_dir) if add_skill or remove_skill else {}
+    sources = load_sources(root, checkout_dir) if add_skill else {}
     if add_skill:
+        scans = workspace_skill_scans(root, sources)
         add_skill, inferred_include = resolve_skill_reference(
-            add_skill,
-            sources,
-            root,
+            add_skill, sources, root, scans=scans
         )
         include = with_inferred_include(include, inferred_include)
         validate_profile_skill_selectors(
-            add_skill, sources, root, include=include, exclude=exclude
-        )
-    remove_skill_selector = None
-    if remove_skill:
-        remove_skill, inferred_remove = resolve_skill_reference(
-            remove_skill,
+            add_skill,
             sources,
             root,
+            include=include,
+            exclude=exclude,
+            progress=progress,
+            scan=scans[add_skill],
         )
-        if inferred_remove is not None:
-            validate_profile_skill_selectors(
-                remove_skill, sources, root, include=[inferred_remove], exclude=None
+    remove_skill_selector = None
+    wildcard_exclusion = True
+    if remove_skill:
+        source_name, selector = _resolve_removal(
+            profile, remove_skill, root, checkout_dir
+        )
+        if selector is None:
+            remove_skill = source_name
+        else:
+            wildcard_exclusion = _wildcard_exclusion_needed(
+                profile, source_name, selector, root, checkout_dir
             )
-            remove_skill_selector = (remove_skill, inferred_remove)
+            remove_skill_selector = (source_name, selector)
             remove_skill = None
     updated = update_profile_config(
         profile,
@@ -184,6 +266,7 @@ def update_profile(
         add_skill=add_skill,
         remove_skill=remove_skill,
         remove_skill_selector=remove_skill_selector,
+        wildcard_exclusion=wildcard_exclusion,
         include=include,
         exclude=exclude,
         replace=replace,

@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hagency_cli.workspace.config import read_toml, write_toml
-from hagency_cli.workspace.errors import fail
-from hagency_cli.workspace.events import Progress
+from hagency_cli.workspace.errors import WorkspaceError, fail
+from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.skills import (
     SkillConflictUI,
     SkillLinkCandidate,
-    validate_skills_dir,
+    SkillScan,
     install_skill,
-    require_unique_link_names,
     resolve_link_name_conflicts,
     resolve_selector,
+    skill_skip_roots,
     skill_source,
     validate_skill_selector,
     validate_skill_source,
+    validate_skills_dir,
+    workspace_skill_scans,
     workspace_source,
 )
-from hagency_cli.workspace.sources import Source, require_source_path
+from hagency_cli.workspace.sources import Source, source_path_warning
 
 
 def find_profile_source_references(repo_root: Path, source_name: str) -> list[Path]:
@@ -67,6 +70,8 @@ def require_profile_schema(profile: dict) -> None:
         fail(
             "legacy [[skills]] profile config is no longer supported; use [skill.<source>]"
         )
+    if not isinstance(profile.get("skill", {}), dict):
+        fail("profile skill must be a table")
 
 
 def read_profile_config(repo_root: Path, profile_name: str) -> dict:
@@ -81,7 +86,9 @@ def write_profile_config(repo_root: Path, profile_name: str, profile: dict) -> N
     write_toml(path, profile)
 
 
-def list_profile_configs(repo_root: Path) -> list[tuple[str, dict]]:
+def list_profile_configs(
+    repo_root: Path, *, progress: Progress | None = None
+) -> list[tuple[str, dict]]:
     profiles_root = profiles_root_path(repo_root)
     if not profiles_root.exists():
         return []
@@ -90,8 +97,17 @@ def list_profile_configs(repo_root: Path) -> list[tuple[str, dict]]:
     for config_path in sorted(
         profiles_root.glob("*/config.toml"), key=lambda path: path.parent.name
     ):
-        profile = read_toml(config_path)
-        require_profile_schema(profile)
+        try:
+            profile = read_profile_config(repo_root, config_path.parent.name)
+        except WorkspaceError as exc:
+            if progress is None:
+                raise
+            emit_event(
+                progress,
+                f"Warning: profile {config_path.parent.name}: {exc}",
+                severity="warning",
+            )
+            continue
         profiles.append((config_path.parent.name, profile))
     return profiles
 
@@ -147,7 +163,9 @@ def set_profile_skill(
         skills[source_name] = config
         return
 
-    config = dict(existing or {})
+    if not isinstance(existing, dict):
+        fail(f"profile skill {source_name} must be a table")
+    config = dict(existing)
     if include:
         current_include = config.get("include")
         if current_include is not None:
@@ -180,32 +198,25 @@ def remove_profile_skill(profile: dict, source_name: str) -> None:
 
 
 def remove_profile_skill_selector(
-    profile: dict, source_name: str, selector: str
+    profile: dict, source_name: str, selector: str, *, wildcard_exclusion: bool = True
 ) -> None:
     require_profile_schema(profile)
     skills = profile.get("skill", {})
     if source_name not in skills:
         fail(f"profile does not reference skill source: {source_name}")
 
-    config = dict(skills.get(source_name) or {})
+    if not isinstance(skills[source_name], dict):
+        fail(f"profile skill {source_name} must be a table")
+    config = dict(skills[source_name])
     current_include = config.get("include")
-    if current_include is None:
-        current_exclude = config.get("exclude")
-        exclude_values = (
-            require_string_list(
-                current_exclude, field="exclude", source_name=source_name
-            )
-            if current_exclude is not None
-            else []
-        )
-        config["exclude"] = dedupe_append(exclude_values, [selector])
-        skills[source_name] = config
-        return
-
-    include_values = require_string_list(
-        current_include, field="include", source_name=source_name
+    include_values = (
+        require_string_list(current_include, field="include", source_name=source_name)
+        if current_include is not None
+        else []
     )
-    if "*" in include_values:
+    if current_include is None or ("*" in include_values and wildcard_exclusion):
+        if selector != "*" and selector in include_values:
+            config["include"] = [item for item in include_values if item != selector]
         current_exclude = config.get("exclude")
         exclude_values = (
             require_string_list(
@@ -262,14 +273,12 @@ def update_profile_config(
     exclude: list[str] | None,
     replace: bool,
     sources: dict[str, Source],
+    wildcard_exclusion: bool = True,
 ) -> dict:
     require_profile_schema(profile)
     updated = dict(profile)
     if "skill" in profile:
-        updated["skill"] = {
-            name: dict(config or {})
-            for name, config in profile.get("skill", {}).items()
-        }
+        updated["skill"] = dict(profile["skill"])
 
     changed = False
     if description is not None:
@@ -286,7 +295,7 @@ def update_profile_config(
         changed = True
     if remove_skill_selector:
         remove_profile_skill_selector(
-            updated, remove_skill_selector[0], remove_skill_selector[1]
+            updated, *remove_skill_selector, wildcard_exclusion=wildcard_exclusion
         )
         changed = True
     if not changed:
@@ -309,66 +318,93 @@ def validate_profile_skill_selectors(
     *,
     include: list[str] | None,
     exclude: list[str] | None,
+    progress: Progress | None = None,
+    scan: SkillScan | None = None,
 ) -> None:
     selectors = [*(include or []), *(exclude or [])]
-    if not selectors:
-        return
-
-    workspace = workspace_source(workspace_root)
-    source = skill_source(source_name, sources, workspace)
+    source = skill_source(source_name, sources, workspace_source(workspace_root))
     for selector in selectors:
         validate_skill_selector(source, selector)
-    if not source.path.exists() or not source.path.is_dir():
-        return
-
-    skip_roots = (
-        {source.path for source in sources.values()}
-        if source_name == "workspace"
-        else None
-    )
-    for selector in selectors:
-        resolve_selector(source, selector, skip_roots=skip_roots)
-
-
-def selected_links(
-    config: dict,
-    source: Source,
-    *,
-    skip_roots: set[Path] | None = None,
-    allow_name_conflicts: bool = False,
-) -> list[tuple[str, Path]]:
-    includes = config.get("include") or ["*"]
-    excludes = set(config.get("exclude") or [])
-
-    links: list[tuple[str, Path]] = []
-    for item in includes:
-        links.extend(
-            resolve_selector(
-                source,
-                item,
-                skip_roots=skip_roots,
-                allow_name_conflicts=allow_name_conflicts,
-            )
+    if unavailable := source_path_warning(source):
+        emit_event(
+            progress,
+            f"Warning: {unavailable}; skill selection is unverified",
+            severity="warning",
         )
+        return
+    scan = scan or SkillScan(source, skill_skip_roots(source_name, sources))
+    for selector in selectors:
+        resolve_selector(source, selector, scan=scan, progress=progress)
 
-    excluded_paths: set[Path] = set()
-    for item in excludes:
-        for _name, target in resolve_selector(
-            source,
-            item,
-            skip_roots=skip_roots,
-            allow_name_conflicts=allow_name_conflicts,
-        ):
-            excluded_paths.add(target.resolve())
 
-    filtered = [
-        (name, target)
-        for name, target in links
-        if target.resolve() not in excluded_paths
-    ]
-    if not allow_name_conflicts:
-        require_unique_link_names(filtered)
-    return filtered
+@dataclass
+class ProfileSelection:
+    links: list[SkillLinkCandidate] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+
+def inspect_profile(
+    profile_name: str,
+    profile: dict,
+    scans: dict[str, SkillScan],
+    *,
+    invalid_sources: dict[str, str] | None = None,
+    progress: Progress | None = None,
+    allow_name_conflicts: bool = True,
+) -> ProfileSelection:
+    require_profile_schema(profile)
+    selection = ProfileSelection()
+    for source_name, config in profile.get("skill", {}).items():
+        context = f"profile {profile_name}, source {source_name}"
+        if not isinstance(config, dict):
+            selection.problems.append(f"{context}: skill entry must be a table")
+            continue
+        scan = scans.get(source_name)
+        unavailable = source_path_warning(scan.source) if scan is not None else None
+
+        includes = []
+        excluded = set()
+        for key in ("include", "exclude"):
+            try:
+                values = require_string_list(
+                    config.get(key, []), field=key, source_name=source_name
+                )
+            except WorkspaceError as exc:
+                selection.problems.append(f"{context}: {exc}")
+                continue
+            for selector in values or (["*"] if key == "include" else []):
+                label = f"{context}, {key} {selector!r}"
+                if scan is None:
+                    reason = (invalid_sources or {}).get(
+                        source_name, f"unknown source: {source_name}"
+                    )
+                    selection.problems.append(f"{label}: {reason}")
+                    continue
+                try:
+                    if unavailable:
+                        validate_skill_selector(scan.source, selector)
+                        selection.problems.append(f"{label}: {unavailable}")
+                        continue
+                    links = resolve_selector(
+                        scan.source,
+                        selector,
+                        scan=scan,
+                        progress=progress,
+                        warning_context=f"{label}: ",
+                        allow_name_conflicts=allow_name_conflicts or selector == "*",
+                    )
+                except WorkspaceError as exc:
+                    selection.problems.append(f"{label}: {exc}")
+                    continue
+                for name, target in links:
+                    if key == "include":
+                        includes.append(SkillLinkCandidate(name, source_name, target))
+                    else:
+                        excluded.add(target.resolve())
+        selection.links.extend(
+            link for link in includes if link.target.resolve() not in excluded
+        )
+    return selection
 
 
 def apply_profile(
@@ -379,38 +415,23 @@ def apply_profile(
     *,
     link_mode: str,
     dry_run: bool,
+    profile_name: str | None = None,
+    invalid_sources: dict[str, str] | None = None,
     conflict_ui: SkillConflictUI | None = None,
     progress: Progress | None = None,
 ) -> tuple[SkillLinkCandidate, ...]:
     validate_skills_dir(skills_dir)
-    workspace = workspace_source(workspace_root)
-    if "skills" in profile:
-        fail(
-            "legacy [[skills]] profile config is no longer supported; use [skill.<source>]"
-        )
-
-    source_roots = {source.path for source in sources.values()}
-    links: list[SkillLinkCandidate] = []
-    for source_name, config in profile.get("skill", {}).items():
-        source = skill_source(source_name, sources, workspace)
-        require_source_path(source)
-        skip_roots = source_roots if source.name == "workspace" else None
-        links.extend(
-            SkillLinkCandidate(
-                name=link_name,
-                source_name=source_name,
-                target=target,
-            )
-            for link_name, target in selected_links(
-                config or {},
-                source,
-                skip_roots=skip_roots,
-                allow_name_conflicts=True,
-            )
-        )
-
+    selection = inspect_profile(
+        profile_name or profile.get("name", "<unnamed>"),
+        profile,
+        workspace_skill_scans(workspace_root, sources),
+        invalid_sources=invalid_sources,
+        progress=progress,
+    )
+    if selection.problems:
+        fail("\n".join(selection.problems))
     selected = resolve_link_name_conflicts(
-        links, conflict_ui, preview_conflicts=dry_run, progress=progress
+        selection.links, conflict_ui, preview_conflicts=dry_run, progress=progress
     )
     for link in selected:
         install_skill(

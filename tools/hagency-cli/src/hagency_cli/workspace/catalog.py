@@ -5,15 +5,14 @@ from pathlib import Path
 
 from hagency_cli.workspace.errors import fail
 from hagency_cli.workspace.events import Progress, emit_event
+from hagency_cli.workspace.profiles import inspect_profile
 from hagency_cli.workspace.skills import (
     discover_skill_dirs,
-    discover_skill_links,
     is_archived_location,
-    resolve_selector,
     skill_skip_roots,
-    skill_source,
     source_relative_selector,
     source_skill_content,
+    workspace_skill_scans,
     workspace_source,
 )
 from hagency_cli.workspace.sources import (
@@ -112,60 +111,39 @@ def list_filtered_skill_rows(
     return rows
 
 
-def list_selector_links(
-    source: Source, selector: str, *, skip_roots: set[Path] | None = None
-) -> list[tuple[str, Path]]:
-    if selector == "*":
-        return discover_skill_links(source, skip_roots=skip_roots)
-    return resolve_selector(source, selector, skip_roots=skip_roots)
-
-
-def list_profile_selected_links(
-    config: dict, source: Source, *, skip_roots: set[Path] | None = None
-) -> list[tuple[str, Path]]:
-    includes = config.get("include") or ["*"]
-    excludes = config.get("exclude") or []
-
-    links = []
-    for item in includes:
-        links.extend(list_selector_links(source, item, skip_roots=skip_roots))
-
-    excluded_paths = set()
-    for item in excludes:
-        for _name, target in list_selector_links(source, item, skip_roots=skip_roots):
-            excluded_paths.add(target.resolve())
-
-    return [
-        (name, target)
-        for name, target in links
-        if target.resolve() not in excluded_paths
-    ]
-
-
 def list_profile_skill_rows(
     root: Path,
     sources: dict[str, Source],
     profile: dict,
-    source_filters: list[str] | None,
+    source_filters: list[str],
+    progress: Progress | None,
 ) -> list[SkillCatalogEntry]:
-    selected_sources = (
-        set(validate_skill_source_filters(source_filters, sources, root))
-        if source_filters
-        else None
+    if source_filters:
+        selected = validate_skill_source_filters(source_filters, sources, root)
+        profile = {
+            **profile,
+            "skill": {
+                name: config
+                for name, config in profile.get("skill", {}).items()
+                if name in selected
+            },
+        }
+    scans = workspace_skill_scans(root, sources)
+    result = inspect_profile(
+        profile.get("name", "<profile>"),
+        profile,
+        scans,
+        progress=progress,
+        allow_name_conflicts=False,
     )
-    rows = []
-    workspace = workspace_source(root)
-    for source_name, config in profile.get("skill", {}).items():
-        if selected_sources is not None and source_name not in selected_sources:
-            continue
-        source = skill_source(source_name, sources, workspace)
-        require_source_path(source)
-        skip_roots = skill_skip_roots(source_name, sources)
-        for name, target in list_profile_selected_links(
-            config or {}, source, skip_roots=skip_roots
-        ):
-            rows.append(catalog_entry(source_name, source, name, target))
-    return rows
+    if result.problems:
+        fail("\n".join(result.problems))
+    return [
+        catalog_entry(
+            link.source_name, scans[link.source_name].source, link.name, link.target
+        )
+        for link in result.links
+    ]
 
 
 def discover_catalog(
@@ -178,7 +156,7 @@ def discover_catalog(
 ) -> tuple[SkillCatalogEntry, ...]:
     filters = source_filters or []
     if profile is not None:
-        entries = list_profile_skill_rows(root, sources, profile, filters)
+        entries = list_profile_skill_rows(root, sources, profile, filters, progress)
     elif filters:
         entries = list_filtered_skill_rows(root, sources, filters)
     else:

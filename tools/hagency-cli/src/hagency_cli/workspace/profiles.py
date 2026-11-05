@@ -350,7 +350,6 @@ def inspect_profile(
     *,
     invalid_sources: dict[str, str] | None = None,
     progress: Progress | None = None,
-    allow_name_conflicts: bool = True,
 ) -> ProfileSelection:
     require_profile_schema(profile)
     selection = ProfileSelection()
@@ -391,14 +390,19 @@ def inspect_profile(
                         scan=scan,
                         progress=progress,
                         warning_context=f"{label}: ",
-                        allow_name_conflicts=allow_name_conflicts or selector == "*",
+                        allow_name_conflicts=True,
                     )
                 except WorkspaceError as exc:
                     selection.problems.append(f"{label}: {exc}")
                     continue
+                explicit = key == "include" and (
+                    scan.source.path / selector / "SKILL.md"
+                ).is_file()
                 for name, target in links:
                     if key == "include":
-                        includes.append(SkillLinkCandidate(name, source_name, target))
+                        includes.append(
+                            SkillLinkCandidate(name, source_name, target, explicit=explicit)
+                        )
                     else:
                         excluded.add(target.resolve())
         selection.links.extend(
@@ -421,17 +425,22 @@ def apply_profile(
     progress: Progress | None = None,
 ) -> tuple[SkillLinkCandidate, ...]:
     validate_skills_dir(skills_dir)
+    scans = workspace_skill_scans(workspace_root, sources)
     selection = inspect_profile(
         profile_name or profile.get("name", "<unnamed>"),
         profile,
-        workspace_skill_scans(workspace_root, sources),
+        scans,
         invalid_sources=invalid_sources,
         progress=progress,
     )
     if selection.problems:
         fail("\n".join(selection.problems))
     selected = resolve_link_name_conflicts(
-        selection.links, conflict_ui, preview_conflicts=dry_run, progress=progress
+        selection.links,
+        conflict_ui,
+        sources={name: scan.source for name, scan in scans.items()},
+        preview_conflicts=dry_run,
+        progress=progress,
     )
     for link in selected:
         install_skill(

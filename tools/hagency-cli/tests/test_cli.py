@@ -2274,6 +2274,7 @@ class CliTests(unittest.TestCase):
         self,
     ) -> None:
         self.write_skill(self.root / "local-source" / "skills" / "write")
+        self.write_skill(self.root / "local-source" / "other" / "write")
         self.write_skill(
             self.root / "local-source" / "plugins" / "waza" / "skills" / "write"
         )
@@ -2286,16 +2287,18 @@ class CliTests(unittest.TestCase):
 
         self.assertIn("skill name 'write' is ambiguous. Choose one:", stderr)
         self.assertIn(
-            "hgc profile update content -AS local-source:plugins/waza/skills/write",
+            "hgc profile update content -AS local-source:other/write",
             stderr,
         )
         self.assertIn(
             "hgc profile update content -AS local-source:skills/write", stderr
         )
+        self.assertNotIn("plugins/waza/skills/write", stderr)
         self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
 
     def test_profile_update_include_ambiguous_selector_fails_before_write(self) -> None:
         self.write_skill(self.root / "local-source" / "skills" / "write")
+        self.write_skill(self.root / "local-source" / "other" / "write")
         self.write_skill(
             self.root / "local-source" / "plugins" / "waza" / "skills" / "write"
         )
@@ -2317,8 +2320,9 @@ class CliTests(unittest.TestCase):
             "skill selector 'write' for source local-source matched multiple candidates",
             stderr,
         )
-        self.assertIn("plugins/waza/skills/write", stderr)
+        self.assertIn("other/write", stderr)
         self.assertIn("skills/write", stderr)
+        self.assertNotIn("plugins/waza/skills/write", stderr)
         self.assertEqual(profile_path.read_text(encoding="utf-8"), before)
 
     def test_profile_update_short_alias_with_profile_short_alias(self) -> None:

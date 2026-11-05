@@ -43,6 +43,7 @@ class SkillLinkCandidate:
     name: str
     source_name: str
     target: Path
+    explicit: bool = False
 
 
 class SkillConflictUI(Protocol):
@@ -68,14 +69,19 @@ def iter_skill_name_matches(
     scans = (
         scans if scans is not None else workspace_skill_scans(workspace_root, sources)
     )
-    matches: list[tuple[str, Path]] = []
+    candidates: list[SkillLinkCandidate] = []
     for source_name, scan in scans.items():
         if not scan.source.path.is_dir():
             continue
         for target in scan.active:
             if target.name == skill_name:
-                matches.append((source_name, target))
-    return matches
+                candidates.append(SkillLinkCandidate(skill_name, source_name, target))
+    return [
+        (candidate.source_name, candidate.target)
+        for candidate in _prefer_non_plugin_candidates(
+            candidates, {name: scan.source for name, scan in scans.items()}
+        )
+    ]
 
 
 def split_source_selector_reference(
@@ -102,6 +108,32 @@ def source_relative_selector(source: Source, target: Path) -> str:
         return target.resolve().relative_to(source.path.resolve()).as_posix()
     except ValueError:
         return target.as_posix()
+
+
+def _prefer_non_plugin_candidates(
+    candidates: list[SkillLinkCandidate], sources: dict[str, Source]
+) -> list[SkillLinkCandidate]:
+    """Prefer implicit ordinary copies within validated source/name groups."""
+    groups: dict[tuple[str, str], list[SkillLinkCandidate]] = {}
+    for candidate in candidates:
+        groups.setdefault((candidate.source_name, candidate.name), []).append(candidate)
+
+    discarded: set[SkillLinkCandidate] = set()
+    source_roots: dict[str, Path] = {}
+    for (source_name, _name), group in groups.items():
+        if len(group) == 1:
+            continue
+        if source_name not in source_roots:
+            source_roots[source_name] = sources[source_name].path.resolve()
+        root = source_roots[source_name]
+        plugins = [
+            candidate
+            for candidate in group
+            if "plugin" in candidate.target.resolve().relative_to(root).as_posix().casefold()
+        ]
+        if len(plugins) < len(group):
+            discarded.update(candidate for candidate in plugins if not candidate.explicit)
+    return [candidate for candidate in candidates if candidate not in discarded]
 
 
 def resolve_skill_reference(
@@ -402,6 +434,7 @@ def resolve_selector(
     skip_roots: set[Path] | None = None,
     allow_name_conflicts: bool = False,
     scan: SkillScan | None = None,
+    name_scope: Path | None = None,
     progress: Progress | None = None,
     warning_context: str = "",
 ) -> list[tuple[str, Path]]:
@@ -409,10 +442,7 @@ def resolve_selector(
     scan = scan or SkillScan(source, skip_roots)
     if selector == "*":
         matches = discover_skill_links(source, scan=scan)
-        if not allow_name_conflicts:
-            require_unique_link_names(matches)
-        return matches
-    if target.exists():
+    elif target.exists():
         matches = discover_skill_links(
             source,
             prefix=selector,
@@ -421,7 +451,8 @@ def resolve_selector(
             warning_context=warning_context,
         )
     else:
-        matches = [(path.name, path) for path in scan.active if path.name == selector]
+        paths = scan.active if name_scope is None else scan.paths_under(name_scope)
+        matches = [(path.name, path) for path in paths if path.name == selector]
         if not matches:
             archived = [
                 path for path in scan.archived if path.name == Path(selector).name
@@ -436,11 +467,21 @@ def resolve_selector(
                 f"skill selector {selector!r} for source {source.name} matched no candidates{hint}"
             )
 
-    if len(matches) > 1 and not allow_name_conflicts:
-        fail(
-            f"skill selector {selector!r} for source {source.name} matched multiple candidates. "
-            f"Use a more specific selector: {format_selector_choices(source, matches)}"
-        )
+    if not allow_name_conflicts:
+        matches = [
+            (candidate.name, candidate.target)
+            for candidate in _prefer_non_plugin_candidates(
+                [SkillLinkCandidate(name, source.name, path) for name, path in matches],
+                {source.name: source},
+            )
+        ]
+        if selector == "*":
+            require_unique_link_names(matches)
+        elif len(matches) > 1:
+            fail(
+                f"skill selector {selector!r} for source {source.name} matched multiple candidates. "
+                f"Use a more specific selector: {format_selector_choices(source, matches)}"
+            )
     return matches
 
 
@@ -448,12 +489,13 @@ def resolve_link_name_conflicts(
     links: list[SkillLinkCandidate],
     conflict_ui: SkillConflictUI | None,
     *,
+    sources: dict[str, Source],
     preview_conflicts: bool = False,
     progress: Progress | None = None,
 ) -> list[SkillLinkCandidate]:
     candidates_by_name: dict[str, list[SkillLinkCandidate]] = {}
     resolved_by_name: dict[str, set[Path]] = {}
-    for link in links:
+    for link in _prefer_non_plugin_candidates(links, sources):
         resolved = link.target.resolve()
         if resolved in resolved_by_name.setdefault(link.name, set()):
             continue

@@ -134,7 +134,6 @@ def list_profile_skill_rows(
         profile,
         scans,
         progress=progress,
-        allow_name_conflicts=False,
     )
     if result.problems:
         fail("\n".join(result.problems))

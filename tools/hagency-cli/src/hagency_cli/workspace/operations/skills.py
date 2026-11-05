@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -137,7 +137,14 @@ def _select_candidates(
             fail(
                 f"skill reference {source.name + ':' + exact!r} matched {len(links)} skills; choose one exact SOURCE:selector"
             )
-        return (SkillLinkCandidate(links[0][0], source.name, links[0][1]),)
+        return (
+            SkillLinkCandidate(
+                links[0][0],
+                source.name,
+                links[0][1],
+                explicit=(source.path / exact / "SKILL.md").is_file(),
+            ),
+        )
     scope = selection.scope_root.resolve()
     available_paths = scan.paths_under(selection.scope_root)
     available = tuple(
@@ -147,11 +154,13 @@ def _select_candidates(
         selected = []
         allowed = {path.resolve() for path in available_paths}
         for selector in selectors:
+            explicit = (source.path / selector / "SKILL.md").is_file()
             for name, path in resolve_selector(
                 source,
                 selector,
                 scan=scan,
                 allow_name_conflicts=True,
+                name_scope=selection.scope_root,
                 progress=progress,
             ):
                 target = path.resolve()
@@ -162,7 +171,9 @@ def _select_candidates(
                     fail(
                         f"skill selector {selector!r} is outside the input directory: {scope}"
                     )
-                selected.append(SkillLinkCandidate(name, source.name, path))
+                selected.append(
+                    SkillLinkCandidate(name, source.name, path, explicit=explicit)
+                )
     elif not available:
         fail(f"no SKILL.md files found in source {source.name}: {scope}")
     elif all_skills or len(available) == 1:
@@ -196,10 +207,16 @@ def _select_candidates(
         chosen = {p.resolve() for p in paths}
         if not chosen.issubset({c.target.resolve() for c in available}):
             fail("invalid interactive skill selection")
-        selected = [c for c in available if c.target.resolve() in chosen]
+        selected = [
+            replace(c, explicit=True) for c in available if c.target.resolve() in chosen
+        ]
     return tuple(
         resolve_link_name_conflicts(
-            selected, ui, preview_conflicts=dry_run, progress=progress
+            selected,
+            ui,
+            sources={source.name: source},
+            preview_conflicts=dry_run,
+            progress=progress,
         )
     )
 

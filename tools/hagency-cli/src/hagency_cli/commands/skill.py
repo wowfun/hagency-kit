@@ -175,8 +175,11 @@ def skill_add_cli(
     exclusive and cannot accompany an exact skill input. Selectors must stay inside
     the source. One discovered skill installs directly; multiple skills need TTY
     multiselect or explicit selectors/--all in non-TTY use. Nothing is preselected.
-    Duplicate install names still require a choice or narrower selectors, including
-    with --all. All selections and conflicts resolve before target writes.
+    Duplicate names within one source prefer paths without 'plugin' (ignoring
+    case) relative to that source. Remaining conflicts require a choice or
+    narrower selectors, including with --all. Exact paths and multiselect choices
+    are preserved, so explicitly selected plugin copies remain conflict candidates.
+    All selections and conflicts resolve before target writes.
 
     URLs and local paths reuse matching sources or register new ones. Use
     --source-name to resolve ambiguous matches or choose a new registration name.

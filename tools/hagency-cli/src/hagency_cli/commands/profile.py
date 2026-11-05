@@ -456,8 +456,12 @@ def profile_apply_cli(
     Invalid references are reported together before any installation, including
     during --dry-run. Exact archived skills remain selectable with a warning.
 
-    Duplicate skill names prompt for a source path in a TTY without changing the
-    profile. Non-TTY use fails with guidance to narrow its include selectors.
+    After include/exclude filtering, duplicate names within one source prefer
+    source-relative paths without 'plugin', ignoring case. A unique ordinary
+    candidate is selected automatically. Exact paths are preserved, so explicitly
+    included plugin copies remain conflict candidates when a twin is also selected.
+    Remaining conflicts prompt for a source path in a TTY without changing the
+    profile. Non-TTY conflicts fail with guidance to narrow its include selectors.
     --dry-run previews materialization without writes and lists conflicts without
     prompting, even in a TTY. Installation is not transactional.
 

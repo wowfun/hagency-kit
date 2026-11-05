@@ -73,3 +73,8 @@ url = "https://github.com/Yevanchen/reclaim-code-entropy.git"
 
 [source.baoyu-design.remote]
 url = "https://github.com/JimLiu/baoyu-design"
+
+[source.guizang-product-video-skill]
+
+[source.guizang-product-video-skill.remote]
+url = "https://github.com/op7418/guizang-product-video-skill.git"

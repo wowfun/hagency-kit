@@ -16,3 +16,5 @@ include = ["eli5"]
 include = ["skills/write"]
 
 [skill.baoyu-design]
+
+[skill.guizang-product-video-skill]

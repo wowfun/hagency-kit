@@ -1,1 +1,1 @@
-Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining
+Avoid unnecessary secondary labels and descriptions. Let the layout do the explaining.

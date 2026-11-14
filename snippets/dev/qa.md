@@ -17,6 +17,7 @@ Conduct a comprehensive, in-depth, and adversarial review of all uncommitted cha
 - unnecessary complexity, including unreachable defensive paths, duplicate logic, and convoluted control flow
 - dead code, duplication, and maintenance burden
 - UI/UX and design quality, including clarity, consistency, accessibility, responsiveness, and cognitive load; flag anything that does not clarify intent, enable action, or add meaningful value
+- data and state storage and persistence, including storage suitability, persistence necessity and boundaries, fragmented persistence logic, and read/write patterns
 
 ---
 
@@ -32,8 +33,8 @@ Conduct a comprehensive, in-depth, and adversarial simplification audit of `<sco
 
 ---
 
-read `<file>`. verify and fix substantive issues; selectively adopt improvement suggestions based on their expected benefit
+Read `<file>`. Verify and fix substantive issues; selectively adopt improvement suggestions based on their expected benefit.
 
 ---
 
-resolve CI failures and conduct a comprehensive, in-depth, and adversarial audit of the CI workflows, focusing on simplicity, efficiency, and eliminating redundancy and unnecessary complexity
+Resolve CI failures and conduct a comprehensive, in-depth, and adversarial audit of the CI workflows, focusing on simplicity, efficiency, and eliminating redundancy and unnecessary complexity.

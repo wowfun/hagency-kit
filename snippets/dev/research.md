@@ -1,0 +1,1 @@
+Conduct a comprehensive, in-depth, and evidence-based gap analysis of `<subject>` against `<target or reference>`, identifying substantive gaps across dimensions including, but not limited to, capabilities, architecture, performance, resource efficiency, reliability, quality, usability, and extensibility.

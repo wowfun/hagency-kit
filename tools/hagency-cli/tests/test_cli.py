@@ -33,7 +33,7 @@ import hagency_cli.workspace.skills as workspace_skills_module
 import hagency_cli.workspace.sources as workspace_sources_module
 from hagency_cli import cli
 from tests.support import directory_link
-from hagency_cli.commands.shared import render_event
+from hagency_cli.commands.shared import CommandGroup, render_event
 from hagency_cli.workspace.errors import WorkspaceError
 
 
@@ -435,6 +435,20 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("--git-changed", values)
         self.assertNotIn("--delete", values)
         self.assertNotIn("--update", values)
+
+        values, _stderr = self.complete_bash("hgc profile ", 2)
+        for command in CommandGroup.command_names("profile", "apply"):
+            self.assertIn(command, values)
+            profiles, stderr = self.complete_bash(f"hgc p {command} ", 3)
+            self.assertEqual(profiles, ["content"])
+            self.assertEqual(stderr, "")
+
+        values, _stderr = self.complete_bash("hgc skill ", 2)
+        for command in CommandGroup.command_names("skill", "add"):
+            self.assertIn(command, values)
+            skills, stderr = self.complete_bash(f"hgc skill {command} ", 3)
+            self.assertIn("external-one", skills)
+            self.assertEqual(stderr, "")
 
         values, _stderr = self.complete_bash("hgc file push --", 3)
         self.assertIn("--git-changed", values)

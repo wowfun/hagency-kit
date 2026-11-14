@@ -13,6 +13,7 @@ from hagency_cli.commands.completion import (
     complete_source_or_workspace,
 )
 from hagency_cli.commands.shared import (
+    aliased_command,
     command_errors,
     make_app,
     render_event,
@@ -73,7 +74,9 @@ def skill_list_command(
         )
 
 
-@skill_app.command(
+@aliased_command(
+    skill_app,
+    "skill",
     "add",
     short_help="Install skills from a reference, source, Git URL, or local directory.",
 )
@@ -155,6 +158,8 @@ def skill_add_cli(
     ] = False,
 ) -> None:
     """Install skills from a reference, source, Git URL, or local directory.
+
+    Aliases: install, a, i.
 
     Requires an existing Hagency workspace; use hgc init first if needed. Inputs
     accept a unique discovered skill name, SOURCE:selector, registered source,

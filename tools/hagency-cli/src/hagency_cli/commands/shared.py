@@ -86,6 +86,22 @@ class CommandGroup(TyperGroup):
         "rm": "remove",
         "u": "update",
     }
+    group_aliases = {
+        "profile": {"install": "apply", "a": "apply", "i": "apply"},
+        "skill": {"install": "add", "a": "add", "i": "add"},
+    }
+
+    @classmethod
+    def aliases_for(cls, group: str | None) -> dict[str, str]:
+        canonical = cls.aliases.get(group, group)
+        return {**cls.aliases, **cls.group_aliases.get(canonical, {})}
+
+    @classmethod
+    def command_names(cls, group: str, name: str) -> tuple[str, ...]:
+        return (
+            name,
+            *(alias for alias, target in cls.aliases_for(group).items() if target == name),
+        )
 
     def main(self, *args, standalone_mode=True, **kwargs):
         # Let Typer format usage and hints, styling only the diagnostic itself.
@@ -122,7 +138,7 @@ class CommandGroup(TyperGroup):
         }
         aliases = {
             alias: name
-            for alias, name in self.aliases.items()
+            for alias, name in self.aliases_for(ctx.info_name).items()
             if alias in commands and name in commands
         }
         rows = []
@@ -154,6 +170,18 @@ def make_app(*, help_text: str, add_completion: bool) -> typer.Typer:
         pretty_exceptions_enable=False,
         no_args_is_help=False,
     )
+
+
+def aliased_command(app: typer.Typer, group: str, name: str, *, short_help: str):
+    def register(callback):
+        for command in CommandGroup.command_names(group, name):
+            app.command(
+                command,
+                short_help=short_help if command == name else f"Alias for {name}.",
+            )(callback)
+        return callback
+
+    return register
 
 
 def render_workspace_error(error: WorkspaceError, command: str, values: dict) -> str:

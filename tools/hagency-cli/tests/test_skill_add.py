@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from hagency_cli import cli
 from hagency_cli.commands import skill_ui
+from hagency_cli.commands.shared import CommandGroup
 from hagency_cli.workspace.config import read_toml, write_toml
 from hagency_cli.workspace.errors import SourceNotReadyError, WorkspaceError
 from hagency_cli.workspace.operations import skills as operations
@@ -97,6 +98,26 @@ class SkillAddTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, expected, result.stderr)
         return result
+
+    def test_add_aliases_install_into_explicit_destination(self):
+        source = self.base / "local-skills"
+        skill = self.skill(source, "one")
+        self.registry["source"]["local"] = {"path": str(source)}
+        self.save()
+
+        for command in CommandGroup.command_names("skill", "add"):
+            with self.subTest(command=command):
+                destination = self.cwd / command
+                self.run_cli(
+                    "skill",
+                    command,
+                    "local:one",
+                    "--path",
+                    str(destination),
+                    "--root",
+                    str(self.root),
+                )
+                self.assertEqual((destination / "one").resolve(), skill.resolve())
 
     def test_url_registers_clones_and_links_then_reuses_without_update(self):
         origin = self.origin()
@@ -656,22 +677,26 @@ class SkillAddTests(unittest.TestCase):
         self.skill(source, "one")
         self.registry["source"]["named"] = {"path": str(source)}
         self.save()
-        for words, index, expected in [
-            (f"hgc skill add -r {shlex.quote(self.root.as_posix())} ", 5, "named"),
-            (f"hgc skill add named -r {shlex.quote(self.root.as_posix())} --skill ", 7, "one"),
-        ]:
-            with mock.patch(
-                "subprocess.run", side_effect=AssertionError("completion is read-only")
-            ):
-                result = self.run_cli(
-                    env={
-                        "_HGC_COMPLETE": "complete_bash",
-                        "COMP_WORDS": words,
-                        "COMP_CWORD": str(index),
-                    }
-                )
-            self.assertIn(expected, result.stdout.splitlines())
-            self.assertEqual(result.stderr, "")
+        root_arg = shlex.quote(self.root.as_posix())
+        for command in CommandGroup.command_names("skill", "add"):
+            for words, index, expected in [
+                (f"hgc skill {command} -r {root_arg} ", 5, "named"),
+                (f"hgc skill {command} named -r {root_arg} --skill ", 7, "one"),
+            ]:
+                with self.subTest(command=command, words=words):
+                    with mock.patch(
+                        "subprocess.run",
+                        side_effect=AssertionError("completion is read-only"),
+                    ):
+                        result = self.run_cli(
+                            env={
+                                "_HGC_COMPLETE": "complete_bash",
+                                "COMP_WORDS": words,
+                                "COMP_CWORD": str(index),
+                            }
+                        )
+                    self.assertIn(expected, result.stdout.splitlines())
+                    self.assertEqual(result.stderr, "")
 
     def test_missing_workspace_and_invalid_config_are_clean_errors(self):
         before = self.config.read_bytes()

@@ -325,7 +325,7 @@ class CommandTreeTests(unittest.TestCase):
         )
         expected = {
             "source": {"list", "ls", "show", "add", "remove", "rm", "sync"},
-            "skill": {"list", "ls", "add"},
+            "skill": {"list", "ls", "add", "install", "a", "i"},
             "profile": {
                 "list",
                 "ls",
@@ -336,6 +336,9 @@ class CommandTreeTests(unittest.TestCase):
                 "remove",
                 "rm",
                 "apply",
+                "install",
+                "a",
+                "i",
             },
             "file": {
                 "init",
@@ -361,52 +364,54 @@ class CommandTreeTests(unittest.TestCase):
         self.assertEqual(set(command.commands["p"].commands), expected["profile"])
 
     def test_help_alias_map_matches_registered_callbacks_and_groups(self):
-        found_aliases = {}
+        found_aliases = set()
         visited = set()
 
-        def inspect_app(app):
+        def inspect_app(app, group=None):
             if id(app) in visited:
                 return
             visited.add(id(app))
+            aliases = CommandGroup.aliases_for(group)
             registrations = [
                 (item.name, item.callback) for item in app.registered_commands
             ] + [(item.name, item.typer_instance) for item in app.registered_groups]
             targets = dict(registrations)
-            canonical_names = {}
+            names_by_target = {}
             for name, target in registrations:
-                if target in canonical_names:
-                    canonical = canonical_names[target]
-                    self.assertEqual(CommandGroup.aliases.get(name), canonical)
-                    found_aliases[name] = canonical
-                else:
-                    canonical_names[target] = name
+                names_by_target.setdefault(target, []).append(name)
+            for names in names_by_target.values():
+                canonical_names = {aliases.get(name, name) for name in names}
+                self.assertEqual(len(canonical_names), 1, names)
+                canonical = canonical_names.pop()
+                self.assertIn(canonical, targets)
+                found_aliases.update(
+                    (name, canonical) for name in names if name != canonical
+                )
 
             # A matching spelling alone must never collapse distinct commands.
-            for alias, canonical in CommandGroup.aliases.items():
+            for alias, canonical in aliases.items():
                 if alias in targets and canonical in targets:
                     self.assertIs(targets[alias], targets[canonical], alias)
             for item in app.registered_groups:
-                inspect_app(item.typer_instance)
+                inspect_app(item.typer_instance, item.name)
 
         inspect_app(cli.app)
-        self.assertEqual(found_aliases, CommandGroup.aliases)
+        expected_aliases = set(CommandGroup.aliases.items())
+        for aliases in CommandGroup.group_aliases.values():
+            expected_aliases.update(aliases.items())
+        self.assertEqual(found_aliases, expected_aliases)
 
     def test_alias_help_matches_full_names_and_lists_aliases_together(self):
-        aliases = {
-            "s": "source",
-            "p": "profile",
-            "ls": "list",
-            "rm": "remove",
-            "u": "update",
-        }
-
-        def paths(command, prefix=()):
-            yield prefix
+        def paths(command, prefix=(), canonical=()):
+            yield prefix, canonical
+            aliases = CommandGroup.aliases_for(canonical[-1] if canonical else None)
             for name, child in getattr(command, "commands", {}).items():
-                yield from paths(child, (*prefix, name))
+                yield from paths(
+                    child, (*prefix, name), (*canonical, aliases.get(name, name))
+                )
 
-        for path in paths(get_command(cli.app)):
-            canonical = tuple(aliases.get(part, part) for part in path)
+        command = get_command(cli.app)
+        for path, canonical in paths(command):
             if canonical == path:
                 continue
             with self.subTest(path=path):
@@ -417,25 +422,28 @@ class CommandTreeTests(unittest.TestCase):
                 self.assertEqual(stdout.split("\n\n", 1)[1], full.split("\n\n", 1)[1])
                 self.assertIn("Examples:", stdout)
 
-        for path, labels in (
-            ((), ("source, s", "profile, p")),
-            (("source",), ("list, ls", "remove, rm")),
-            (("skill",), ("list, ls",)),
-            (("profile",), ("list, ls", "update, u", "remove, rm")),
-        ):
+        for path in ((), ("source",), ("skill",), ("profile",)):
             with self.subTest(group=path):
                 stdout, _stderr = self.run_main(*path, "--help")
                 command_list = stdout.split("Commands:\n", 1)[1]
                 self.assertNotIn("Alias for", command_list)
-                for label in labels:
-                    self.assertIn(label, command_list)
-                    canonical, alias = label.split(", ")
-                    self.assertFalse(
-                        any(
-                            line.startswith(f"  {alias} ")
-                            for line in command_list.splitlines()
+                group = command.commands[path[0]] if path else command
+                aliases = CommandGroup.aliases_for(path[-1] if path else None)
+                for canonical in dict.fromkeys(aliases.values()):
+                    names = [canonical] + [
+                        alias for alias, target in aliases.items()
+                        if target == canonical and alias in group.commands
+                    ]
+                    if len(names) == 1:
+                        continue
+                    self.assertIn(", ".join(names), command_list)
+                    for alias in names[1:]:
+                        self.assertFalse(
+                            any(
+                                line.startswith(f"  {alias} ")
+                                for line in command_list.splitlines()
+                            )
                         )
-                    )
 
     def test_help_explains_operation_boundaries(self):
         cases = {

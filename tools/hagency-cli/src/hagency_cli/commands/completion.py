@@ -9,6 +9,7 @@ from typing import Iterable
 
 import typer
 
+from hagency_cli.commands.shared import CommandGroup
 from hagency_cli.paths import expand_path
 from hagency_cli.workspace.catalog import SkillCatalogEntry, discover_catalog
 from hagency_cli.workspace.config import read_toml
@@ -346,7 +347,9 @@ def _raw_skill_input() -> str | None:
         start = words.index("skill")
     except ValueError:
         return None
-    if words[start + 1 : start + 2] != ["add"]:
+    if start + 1 >= len(words) or words[start + 1] not in CommandGroup.command_names(
+        "skill", "add"
+    ):
         return None
     value_options = {
         "--root",

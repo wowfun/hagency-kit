@@ -12,6 +12,7 @@ from hagency_cli.commands.completion import (
     complete_skill_reference,
 )
 from hagency_cli.commands.shared import (
+    aliased_command,
     command_errors,
     diagnostic,
     make_app,
@@ -375,7 +376,9 @@ def profile_show_cli(
     profile_show_command(name=name, root_value=root)
 
 
-@profile_app.command(
+@aliased_command(
+    profile_app,
+    "profile",
     "apply",
     short_help="Apply profile skills into a target directory.",
 )
@@ -446,6 +449,7 @@ def profile_apply_cli(
     --path (the final skills container) or --dir (a project whose destination is
     DIR/.agents/skills). Relative destinations use the invocation directory and
     ~ expands to your home. --root and --checkout-dir only locate profile/sources.
+    Aliases: install, a, i.
 
     The default is symlink, or junction on Windows. -cp or --link-mode copy creates
     independent copies; -cp cannot be combined with symlink or junction modes.

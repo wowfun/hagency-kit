@@ -37,7 +37,9 @@ hgc file    init|push|pull|sync|pack|apply|purge|clean
 hgc service model-proxy start|stop|restart
 ```
 
-Help lists command aliases on the same row as their full names: `source, s`, `profile, p`, `list, ls`, `remove, rm`, and `update, u`. Both forms accept the same parameters and show the same full help. Option aliases likewise share a row, such as `-p, --path PATH`. `source sync` updates Git checkouts; `file sync` synchronizes project files over SFTP.
+Help lists command aliases on the same row as their full names: `source, s`, `profile, p`, `list, ls`, `remove, rm`, and `update, u`. The `profile apply` and `skill add` commands also accept `install`, `a`, and `i`. All forms accept the same parameters and show the same full help.
+
+Option aliases likewise share a row, such as `-p, --path PATH`. `source sync` updates Git checkouts; `file sync` synchronizes project files over SFTP.
 
 Install shell completion or print its script:
 

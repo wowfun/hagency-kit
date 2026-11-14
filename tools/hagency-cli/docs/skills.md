@@ -15,6 +15,8 @@ Discovery skips entire directory segments named `archive`, `archived` or `deprec
 
 Repeat `--source` to narrow discovery; it can be combined with `--profile`. Output columns are source, name, selector, and path. Run `source sync` before discovery when remote content is missing or needs updating. Installation uses the [destination rules](configuration.md#installation-destinations).
 
+`skill add` also accepts the aliases `install`, `a`, and `i`, with the same options and behavior.
+
 ```sh
 hgc skill add owner/repo --skill code-review --skill tools/testing
 hgc skill add https://github.com/owner/repo.git --ref main --all

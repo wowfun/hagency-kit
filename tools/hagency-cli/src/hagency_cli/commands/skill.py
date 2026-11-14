@@ -127,7 +127,7 @@ def skill_add_cli(
             "--dir",
             "-d",
             metavar="DIR",
-            help="Target workspace directory; install under DIR/.agents/skills",
+            help="Target project directory; install under DIR/.agents/skills",
             autocompletion=complete_directory,
         ),
     ] = None,

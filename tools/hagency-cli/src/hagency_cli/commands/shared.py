@@ -68,14 +68,6 @@ def require_at_most_one(options: dict[str, object]) -> None:
         )
 
 
-def require_exactly_one(options: dict[str, object]) -> None:
-    require_at_most_one(options)
-    if not any(value not in (None, False) for value in options.values()):
-        raise typer.BadParameter(
-            f"one of the options is required: {', '.join(options)}"
-        )
-
-
 class CommandGroup(TyperGroup):
     """Group existing command aliases in help without hiding them from completion."""
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -18,7 +19,6 @@ from hagency_cli.commands.shared import (
     make_app,
     render_event,
     require_at_most_one,
-    require_exactly_one,
 )
 from hagency_cli.workspace.config import read_toml_document
 from hagency_cli.workspace.context import load_sources, workspace_root_arg
@@ -53,6 +53,7 @@ profile_app = make_app(
     Examples:
       hgc profile add dev -AS workspace:skills/analyze-diff
       hgc source sync --profile dev
+      hgc profile apply dev --dry-run
       hgc profile apply dev --dir ./project --dry-run
       hgc profile update --help
     """,
@@ -406,7 +407,7 @@ def profile_apply_cli(
             "--dir",
             "-d",
             metavar="DIR",
-            help="Target workspace directory; install under DIR/.agents/skills",
+            help="Target project directory; install under DIR/.agents/skills (default: ./ when --path and --dir are omitted)",
             autocompletion=complete_directory,
         ),
     ] = None,
@@ -445,10 +446,12 @@ def profile_apply_cli(
     """Materialize a profile's selected skills in a target directory.
 
     Requires an existing profile and locally available source checkouts; obtain
-    missing sources with hgc source sync --profile NAME. Choose exactly one of
-    --path (the final skills container) or --dir (a project whose destination is
-    DIR/.agents/skills). Relative destinations use the invocation directory and
+    missing sources with hgc source sync --profile NAME. The default destination
+    is ./.agents/skills. Choose at most one of --path (the final skills container)
+    or --dir (a project whose destination is DIR/.agents/skills).
+    Relative destinations use the invocation directory and
     ~ expands to your home. --root and --checkout-dir only locate profile/sources.
+    Prints the resolved destination, including for empty profiles and dry runs.
     Aliases: install, a, i.
 
     The default is symlink, or junction on Windows. -cp or --link-mode copy creates
@@ -471,14 +474,17 @@ def profile_apply_cli(
 
     \b
     Examples:
+      hgc profile apply dev
+      hgc profile apply dev --dry-run
       hgc profile apply dev --dir ./project --dry-run
       hgc profile apply dev --path ./custom/skills --root ./kit
       hgc profile apply dev --dir ./project -cp
     """
-    require_exactly_one({"--path": skills_path, "--dir": skills_root})
+    require_at_most_one({"--path": skills_path, "--dir": skills_root})
     from hagency_cli.commands.skill_ui import QuestionarySkillConflictUI
 
     apply_profile_to_directory(
+        cwd=Path.cwd(),
         conflict_ui=QuestionarySkillConflictUI(),
         name=name,
         skills_path=skills_path,

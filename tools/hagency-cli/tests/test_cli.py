@@ -2662,12 +2662,61 @@ class CliTests(unittest.TestCase):
         self.assert_default_skill_link(destination)
         self.assertFalse((self.root / "project").exists())
 
-    def test_profile_init_requires_a_destination(self) -> None:
-        _stdout, stderr = self.run_cli("profile", "apply", "content", expected=2)
+    def test_profile_apply_and_aliases_default_to_invocation_directory(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            'name = "content"\n\n[skill.local-source]\n', encoding="utf-8"
+        )
+        for group in ("profile", "p"):
+            for command in CommandGroup.command_names("profile", "apply"):
+                with self.subTest(group=group, command=command):
+                    invocation_cwd = self.root / f"consumer-{group}-{command}"
+                    invocation_cwd.mkdir()
+                    self.run_cli(
+                        group,
+                        command,
+                        "content",
+                        "--root",
+                        str(self.root),
+                        cwd=invocation_cwd,
+                    )
 
-        self.assertIn("one of the options is required", stderr)
-        self.assertIn("--path", stderr)
-        self.assertIn("--dir", stderr)
+                    destination = invocation_cwd / ".agents/skills/external-one"
+                    self.assert_default_skill_link(destination)
+                    self.assertEqual(
+                        destination.resolve(),
+                        (self.root / "local-source/nested/external-one").resolve(),
+                    )
+        self.assertFalse((self.root / ".agents").exists())
+
+    def test_profile_apply_default_destination_dry_run_does_not_write(self) -> None:
+        profile_path = self.root / "profiles" / "content" / "config.toml"
+        profile_path.write_text(
+            'name = "content"\n\n[skill.local-source]\n', encoding="utf-8"
+        )
+        stdout, _stderr = self.run_cli("p", "i", "content", "--dry-run")
+
+        self.assertIn(str(self.root / ".agents/skills/external-one"), stdout)
+        self.assertFalse((self.root / ".agents").exists())
+
+    def test_profile_apply_reports_empty_profile_destination_from_home(self) -> None:
+        home = self.root / "home"
+        home.mkdir()
+        for flags in ((), ("--dry-run",)):
+            with self.subTest(flags=flags):
+                with mock.patch.object(Path, "home", return_value=home):
+                    stdout, stderr = self.run_cli(
+                        "profile",
+                        "apply",
+                        "content",
+                        "--root",
+                        str(self.root),
+                        *flags,
+                        cwd=home,
+                    )
+                self.assertIn(f"Skills destination: {home / '.agents/skills'}", stdout)
+                self.assertEqual(stderr, "")
+                self.assertFalse((home / ".agents").exists())
 
     def test_profile_init_rejects_path_and_dir_together(self) -> None:
         _stdout, stderr = self.run_cli(

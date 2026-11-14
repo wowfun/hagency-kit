@@ -276,6 +276,7 @@ print(json.dumps(sorted(sys.modules)))
                 )
                 links = apply_profile_to_directory(
                     name="profile",
+                    cwd=root,
                     skills_path=str(root / "profile-copy"),
                     skills_root=None,
                     copy=True,
@@ -294,6 +295,49 @@ print(json.dumps(sorted(sys.modules)))
                 (root / "profile-copy/demo/SKILL.md").read_text(), "fixture"
             )
             self.assertEqual((stdout.getvalue(), stderr.getvalue()), ("", ""))
+
+    def test_profile_operation_uses_explicit_cwd_for_roots_and_destinations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "kit"
+            invocation_cwd = root / "consumer"
+            other_cwd = base / "other"
+            invocation_cwd.mkdir(parents=True)
+            other_cwd.mkdir()
+            init_workspace(None, root, force=False, dry_run=False)
+            source = root / "skills/demo"
+            source.mkdir(parents=True)
+            (source / "SKILL.md").write_text("fixture", encoding="utf-8")
+            profile = root / "profiles/demo/config.toml"
+            profile.parent.mkdir(parents=True)
+            profile.write_text(
+                '[skill.workspace]\ninclude = ["skills/demo"]\n', encoding="utf-8"
+            )
+
+            for root_value, skills_path, skills_root, destination in (
+                (None, None, None, invocation_cwd / ".agents/skills"),
+                ("..", "custom/skills", None, invocation_cwd / "custom/skills"),
+                ("..", None, "project", invocation_cwd / "project/.agents/skills"),
+            ):
+                with self.subTest(destination=destination):
+                    with mock.patch.object(Path, "cwd", return_value=other_cwd):
+                        links = apply_profile_to_directory(
+                            name="demo",
+                            cwd=invocation_cwd,
+                            root_value=root_value,
+                            skills_path=skills_path,
+                            skills_root=skills_root,
+                            copy=True,
+                            link_mode=None,
+                            checkout_dir=None,
+                            dry_run=False,
+                        )
+                    self.assertEqual(len(links), 1)
+                    self.assertEqual(
+                        (destination / "demo/SKILL.md").read_text(), "fixture"
+                    )
+            self.assertFalse((other_cwd / ".agents").exists())
+            self.assertFalse((root / ".agents").exists())
 
 
 class CommandTreeTests(unittest.TestCase):
@@ -458,7 +502,8 @@ class CommandTreeTests(unittest.TestCase):
                 "Cancellation or fetch failure",
             ),
             ("profile", "apply"): (
-                "exactly one",
+                "./.agents/skills",
+                "at most one",
                 "DIR/.agents/skills",
                 "Non-TTY",
                 "no tracking or pruning",

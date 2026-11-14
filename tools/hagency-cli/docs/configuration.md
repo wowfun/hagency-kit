@@ -66,6 +66,6 @@ Destinations are independent of source discovery. Relative destinations resolve 
 | `-p/--path PATH` | The exact skills container, with only each skill name appended |
 | `-d/--dir DIR` | `DIR/.agents/skills` |
 | `skill add --global` | `~/.agents/skills` |
-| `skill add` without destination options | `./.agents/skills` |
+| `skill add` / `profile apply` without destination options | `./.agents/skills` |
 
-`skill add` accepts at most one destination option; `profile apply` requires exactly one of `--path` or `--dir`. `--root` and `--checkout-dir` locate profiles and sources rather than choosing an installation target. A newly registered remote source persists the resolved `skill add --checkout-dir` override; existing sources use it for that invocation only.
+`skill add` accepts at most one destination option; `profile apply` accepts at most one of `--path` or `--dir`. Both default to the invocation directory's `.agents/skills` when destination options are omitted. `--root` and `--checkout-dir` locate profiles and sources rather than choosing an installation target. A newly registered remote source persists the resolved `skill add --checkout-dir` override; existing sources use it for that invocation only.

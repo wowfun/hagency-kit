@@ -21,13 +21,17 @@ hgc profile apply review --dir ./project
 
 `profile remove NAME` deletes the profile directory and its contents; installed skills and source checkouts remain in place. Add, update, and remove support `--dry-run`. Editing configuration does not apply it to existing installation targets.
 
-`profile apply` requires exactly one destination: `--path` for the exact skills container or `--dir` for a project's `.agents/skills`. It requires locally available source content and never syncs implicitly:
+`profile apply` (aliases: `install`, `a`, `i`) defaults to `--dir ./`, installing into the invocation directory's `.agents/skills`. Use `--path/-p` for an exact skills container or `--dir/-d` for another project's `.agents/skills`; the two options are mutually exclusive. `--root` locates the Hagency workspace without changing the installation destination. Applying a profile requires locally available source content and never syncs implicitly:
 
 ```sh
+hgc profile apply review
+hgc profile apply review --dry-run
 hgc profile apply review --path ./custom/skills --root ./kit
 hgc profile apply review --dir ./project -cp
 hgc profile apply review --dir ./project --link-mode junction
 ```
+
+The resolved destination is printed before the per-skill plan, including for empty profiles and dry runs. Omitting destination options from your home directory targets `~/.agents/skills`. Use an explicit `--path` or `--dir` in scripts that need a fixed installation location.
 
 The default materialization mode is symlink, or junction on Windows. `-cp` and `--link-mode copy` create independent copies; `-cp` conflicts with explicit symlink or junction modes. Junction mode is for Windows; explicit Windows symlinks may require an elevated terminal. Applying a profile refuses to overwrite independent directories, can retarget existing links of the selected type, and leaves unselected installations in place. There is no tracking or pruning; installation is not transactional.
 

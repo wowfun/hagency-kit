@@ -721,8 +721,6 @@ def resolve_skill_install_dir(
     skills_root: str | None,
     global_install: bool,
     cwd: Path,
-    *,
-    default_root: Path | None,
 ) -> Path:
     if sum((skills_path is not None, skills_root is not None, global_install)) > 1:
         fail("skill destinations --path, --dir, and --global are mutually exclusive")
@@ -733,10 +731,8 @@ def resolve_skill_install_dir(
         install_root = expand_path(skills_root, cwd)
     elif global_install:
         install_root = Path.home()
-    elif default_root is not None:
-        install_root = default_root
     else:
-        fail("skill destination requires --path or --dir")
+        install_root = cwd
 
     return install_root / DEFAULT_SKILLS_DIRECTORY
 

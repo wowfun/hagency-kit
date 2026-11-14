@@ -250,7 +250,7 @@ def add_skills(
     registry = load_registry(root)
     sources = resolve_sources(registry, repo_root=root, checkout_override=checkout_dir)
     destination = resolve_skill_install_dir(
-        skills_path, skills_root, global_install, cwd, default_root=cwd
+        skills_path, skills_root, global_install, cwd
     )
     validate_skills_dir(destination)
     scans = workspace_skill_scans(root, sources)

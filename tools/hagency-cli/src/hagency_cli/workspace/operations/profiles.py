@@ -4,6 +4,7 @@ from pathlib import Path
 
 from hagency_cli.workspace.config import render_toml
 from hagency_cli.workspace.context import load_sources, workspace_root_arg
+from hagency_cli.workspace.discovery import resolve_workspace_root
 from hagency_cli.workspace.errors import SkillReferenceError, WorkspaceError, fail
 from hagency_cli.workspace.events import Progress, emit_event
 from hagency_cli.workspace.profiles import (
@@ -33,6 +34,7 @@ from hagency_cli.workspace.skills import (
 def apply_profile_to_directory(
     *,
     name: str,
+    cwd: Path,
     skills_path: str | None,
     skills_root: str | None,
     copy: bool,
@@ -43,9 +45,7 @@ def apply_profile_to_directory(
     conflict_ui: SkillConflictUI | None = None,
     progress: Progress | None = None,
 ) -> tuple[SkillLinkCandidate, ...]:
-
-    invocation_cwd = Path.cwd()
-    root = workspace_root_arg(root_value)
+    root = resolve_workspace_root(root_value, cwd)
     invalid: dict[str, str] = {}
     sources = load_sources(root, checkout_dir, invalid=invalid)
     profile = read_profile_config(root, name)
@@ -53,9 +53,9 @@ def apply_profile_to_directory(
         skills_path,
         skills_root,
         False,
-        invocation_cwd,
-        default_root=None,
+        cwd,
     )
+    emit_event(progress, f"Skills destination: {skills_dir}")
     return apply_profile(
         profile,
         sources,

@@ -29,31 +29,15 @@ from hagency_cli.files.cleanup.models import (
     _DiscoveredRoots,
     _unsafe_text,
 )
+from hagency_cli.paths import user_config_dir
 
 
 def purge_config_path(
     *,
     environ: Mapping[str, str] | None = None,
-    platform: str | None = None,
     home: Path | None = None,
 ) -> Path:
-    environ = os.environ if environ is None else environ
-    platform = sys.platform if platform is None else platform
-    home = Path.home() if home is None else home
-    filename = "space-purge-paths"
-
-    if platform == "win32":
-        appdata = environ.get("APPDATA")
-        if appdata:
-            return Path(appdata) / "Hagency" / filename
-    elif platform == "darwin":
-        return home / "Library" / "Application Support" / "Hagency" / filename
-    else:
-        xdg_config_home = environ.get("XDG_CONFIG_HOME")
-        if xdg_config_home and Path(xdg_config_home).is_absolute():
-            return Path(xdg_config_home) / "hagency" / filename
-
-    return home / ".config" / "hagency" / filename
+    return user_config_dir(environ=environ, home=home) / "space-purge-paths"
 
 
 def _read_configured_paths(config_path: Path, home: Path) -> _ConfiguredPaths:
@@ -267,7 +251,7 @@ def _resolve_roots(
 
 
 def _write_config_template(config_path: Path) -> None:
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     template = (
         "# Hagency project artifact purge paths\n"
         "# Add one absolute or ~ path per line.\n"

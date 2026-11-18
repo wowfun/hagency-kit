@@ -31,36 +31,42 @@ class ModelProxyDaemonTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_state_paths_follow_linux_and_windows_conventions(self) -> None:
-        linux = daemon.service_paths(
+    def test_state_paths_use_xdg_and_keep_config_identity(self) -> None:
+        first = daemon.service_paths(
             self.config,
             environ={"XDG_STATE_HOME": str(self.root / "xdg")},
-            platform="posix",
         )
-        windows = daemon.service_paths(
+        second = daemon.service_paths(
             self.config,
-            environ={"LOCALAPPDATA": str(self.root / "local")},
-            platform="nt",
+            environ={"XDG_STATE_HOME": str(self.root / "other")},
         )
 
-        self.assertEqual(linux.directory.parents[1], self.root / "xdg" / "hagency")
-        self.assertEqual(windows.directory.parents[1], self.root / "local" / "Hagency")
-        self.assertEqual(linux.directory.name, windows.directory.name)
+        self.assertEqual(first.directory.parents[1], self.root / "xdg" / "hagency")
+        self.assertEqual(second.directory.parents[1], self.root / "other" / "hagency")
+        self.assertEqual(first.directory.name, second.directory.name)
+        self.assertFalse(first.directory.exists())
 
-    def test_explicit_state_home_must_be_absolute(self) -> None:
-        with self.assertRaisesRegex(
-            daemon.ModelProxyServiceError, "HAGENCY_STATE_HOME.*absolute"
-        ):
-            daemon.service_paths(
+    def test_relative_state_home_uses_default_and_old_state_is_ignored(self) -> None:
+        old = self.root / "legacy"
+        old.mkdir()
+        (old / "state.json").write_text("invalid old state", encoding="utf-8")
+        with mock.patch.object(Path, "home", return_value=self.root):
+            paths = daemon.service_paths(
                 self.config,
-                environ={"HAGENCY_STATE_HOME": "relative/state"},
-                platform="posix",
+                environ={
+                    "XDG_STATE_HOME": "relative/state",
+                    "HAGENCY_STATE_HOME": str(old),
+                    "LOCALAPPDATA": str(old),
+                },
             )
+        self.assertEqual(paths.directory.parents[1], self.root / ".local/state/hagency")
+        self.assertIsNone(daemon._read_state(paths.state))
+        self.assertEqual((old / "state.json").read_text(), "invalid old state")
 
     def test_state_rejects_boolean_numeric_fields(self) -> None:
         state_home = self.root / "state"
         with mock.patch.dict(
-            os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+            os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
         ):
             paths = daemon.service_paths(self.config)
             paths.directory.mkdir(parents=True)
@@ -86,7 +92,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
     def test_service_log_rotates_at_the_size_limit(self) -> None:
         paths = daemon.service_paths(
             self.config,
-            environ={"HAGENCY_STATE_HOME": str(self.root / "state")},
+            environ={"XDG_STATE_HOME": str(self.root / "state")},
         )
         paths.directory.mkdir(parents=True)
         paths.log.write_bytes(b"new-log")
@@ -158,7 +164,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
     def test_start_ignores_delayed_state_from_a_previous_attempt(self) -> None:
         paths = daemon.service_paths(
             self.config,
-            environ={"HAGENCY_STATE_HOME": str(self.root / "state")},
+            environ={"XDG_STATE_HOME": str(self.root / "state")},
         )
         paths.directory.mkdir(parents=True)
         stale = daemon.ServiceState(
@@ -269,7 +275,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
 
         with (
             mock.patch.dict(
-                os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+                os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
             ),
             mock.patch.object(daemon, "_lock_descriptor", side_effect=delay_first_lock),
             mock.patch.object(daemon, "_read_state", side_effect=blocking_read),
@@ -319,7 +325,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
             port = listener.getsockname()[1]
         state_home = self.root / "state"
         with mock.patch.dict(
-            os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+            os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
         ):
             _state, _paths = daemon.start_model_proxy(
                 self.config, host="127.0.0.1", port=port
@@ -336,7 +342,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
             port = listener.getsockname()[1]
         state_home = self.root / "state"
         with mock.patch.dict(
-            os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+            os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
         ):
             _state, _paths = daemon.start_model_proxy(
                 self.config, host="127.0.0.1", port=port
@@ -355,7 +361,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
         )
         try:
             with mock.patch.dict(
-                os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+                os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
             ):
                 paths = daemon.service_paths(self.config)
                 daemon.write_service_state(
@@ -386,7 +392,7 @@ class ModelProxyDaemonTests(unittest.TestCase):
             port = listener.getsockname()[1]
         state_home = self.root / "state"
         with mock.patch.dict(
-            os.environ, {"HAGENCY_STATE_HOME": str(state_home)}, clear=False
+            os.environ, {"XDG_STATE_HOME": str(state_home)}, clear=False
         ):
             first, paths = daemon.start_model_proxy(
                 self.config, host="127.0.0.1", port=port

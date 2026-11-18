@@ -41,7 +41,7 @@ hgc service model-proxy stop -r <workspace>
 hgc service model-proxy restart -r <workspace>
 ```
 
-Linux uses a detached session; Windows uses a detached, no-console process group. State and logs are stored below `XDG_STATE_HOME`/`~/.local/state` on Linux and `LOCALAPPDATA` on Windows. Set `HAGENCY_STATE_HOME` to an absolute path to override that root. `start` reports the exact log path; logs rotate at 10 MiB with three backups.
+Linux uses a detached session; Windows uses a detached, no-console process group. On Windows, macOS, Linux, and WSL, state and logs are stored below `$XDG_STATE_HOME/hagency/model-proxy/<config-hash>/`. If `XDG_STATE_HOME` is unset, empty, or relative, the base is `~/.local/state/hagency`. This includes `state.json`, `control.lock`, and `service.log`. `start` reports the exact log path; logs rotate at 10 MiB with three backups.
 
 The bare `/v1` routes use `default_provider`; `/<provider>/v1` selects one explicitly. `POST /responses`, `POST /chat/completions`, and `GET /models` are available without per-client configuration. A matching upstream protocol uses a raw entity path; the other interface is converted. `/models` proxies the adapter's model-list operation and uses the same request, authentication, and response Hook stages. A Hook may instead implement `fetch_models(ctx)` and return model ID strings when the provider has no standard model-list endpoint; because that compact contract contains no creation metadata, synthesized model records use `created = 0` as a stable unknown value. Additional resource operations under the native protocol family are passed through without cross-protocol emulation.
 

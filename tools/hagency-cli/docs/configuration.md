@@ -2,6 +2,30 @@
 
 [CLI guide](../README.md)
 
+## User persistence directories
+
+Windows, macOS, Linux, and WSL use the same XDG directory rules. The application
+subdirectory is always lowercase `hagency`:
+
+| Content | Location | Default when the XDG variable is unset or empty |
+| --- | --- | --- |
+| Saved purge path list | `$XDG_CONFIG_HOME/hagency/space-purge-paths` | `~/.config/hagency/space-purge-paths` |
+| Model proxy state, lock, and service log | `$XDG_STATE_HOME/hagency/model-proxy/<config-hash>/` | `~/.local/state/hagency/model-proxy/<config-hash>/` |
+
+XDG variables must contain absolute paths for the current platform. Relative
+values, including literal `~/...`, are ignored in favor of the defaults; shell
+expressions are not expanded. On native Windows, use drive-qualified paths such
+as `D:/xdg/state` or absolute UNC paths. An XDG variable names the base directory,
+and Hagency appends `hagency` itself. Directories are created only when writing.
+
+Legacy AppData/Application Support locations and `HAGENCY_STATE_HOME` are no
+longer used. Old contents are neither read nor migrated nor deleted. Stop an
+existing worker with the previous version before switching its state location.
+
+Workspace configuration, profiles, source checkouts, and skill installation
+destinations follow the project and destination rules below. Hagency currently
+has no separate user data or cache directory.
+
 ## Workspace discovery
 
 Workspace commands resolve their Hagency root in this order:

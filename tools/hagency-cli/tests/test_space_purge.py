@@ -110,38 +110,36 @@ class SpacePurgeTests(unittest.TestCase):
     def all_choice_ids(self, choices: tuple[CleanupCandidate, ...]) -> tuple[str, ...]:
         return tuple(choice.id for choice in choices)
 
-    def test_platform_config_paths_and_fallbacks(self) -> None:
+    def test_config_paths_use_xdg_and_ignore_legacy_directories(self) -> None:
         home = self.base / "home"
         xdg = home / "config"
 
         self.assertEqual(
-            purge_config_path(
-                environ={"XDG_CONFIG_HOME": str(xdg)}, platform="linux", home=home
-            ),
+            purge_config_path(environ={"XDG_CONFIG_HOME": str(xdg)}, home=home),
             xdg / "hagency/space-purge-paths",
         )
         self.assertEqual(
-            purge_config_path(
-                environ={"XDG_CONFIG_HOME": "relative"}, platform="linux", home=home
-            ),
+            purge_config_path(environ={"XDG_CONFIG_HOME": "relative"}, home=home),
             home / ".config/hagency/space-purge-paths",
         )
-        self.assertEqual(
-            purge_config_path(environ={}, platform="darwin", home=home),
-            home / "Library/Application Support/Hagency/space-purge-paths",
-        )
+        legacy_root = home / "appdata"
+        for directory in (
+            legacy_root / "Hagency",
+            home / "Library/Application Support/Hagency",
+        ):
+            directory.mkdir(parents=True)
+            (directory / "space-purge-paths").write_text("old-root", encoding="utf-8")
         self.assertEqual(
             purge_config_path(
-                environ={"APPDATA": r"C:\Users\me\AppData\Roaming"},
-                platform="win32",
+                environ={"APPDATA": str(legacy_root)},
                 home=home,
             ),
-            Path(r"C:\Users\me\AppData\Roaming") / "Hagency/space-purge-paths",
-        )
-        self.assertEqual(
-            purge_config_path(environ={}, platform="win32", home=home),
             home / ".config/hagency/space-purge-paths",
         )
+        selected = purge_config_path(environ={}, home=home)
+        saved = files_purge_roots_module._read_configured_paths(selected, home)
+        self.assertFalse(saved.has_entries)
+        self.assertFalse(selected.exists())
 
     def test_explicit_roots_scan_activity_preselection_and_sort_by_project_total(
         self,
@@ -368,7 +366,7 @@ class SpacePurgeTests(unittest.TestCase):
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(
-                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                os.environ, {"XDG_CONFIG_HOME": str(xdg)},
                 clear=False,
             ),
         ):
@@ -402,7 +400,7 @@ class SpacePurgeTests(unittest.TestCase):
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(
-                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                os.environ, {"XDG_CONFIG_HOME": str(xdg)},
                 clear=False,
             ),
         ):
@@ -435,7 +433,7 @@ class SpacePurgeTests(unittest.TestCase):
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(
-                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                os.environ, {"XDG_CONFIG_HOME": str(xdg)},
                 clear=False,
             ),
         ):
@@ -940,7 +938,7 @@ class SpacePurgeTests(unittest.TestCase):
         with (
             mock.patch.object(files_purge_roots_module.Path, "home", return_value=home),
             mock.patch.dict(
-                os.environ, {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)},
+                os.environ, {"XDG_CONFIG_HOME": str(xdg)},
                 clear=False,
             ),
         ):
@@ -960,7 +958,7 @@ class SpacePurgeTests(unittest.TestCase):
         self.make_project(configured_root, "project")
         xdg = home / "config"
         expected_config = purge_config_path(
-            environ={"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(xdg)}, home=home
+            environ={"XDG_CONFIG_HOME": str(xdg)}, home=home
         )
 
         def edit_config(
@@ -977,7 +975,6 @@ class SpacePurgeTests(unittest.TestCase):
                 os.environ,
                 {
                     "XDG_CONFIG_HOME": str(xdg),
-                    "APPDATA": str(xdg),
                     "VISUAL": "code --wait",
                     "EDITOR": "vi",
                 },

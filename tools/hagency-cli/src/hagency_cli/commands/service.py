@@ -190,9 +190,10 @@ def serve_start_cli(
 
     Prints PID, listen address, and log path after the worker binds. An already
     running service for this config is an error; use restart to reload it. Read
-    the printed log for runtime failures. State/logs use the platform's user state
-    directory; absolute HAGENCY_STATE_HOME overrides it. Logs rotate at 10 MiB
-    with three backups. Use the same resolved config path when stopping.
+    the printed log for runtime failures. On every platform, state/logs use
+    XDG_STATE_HOME/hagency, defaulting to ~/.local/state/hagency. Empty or relative
+    XDG_STATE_HOME values use that default. Logs rotate at 10 MiB with three
+    backups. Use the same resolved config path when stopping.
 
     \b
     Examples:
@@ -228,9 +229,10 @@ def serve_stop_cli(
     Defaults to hagency-model-proxy.toml in the resolved Hagency workspace.
     --config instead selects a path relative to the invocation directory and
     needs no workspace; it cannot accompany --root. Use the same resolved config
-    path and state directory as start. Absolute HAGENCY_STATE_HOME overrides the
-    platform's user state directory. Stopping an already stopped worker succeeds
-    and reports that it is not running; configuration and logs remain in place.
+    path and state directory as start. All platforms use XDG_STATE_HOME/hagency
+    or ~/.local/state/hagency when unset, empty, or relative. Stopping an already
+    stopped worker succeeds and reports that it is not running; configuration
+    and logs remain in place.
 
     \b
     Examples:
@@ -272,7 +274,8 @@ def serve_restart_cli(
     Uses hagency-model-proxy.toml in the resolved workspace or an explicit --config
     path relative to the invocation directory. --config and --root are mutually
     exclusive. Use the same resolved config path and state directory as the old
-    worker. An absolute HAGENCY_STATE_HOME overrides the platform state directory.
+    worker. All platforms use XDG_STATE_HOME/hagency, defaulting to
+    ~/.local/state/hagency when XDG_STATE_HOME is unset, empty, or relative.
 
     Reloads config, adjacent .env, and hooks; process environment overrides .env.
     A stopped worker is started. Listener options default to 127.0.0.1:8765 on each

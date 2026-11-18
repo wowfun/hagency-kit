@@ -895,9 +895,8 @@ def space_purge_cli(
     or the platform editor, then reload. It cannot accompany PATH, --dry-run,
     --recursive, --include-unverified, --config, --rule, --scan-timeout or --yes.
     Entries are absolute or ~ paths, one per line; blanks and # comments are ignored.
-    The file lives under XDG_CONFIG_HOME/hagency or ~/.config/hagency on Linux/WSL,
-    ~/Library/Application Support/Hagency on macOS, or APPDATA/Hagency on Windows
-    (with ~/.config/hagency as fallback).
+    On every platform the file lives under XDG_CONFIG_HOME/hagency, defaulting
+    to ~/.config/hagency when XDG_CONFIG_HOME is unset, empty, or relative.
 
     In a TTY, select candidates; only artifacts inactive for strictly more than
     seven days are preselected by default; recent candidates may be selected.

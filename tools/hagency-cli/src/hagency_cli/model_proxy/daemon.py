@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from hagency_cli.paths import user_state_dir
+
 from .config import load_proxy_config, validate_loopback_host
 
 START_TIMEOUT_SECONDS = 10.0
@@ -60,21 +62,8 @@ def service_paths(
     config_path: Path,
     *,
     environ: Mapping[str, str] | None = None,
-    platform: str | None = None,
 ) -> ServicePaths:
-    environ = os.environ if environ is None else environ
-    platform = os.name if platform is None else platform
-    configured_root = environ.get("HAGENCY_STATE_HOME")
-    if configured_root:
-        root = Path(configured_root).expanduser()
-        if not root.is_absolute():
-            raise ModelProxyServiceError("HAGENCY_STATE_HOME must be an absolute path")
-    elif platform == "nt" and environ.get("LOCALAPPDATA"):
-        root = Path(environ["LOCALAPPDATA"]) / "Hagency"
-    elif environ.get("XDG_STATE_HOME"):
-        root = Path(environ["XDG_STATE_HOME"]) / "hagency"
-    else:
-        root = Path.home() / ".local" / "state" / "hagency"
+    root = user_state_dir(environ=environ)
     identity = hashlib.sha256(str(config_path.resolve()).encode()).hexdigest()[:16]
     directory = root / "model-proxy" / identity
     return ServicePaths(

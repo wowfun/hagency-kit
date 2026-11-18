@@ -25,6 +25,7 @@ import hagency_cli.commands.file as commands_file_module
 import hagency_cli.commands.service as commands_service_module
 import hagency_cli.commands.skill_ui as commands_skill_ui_module
 import hagency_cli.files.cleanup.models as files_purge_models_module
+import hagency_cli.files.links as files_links_module
 import hagency_cli.paths as paths_module
 import hagency_cli.workspace.discovery as workspace_discovery_module
 import hagency_cli.workspace.git as workspace_git_module
@@ -397,6 +398,7 @@ class CliTests(unittest.TestCase):
             values,
             [
                 "init",
+                "ln",
                 "source",
                 "s",
                 "skill",
@@ -406,6 +408,9 @@ class CliTests(unittest.TestCase):
                 "service",
             ],
         )
+
+        values, _stderr = self.complete_bash("hgc ln --", 2)
+        self.assertIn("--symbolic", values)
 
         values, _stderr = self.complete_bash("hgc file ", 2)
         self.assertEqual(
@@ -2893,57 +2898,46 @@ class CliTests(unittest.TestCase):
                 workspace_skills_module, "is_windows_platform", return_value=True
             ),
             mock.patch.object(
-                workspace_skills_module.subprocess,
-                "run",
-                return_value=subprocess.CompletedProcess(["powershell"], 0),
-            ) as run,
+                workspace_skills_module, "create_windows_junction"
+            ) as create_junction,
         ):
             stdout, _stderr = self.run_cli(
                 "profile", "apply", "-p", str(skills_dir), "content"
             )
 
         self.assertIn("junction", stdout)
-        run.assert_called_once()
-        command = run.call_args[0][0]
-        self.assertEqual(command[0], "powershell")
-        self.assertEqual(command[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
-        self.assertEqual(len(command), 5)
-        self.assertIn("New-Item -ItemType Junction", command[4])
-        self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_LINK", command[4])
-        self.assertIn("$env:HAGENCY_PROFILE_JUNCTION_TARGET", command[4])
-        child_env = run.call_args.kwargs["env"]
-        self.assertEqual(
-            Path(child_env["HAGENCY_PROFILE_JUNCTION_LINK"]),
+        create_junction.assert_called_once_with(
             skills_dir / "external-one",
-        )
-        self.assertEqual(
-            Path(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"]),
             (self.root / "local-source" / "nested" / "external-one").resolve(),
         )
 
     def test_windows_junction_paths_are_not_parsed_as_powershell_code(self) -> None:
-        link = Path(r"C:\Users\测试 User\work & tools\link's [x]")
+        link = self.root / "测试 User & link's [x]"
         target = Path(r"D:\Source Trees\pack;name\$literal's")
+
+        def create_staged_link(command, *, env, **kwargs):
+            Path(env["HAGENCY_JUNCTION_LINK"]).mkdir()
+            return subprocess.CompletedProcess(command, 0)
 
         with (
             mock.patch.dict(
-                workspace_skills_module.os.environ,
+                files_links_module.os.environ,
                 {"HAGENCY_TEST_SENTINEL": "kept"},
                 clear=True,
             ),
             mock.patch.object(
-                workspace_skills_module.subprocess,
+                files_links_module.subprocess,
                 "run",
-                return_value=subprocess.CompletedProcess(["powershell"], 0),
+                side_effect=create_staged_link,
             ) as run,
         ):
-            workspace_skills_module.create_windows_junction(link, target)
+            files_links_module.create_windows_junction(link, target)
 
             self.assertNotIn(
-                "HAGENCY_PROFILE_JUNCTION_LINK", workspace_skills_module.os.environ
+                "HAGENCY_JUNCTION_LINK", files_links_module.os.environ
             )
             self.assertNotIn(
-                "HAGENCY_PROFILE_JUNCTION_TARGET", workspace_skills_module.os.environ
+                "HAGENCY_JUNCTION_TARGET", files_links_module.os.environ
             )
 
         run.assert_called_once()
@@ -2952,14 +2946,18 @@ class CliTests(unittest.TestCase):
             command[:4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
         )
         self.assertEqual(len(command), 5)
+        self.assertIn("New-Item -ItemType Junction", command[4])
         self.assertNotIn(str(link), command[4])
         self.assertNotIn(str(target), command[4])
         child_env = run.call_args.kwargs["env"]
         self.assertEqual(child_env["HAGENCY_TEST_SENTINEL"], "kept")
-        self.assertEqual(child_env["HAGENCY_PROFILE_JUNCTION_LINK"], str(link))
-        self.assertEqual(child_env["HAGENCY_PROFILE_JUNCTION_TARGET"], str(target))
+        staging_link = Path(child_env["HAGENCY_JUNCTION_LINK"])
+        self.assertEqual(staging_link.parent.parent, link.parent)
+        self.assertFalse(staging_link.parent.exists())
+        self.assertTrue(link.is_dir())
+        self.assertEqual(child_env["HAGENCY_JUNCTION_TARGET"], str(target))
         self.assertTrue(run.call_args.kwargs["check"])
-        self.assertTrue(run.call_args.kwargs["text"])
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
 
     def test_profile_init_windows_junction_dry_run_does_not_call_powershell(
         self,
@@ -2982,14 +2980,16 @@ class CliTests(unittest.TestCase):
             mock.patch.object(
                 workspace_skills_module, "is_windows_platform", return_value=True
             ),
-            mock.patch.object(workspace_skills_module.subprocess, "run") as run,
+            mock.patch.object(
+                workspace_skills_module, "create_windows_junction"
+            ) as create_junction,
         ):
             stdout, _stderr = self.run_cli(
                 "profile", "apply", "-d", str(target), "content", "--dry-run"
             )
 
         self.assertIn("junction", stdout)
-        run.assert_not_called()
+        create_junction.assert_not_called()
         self.assertFalse((target / ".agents" / "skills" / "external-one").exists())
 
     def test_profile_init_explicit_junction_is_windows_only(self) -> None:
@@ -3850,7 +3850,7 @@ class CliTests(unittest.TestCase):
         alias = self.root / "local-source/archive/alias"
         alias.parent.mkdir()
         if os.name == "nt":
-            workspace_skills_module.create_windows_junction(alias, external)
+            files_links_module.create_windows_junction(alias, external)
         else:
             alias.symlink_to(external, target_is_directory=True)
         for value in ("local-source:archive/alias", "./local-source/archive/alias"):

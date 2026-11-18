@@ -365,7 +365,7 @@ class CommandTreeTests(unittest.TestCase):
         command = get_command(cli.app)
         self.assertEqual(
             set(command.commands),
-            {"init", "source", "s", "skill", "profile", "p", "file", "service"},
+            {"init", "ln", "source", "s", "skill", "profile", "p", "file", "service"},
         )
         expected = {
             "source": {"list", "ls", "show", "add", "remove", "rm", "sync"},

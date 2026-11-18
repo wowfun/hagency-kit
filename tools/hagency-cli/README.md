@@ -30,6 +30,7 @@ The command tree is:
 
 ```text
 hgc init
+hgc ln -s TARGET [DEST]
 hgc source  list|show|add|remove|sync
 hgc skill   list|add
 hgc profile list|show|add|update|remove|apply
@@ -40,6 +41,18 @@ hgc service model-proxy start|stop|restart
 Help lists command aliases on the same row as their full names: `source, s`, `profile, p`, `list, ls`, `remove, rm`, and `update, u`. The `profile apply` and `skill add` commands also accept `install`, `a`, and `i`. All forms accept the same parameters and show the same full help.
 
 Option aliases likewise share a row, such as `-p, --path PATH`. `source sync` updates Git checkouts; `file sync` synchronizes project files over SFTP.
+
+Use `hgc ln -s TARGET [DEST]` to create a link from any directory. `DEST` defaults
+to the current directory. An existing destination directory receives a link
+named after `TARGET`. Relative targets are interpreted from the final link's
+parent directory. For example,
+`hgc ln -s ../assets public` creates `public/assets` pointing to the sibling
+`assets` directory when `public` already exists.
+
+On native Windows, including PowerShell and Git Bash, directory targets use
+PowerShell junctions. File targets use native symlinks and may require Windows
+Developer Mode or an elevated shell. Windows requires the target to exist.
+Linux, macOS, and WSL use symlinks and allow dangling targets.
 
 Install shell completion or print its script:
 

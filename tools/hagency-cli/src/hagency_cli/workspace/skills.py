@@ -10,6 +10,7 @@ from functools import cached_property
 from pathlib import Path, PureWindowsPath
 from typing import Literal, Protocol
 
+from hagency_cli.files.links import create_windows_junction
 from hagency_cli.paths import expand_path
 from hagency_cli.workspace.errors import (
     SkillNameConflictError,
@@ -570,34 +571,6 @@ def is_junction(path: Path) -> bool:
 
 def junction_failure_message(link: Path, target: Path, error: BaseException) -> str:
     return f"could not create junction {link} -> {target}: {error}"
-
-
-def create_windows_junction(link: Path, target: Path) -> None:
-    env = os.environ.copy()
-    env.update(
-        {
-            "HAGENCY_PROFILE_JUNCTION_LINK": str(link),
-            "HAGENCY_PROFILE_JUNCTION_TARGET": str(target),
-        }
-    )
-    command = (
-        "New-Item -ItemType Junction "
-        "-Path $env:HAGENCY_PROFILE_JUNCTION_LINK "
-        "-Target $env:HAGENCY_PROFILE_JUNCTION_TARGET | Out-Null"
-    )
-    subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ],
-        check=True,
-        text=True,
-        capture_output=True,
-        env=env,
-    )
 
 
 def validate_skills_dir(skills_dir: Path) -> None:

@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 
 from hagency_cli.commands.file import file_app
+from hagency_cli.commands.ln import ln_cli
 from hagency_cli.commands.profile import profile_app
 from hagency_cli.commands.service import service_app
 from hagency_cli.commands.shared import make_app
@@ -51,6 +52,7 @@ app = make_app(
     add_completion=True,
 )
 app.command("init", short_help="Initialize a Hagency workspace.")(init_cli)
+app.command("ln", short_help="Create a link to a file or directory.")(ln_cli)
 app.add_typer(source_app, name="source")
 app.add_typer(source_app, name="s", short_help="Alias for source.")
 app.add_typer(skill_app, name="skill")

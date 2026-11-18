@@ -11,7 +11,7 @@ from hagency_cli.files.sync.sftp import SFTPRemote
 
 def directory_link(link: Path, target: Path) -> None:
     if os.name == "nt":
-        from hagency_cli.workspace.skills import create_windows_junction
+        from hagency_cli.files.links import create_windows_junction
 
         create_windows_junction(link, target)
     else:

@@ -15,6 +15,4 @@ include = ["eli5"]
 [skill.Waza]
 include = ["skills/write"]
 
-[skill.baoyu-design]
-
 [skill.guizang-product-video-skill]

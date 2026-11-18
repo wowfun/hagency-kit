@@ -11,3 +11,7 @@ Read `<file>`. Revise this plan.
 ---
 
 Discern my true intent, underlying motivations, and unspoken needs. Ask probing questions when necessary.
+
+---
+
+Develop detailed solutions.

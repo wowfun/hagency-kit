@@ -46,6 +46,10 @@ class ServicePaths:
     lock: Path
     log: Path
 
+    @property
+    def debug_directory(self) -> Path:
+        return self.directory / "debug"
+
 
 @dataclass(frozen=True)
 class ServiceState:
@@ -56,6 +60,7 @@ class ServiceState:
     started_at: float
     process_identity: str
     startup_nonce: str
+    debug: bool = False
 
 
 def service_paths(
@@ -216,6 +221,7 @@ def _read_state(path: Path) -> ServiceState | None:
         or not raw["process_identity"]
         or not isinstance(raw.get("startup_nonce"), str)
         or not raw["startup_nonce"]
+        or not isinstance(raw.get("debug", False), bool)
     ):
         raise ModelProxyServiceError(f"invalid model proxy state file: {path}")
     return ServiceState(
@@ -226,6 +232,7 @@ def _read_state(path: Path) -> ServiceState | None:
         started_at=float(raw["started_at"]),
         process_identity=raw["process_identity"],
         startup_nonce=raw["startup_nonce"],
+        debug=raw.get("debug", False),
     )
 
 
@@ -242,6 +249,7 @@ def write_service_state(path: Path, state: ServiceState) -> None:
                 "started_at": state.started_at,
                 "process_identity": state.process_identity,
                 "startup_nonce": state.startup_nonce,
+                "debug": state.debug,
             },
             separators=(",", ":"),
         ),
@@ -308,7 +316,9 @@ def _control_lock(paths: ServicePaths) -> Iterator[None]:
         os.close(descriptor)
 
 
-def _worker_command(config_path: Path, host: str, port: int) -> list[str]:
+def _worker_command(
+    config_path: Path, host: str, port: int, *, debug: bool = False
+) -> list[str]:
     if getattr(sys, "frozen", False):
         python_exe = shutil.which("python") or shutil.which("python3")
         if not python_exe:
@@ -335,7 +345,7 @@ def _worker_command(config_path: Path, host: str, port: int) -> list[str]:
         host,
         "--port",
         str(port),
-    ]
+    ] + (["--debug"] if debug else [])
 
 
 def _worker_environment(startup_nonce: str) -> dict[str, str]:
@@ -416,6 +426,7 @@ def _start_model_proxy_locked(
     host: str,
     port: int,
     start_timeout_seconds: float,
+    debug: bool = False,
 ) -> tuple[ServiceState, ServicePaths]:
     current = _read_state(paths.state)
     if (
@@ -435,7 +446,7 @@ def _start_model_proxy_locked(
     log_handle = os.fdopen(log_descriptor, "ab", buffering=0)
     try:
         process = _spawn_worker(
-            _worker_command(config_path, host, port),
+            _worker_command(config_path, host, port, debug=debug),
             log_handle,
             environ=_worker_environment(startup_nonce),
         )
@@ -477,6 +488,7 @@ def start_model_proxy(
     host: str,
     port: int,
     start_timeout_seconds: float = START_TIMEOUT_SECONDS,
+    debug: bool = False,
 ) -> tuple[ServiceState, ServicePaths]:
     config_path = config_path.resolve()
     validate_loopback_host(host)
@@ -489,6 +501,7 @@ def start_model_proxy(
             host=host,
             port=port,
             start_timeout_seconds=start_timeout_seconds,
+            debug=debug,
         )
 
 
@@ -541,7 +554,7 @@ def stop_model_proxy(
 
 
 def restart_model_proxy(
-    config_path: Path, *, host: str, port: int
+    config_path: Path, *, host: str, port: int, debug: bool = False
 ) -> tuple[ServiceState, ServicePaths]:
     config_path = config_path.resolve()
     validate_loopback_host(host)
@@ -557,6 +570,7 @@ def restart_model_proxy(
             host=host,
             port=port,
             start_timeout_seconds=START_TIMEOUT_SECONDS,
+            debug=debug,
         )
 
 

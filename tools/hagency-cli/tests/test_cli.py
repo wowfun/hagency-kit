@@ -325,7 +325,7 @@ class CliTests(unittest.TestCase):
             'version = 1\ndefault_provider = "openai"\n[providers.openai]\nadapter = "openai"\n',
             encoding="utf-8",
         )
-        state = mock.Mock(pid=123, host="127.0.0.1", port=9876)
+        state = mock.Mock(pid=123, host="127.0.0.1", port=9876, debug=False)
         paths = mock.Mock(log=self.root / "service.log")
         with mock.patch.object(
             commands_service_module, "start_model_proxy", return_value=(state, paths)
@@ -333,7 +333,9 @@ class CliTests(unittest.TestCase):
             stdout, _stderr = self.run_cli(
                 "service", "model-proxy", "start", "--port", "9876"
             )
-        start_mock.assert_called_once_with(proxy_config, host="127.0.0.1", port=9876)
+        start_mock.assert_called_once_with(
+            proxy_config, host="127.0.0.1", port=9876, debug=False
+        )
         self.assertIn("started model proxy: pid 123", stdout)
 
         state.host = "::1"
@@ -371,7 +373,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("options are mutually exclusive", stderr)
 
     def test_serve_stop_and_restart_dispatch_lifecycle_operations(self) -> None:
-        state = mock.Mock(pid=456, host="127.0.0.1", port=8765)
+        state = mock.Mock(pid=456, host="127.0.0.1", port=8765, debug=False)
         paths = mock.Mock(log=self.root / "service.log")
         with mock.patch.object(
             commands_service_module, "stop_model_proxy", return_value=(True, paths)
@@ -388,8 +390,33 @@ class CliTests(unittest.TestCase):
             self.root / "hagency-model-proxy.toml",
             host="127.0.0.1",
             port=8765,
+            debug=False,
         )
         self.assertIn("restarted model proxy: pid 456", stdout)
+
+    def test_model_proxy_debug_flag_is_forwarded_and_reports_effective_state(self):
+        state = mock.Mock(pid=123, host="127.0.0.1", port=8765, debug=True)
+        paths = mock.Mock(
+            log=self.root / "service.log", debug_directory=self.root / "debug"
+        )
+        for action in ("start", "restart"):
+            with self.subTest(action=action):
+                with mock.patch.object(
+                    commands_service_module,
+                    f"{action}_model_proxy",
+                    return_value=(state, paths),
+                ) as operation:
+                    stdout, _ = self.run_cli(
+                        "service", "model-proxy", action, "--debug"
+                    )
+                operation.assert_called_once_with(
+                    self.root / "hagency-model-proxy.toml",
+                    host="127.0.0.1",
+                    port=8765,
+                    debug=True,
+                )
+                self.assertIn("debug: on", stdout)
+                self.assertIn(str(paths.debug_directory), stdout)
 
     def test_bash_completion_includes_commands_aliases_and_options(self) -> None:
         values, stderr = self.complete_bash("hgc ", 1)

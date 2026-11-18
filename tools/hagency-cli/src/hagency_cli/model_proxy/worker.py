@@ -20,6 +20,7 @@ from .daemon import (
     service_paths,
     write_service_state,
 )
+from .debug import LOGS_KEY, SafeAccessLogger
 from .server import create_model_proxy_app
 
 
@@ -33,7 +34,9 @@ async def serve(
 ) -> None:
     validate_loopback_host(host)
     runner = web.AppRunner(
-        app, access_log=logging.getLogger("hagency.model_proxy.access")
+        app,
+        access_log=logging.getLogger("hagency.model_proxy.access"),
+        access_log_class=SafeAccessLogger,
     )
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
@@ -53,6 +56,7 @@ async def serve(
             started_at=time.time(),
             process_identity=identity,
             startup_nonce=startup_nonce,
+            debug=LOGS_KEY in app,
         ),
     )
     stopping = asyncio.Event()
@@ -74,6 +78,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,
@@ -85,7 +90,11 @@ def main() -> None:
     if not startup_nonce:
         raise RuntimeError("missing model proxy startup nonce")
     paths = service_paths(config_path)
-    app = create_model_proxy_app(load_proxy_config(config_path))
+    config = load_proxy_config(config_path)
+    app = create_model_proxy_app(
+        config,
+        debug_directory=paths.debug_directory if args.debug or config.debug else None,
+    )
     asyncio.run(serve(app, config_path, paths, args.host, args.port, startup_nonce))
 
 

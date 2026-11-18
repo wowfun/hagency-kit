@@ -105,11 +105,12 @@ def start_model_proxy_command(
     config: str | None,
     host: str,
     port: int,
+    debug: bool = False,
 ) -> None:
     config_path = model_proxy_config_path(root=root, config=config)
     validate_model_proxy_host(host)
     try:
-        state, paths = start_model_proxy(config_path, host=host, port=port)
+        state, paths = start_model_proxy(config_path, host=host, port=port, debug=debug)
     except (ModelProxyConfigError, ModelProxyServiceError) as exc:
         die(str(exc))
     print(
@@ -117,6 +118,9 @@ def start_model_proxy_command(
         f"{model_proxy_url(state.host, state.port)}"
     )
     print(f"log: {paths.log}")
+    print(f"debug: {'on' if state.debug else 'off'}")
+    if state.debug:
+        print(f"debug logs: {paths.debug_directory}")
 
 
 def stop_model_proxy_command(*, root: str | None, config: str | None) -> None:
@@ -134,11 +138,14 @@ def restart_model_proxy_command(
     config: str | None,
     host: str,
     port: int,
+    debug: bool = False,
 ) -> None:
     config_path = model_proxy_config_path(root=root, config=config)
     validate_model_proxy_host(host)
     try:
-        state, paths = restart_model_proxy(config_path, host=host, port=port)
+        state, paths = restart_model_proxy(
+            config_path, host=host, port=port, debug=debug
+        )
     except (ModelProxyConfigError, ModelProxyServiceError) as exc:
         die(str(exc))
     print(
@@ -146,6 +153,9 @@ def restart_model_proxy_command(
         f"{model_proxy_url(state.host, state.port)}"
     )
     print(f"log: {paths.log}")
+    print(f"debug: {'on' if state.debug else 'off'}")
+    if state.debug:
+        print(f"debug logs: {paths.debug_directory}")
 
 
 @model_proxy_app.command("start", short_help="Start the model proxy in the background.")
@@ -174,6 +184,13 @@ def serve_start_cli(
     port: Annotated[
         int, typer.Option("--port", min=1, max=65535, help="TCP port to listen on")
     ] = 8765,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="Record full HTTP traces per provider; also enabled by debug = true in TOML",
+        ),
+    ] = False,
 ) -> None:
     """Start the model proxy in the background and wait for its listener.
 
@@ -195,12 +212,19 @@ def serve_start_cli(
     XDG_STATE_HOME values use that default. Logs rotate at 10 MiB with three
     backups. Use the same resolved config path when stopping.
 
+    --debug or top-level debug = true in TOML enables full request/response
+    JSONL traces per provider, including streams. Credentials in headers and URLs
+    are redacted; bodies are retained in full. Debug logs rotate during operation
+    at 10 MiB with three backups. Startup reports the directory and effective state.
+
     \b
     Examples:
-      hgc service model-proxy start --root ./kit
+      hgc service model-proxy start --debug --root ./kit
       hgc service model-proxy start --config ./hagency-model-proxy.toml --port 8766
     """
-    start_model_proxy_command(root=root, config=config, host=host, port=port)
+    start_model_proxy_command(
+        root=root, config=config, host=host, port=port, debug=debug
+    )
 
 
 @model_proxy_app.command("stop", short_help="Stop the background model proxy.")
@@ -268,6 +292,13 @@ def serve_restart_cli(
     port: Annotated[
         int, typer.Option("--port", min=1, max=65535, help="TCP port to listen on")
     ] = 8765,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            help="Record full HTTP traces per provider; also enabled by debug = true in TOML",
+        ),
+    ] = False,
 ) -> None:
     """Stop the identified proxy worker, then start it with current settings.
 
@@ -287,9 +318,17 @@ def serve_restart_cli(
     reported log when diagnosing failures. See hgc service model-proxy --help for
     a minimal config and the CLI README for full provider/hook configuration.
 
+    --debug or top-level debug = true in TOML enables per-provider HTTP traces.
+    To disable tracing, set debug = false and restart without --debug. This flag
+    does not persist across restarts or modify TOML. Bodies are recorded in full;
+    credentials in headers and URLs are redacted. Old traces rotate at 10 MiB
+    with three backups.
+
     \b
     Examples:
-      hgc service model-proxy restart --root ./kit
+      hgc service model-proxy restart --debug --root ./kit
       hgc service model-proxy restart --config ./hagency-model-proxy.toml --port 8766
     """
-    restart_model_proxy_command(root=root, config=config, host=host, port=port)
+    restart_model_proxy_command(
+        root=root, config=config, host=host, port=port, debug=debug
+    )

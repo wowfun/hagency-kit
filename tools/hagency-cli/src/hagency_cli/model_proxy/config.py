@@ -74,6 +74,7 @@ class ProxyConfig:
     default_provider: str
     providers: Mapping[str, ProviderConfig]
     env: Mapping[str, str]
+    debug: bool = False
 
 
 def _fail(path: str, message: str) -> Never:
@@ -231,7 +232,12 @@ def load_proxy_config(
 
     resolved_environ = _workspace_environment(path, environ)
 
-    _reject_unknown(raw, {"version", "default_provider", "providers"}, "config")
+    _reject_unknown(
+        raw, {"version", "default_provider", "providers", "debug"}, "config"
+    )
+    debug = raw.get("debug", False)
+    if not isinstance(debug, bool):
+        _fail("debug", "must be a boolean")
     if raw.get("version") != 1:
         _fail("version", "must be 1")
     default_provider = raw.get("default_provider")
@@ -364,4 +370,5 @@ def load_proxy_config(
         default_provider=default_provider,
         providers=MappingProxyType(providers),
         env=resolved_environ,
+        debug=debug,
     )

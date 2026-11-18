@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
+from traceback import walk_tb
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -14,12 +15,7 @@ import aiohttp
 from aiohttp import web
 from multidict import CIMultiDict, CIMultiDictProxy
 
-from .config import (
-    ProviderConfig,
-    ProxyConfig,
-    load_proxy_config,
-    validate_loopback_host,
-)
+from .config import ProviderConfig, ProxyConfig
 from .conversion import (
     ChatToResponsesStream,
     ConversionError,
@@ -29,6 +25,15 @@ from .conversion import (
     convert_request,
     convert_response,
     normalized_error,
+)
+from .debug import (
+    LOGS_KEY,
+    DebugLogs,
+    RequestTrace,
+    debug_middleware,
+    request_trace,
+    response_prepared,
+    trace_config,
 )
 from .hooks import (
     AuthPatch,
@@ -90,9 +95,87 @@ class ProxyHttpError(Exception):
         self.param = param
 
 
+class _DownstreamDisconnected(ConnectionError):
+    pass
+
+
 CONFIG_KEY = web.AppKey("model_proxy_config", ProxyConfig)
 HOOKS_KEY = web.AppKey("model_proxy_hooks", dict[str, HookRuntime | None])
 SESSION_KEY = web.AppKey("model_proxy_session", aiohttp.ClientSession)
+
+
+def _request_id(request: web.Request) -> str:
+    trace = request_trace(request)
+    return trace.request_id if trace else f"hgc_{uuid.uuid4().hex}"
+
+
+async def _read_client_body(request: web.Request) -> bytes:
+    trace = request_trace(request)
+    if trace is None:
+        return await request.read()
+    body = bytearray()
+    async for chunk in request.content.iter_any():
+        await trace.body("client_request", chunk)
+        body.extend(chunk)
+        if len(body) > MAX_REQUEST_BYTES:
+            await trace.end(
+                "client_request", complete=False, reason="request_too_large"
+            )
+            raise web.HTTPRequestEntityTooLarge(MAX_REQUEST_BYTES, len(body))
+    await trace.end("client_request")
+    return bytes(body)
+
+
+async def _upstream_chunks(
+    upstream: aiohttp.ClientResponse,
+    trace: RequestTrace | None,
+) -> AsyncIterator[bytes]:
+    complete = False
+    try:
+        async for chunk in upstream.content.iter_any():
+            if trace is not None:
+                await trace.body("upstream_response", chunk)
+            yield chunk
+        complete = True
+    except asyncio.CancelledError:
+        if trace is not None:
+            trace.reason = "cancelled"
+        raise
+    except aiohttp.ClientConnectionError as exc:
+        if trace is not None:
+            trace.reason = _stream_failure_reason(exc)
+        raise
+    except (aiohttp.ClientError, ConnectionError) as exc:
+        if trace is not None:
+            trace.reason = "upstream_connection_error"
+        raise aiohttp.ClientConnectionError("upstream response interrupted") from exc
+    finally:
+        if trace is not None:
+            await trace.end(
+                "upstream_response",
+                complete=complete,
+                reason="completed"
+                if complete
+                else (
+                    trace.reason if trace.reason != "completed" else "body_not_consumed"
+                ),
+            )
+
+
+def _trace_auth(request: web.Request, patch: AuthPatch) -> None:
+    trace = request_trace(request)
+    if trace is not None:
+        trace.secret_headers.update(name.lower() for name, _ in patch.headers.set)
+        trace.secret_query.update(name.lower() for name, _ in patch.query.set)
+
+
+async def _trace_upstream(
+    request: web.Request, upstream: aiohttp.ClientResponse
+) -> None:
+    trace = request_trace(request)
+    if trace is not None:
+        await trace.begin("upstream_response", status=upstream.status)
+        await trace.headers("upstream_response", upstream.headers.items())
 
 
 def _error_response(error: ProxyHttpError) -> web.Response:
@@ -333,6 +416,7 @@ async def _mapped_events(
     hook_runtime: HookRuntime | None,
     context: HookContext,
     converter: ChatToResponsesStream | ResponsesToChatStream | None,
+    trace: RequestTrace | None = None,
 ) -> AsyncIterator[bytes]:
     decoder = SseDecoder()
 
@@ -365,7 +449,7 @@ async def _mapped_events(
                 for converted in converter.feed(mapped_event):
                     yield encode_event(converted)
 
-    async for chunk in upstream.content.iter_any():
+    async for chunk in _upstream_chunks(upstream, trace):
         try:
             events = decoder.feed(chunk)
         except ValueError as exc:
@@ -388,15 +472,32 @@ async def _mapped_events(
             yield encode_event(converted)
 
 
-async def _read_buffered_response(upstream: aiohttp.ClientResponse) -> bytes:
+async def _read_buffered_response(
+    upstream: aiohttp.ClientResponse,
+    trace: RequestTrace | None = None,
+) -> bytes:
     body = bytearray()
-    async for chunk in upstream.content.iter_any():
+    async for chunk in _upstream_chunks(upstream, trace):
         body.extend(chunk)
         if len(body) > MAX_BUFFERED_RESPONSE_BYTES:
             raise ProxyHttpError(
                 502, "upstream_response_too_large", "upstream response exceeds 64 MiB"
             )
     return bytes(body)
+
+
+def _stream_failure_reason(error: BaseException) -> str:
+    if isinstance(error, ProxyHttpError):
+        return error.code
+    if isinstance(error, aiohttp.ServerTimeoutError):
+        return "upstream_timeout"
+    if isinstance(error, UpstreamConversionError):
+        return "invalid_upstream_response"
+    if isinstance(error, aiohttp.ClientError):
+        return "upstream_connection_error"
+    if isinstance(error, ConnectionError):
+        return "client_disconnected"
+    return "stream_interrupted"
 
 
 async def _stream_response(
@@ -411,12 +512,36 @@ async def _stream_response(
     failure_event_factory: Callable[[], bytes | None] | None = None,
 ) -> web.StreamResponse:
     response = web.StreamResponse(status=status, headers=headers)
+    trace = request_trace(request)
+
+    async def write(chunk: bytes | None = None) -> None:
+        try:
+            if chunk is None:
+                await response.write_eof()
+            else:
+                await response.write(chunk)
+        except ConnectionError as exc:
+            raise _DownstreamDisconnected() from exc
+        if chunk is not None and trace is not None:
+            await trace.body("client_response", chunk)
+
+    async def finish(complete: bool, reason: str = "completed") -> None:
+        if trace is not None:
+            if not complete:
+                trace.reason = reason
+            await trace.end(
+                "client_response",
+                complete=complete,
+                reason=reason,
+            )
+
     if iterator is None:
         await response.prepare(request)
         try:
-            async for chunk in upstream.content.iter_any():
-                await response.write(chunk)
-            await response.write_eof()
+            async for chunk in _upstream_chunks(upstream, trace):
+                await write(chunk)
+            await write()
+            await finish(True)
         except asyncio.CancelledError:
             upstream.close()
             raise
@@ -424,7 +549,8 @@ async def _stream_response(
             ConnectionError,
             aiohttp.ServerTimeoutError,
             aiohttp.ClientConnectionError,
-        ):
+        ) as exc:
+            await finish(False, _stream_failure_reason(exc))
             upstream.close()
             response.force_close()
             try:
@@ -452,10 +578,11 @@ async def _stream_response(
         ) from exc
     await response.prepare(request)
     try:
-        await response.write(first)
+        await write(first)
         async for chunk in stream:
-            await response.write(chunk)
-        await response.write_eof()
+            await write(chunk)
+        await write()
+        await finish(True)
     except asyncio.CancelledError:
         upstream.close()
         raise
@@ -464,7 +591,7 @@ async def _stream_response(
         ProxyHttpError,
         aiohttp.ServerTimeoutError,
         aiohttp.ClientConnectionError,
-    ):
+    ) as exc:
         if (
             converted
             and downstream_protocol == PROTOCOL_RESPONSES
@@ -473,7 +600,7 @@ async def _stream_response(
             failed = failure_event_factory()
             try:
                 if failed:
-                    await response.write(failed)
+                    await write(failed)
                 await response.write_eof()
             except ConnectionError:
                 pass
@@ -484,9 +611,11 @@ async def _stream_response(
             except ConnectionError:
                 pass
         upstream.close()
-    except ConnectionError:
+        await finish(False, _stream_failure_reason(exc))
+    except _DownstreamDisconnected:
         upstream.close()
-        raise
+        response.force_close()
+        await finish(False, "client_disconnected")
     return response
 
 
@@ -514,10 +643,10 @@ async def _proxy_request(
             "resource operation is only available for a native provider protocol",
         )
 
-    request_id = f"hgc_{uuid.uuid4().hex}"
+    request_id = _request_id(request)
     warnings = ConversionWarnings()
     try:
-        body = await request.read()
+        body = await _read_client_body(request)
     except web.HTTPRequestEntityTooLarge as exc:
         raise ProxyHttpError(
             413, "request_too_large", "request body exceeds 64 MiB"
@@ -631,6 +760,7 @@ async def _proxy_request(
                 )
             _apply_header_patch(headers, auth_patch.headers, auth=True)
             query = _apply_query_patch(query, auth_patch.query)
+            _trace_auth(request, auth_patch)
             final_url = _url(provider.base_url, relative_path, query)
 
     timeout = aiohttp.ClientTimeout(
@@ -640,6 +770,9 @@ async def _proxy_request(
         sock_read=provider.idle_timeout_seconds,
     )
     session = request.app[SESSION_KEY]
+    trace = request_trace(request)
+    if trace is not None:
+        await trace.begin("upstream_request", method=request.method, url=final_url)
     try:
         upstream_context = session.request(
             request.method,
@@ -648,8 +781,10 @@ async def _proxy_request(
             data=upstream_body,
             allow_redirects=False,
             timeout=timeout,
+            trace_request_ctx=trace,
         )
         async with upstream_context as upstream:
+            await _trace_upstream(request, upstream)
             is_sse = (
                 upstream.headers.get("Content-Type", "")
                 .lower()
@@ -659,7 +794,7 @@ async def _proxy_request(
             buffered_body: bytes | None = None
             if hook_runtime is not None and hook_runtime.process_response is not None:
                 if not is_sse:
-                    buffered_body = await _read_buffered_response(upstream)
+                    buffered_body = await _read_buffered_response(upstream, trace)
                 provider_response = ProviderResponse(
                     status=upstream.status,
                     headers=_header_view(upstream.headers),
@@ -737,7 +872,7 @@ async def _proxy_request(
                 response_body = (
                     buffered_body
                     if buffered_body is not None
-                    else await _read_buffered_response(upstream)
+                    else await _read_buffered_response(upstream, trace)
                 )
                 if response_patch is not None and response_patch.json_body is not None:
                     if not isinstance(response_patch.json_body, dict):
@@ -789,6 +924,7 @@ async def _proxy_request(
                         hook_runtime=hook_runtime,
                         context=context,
                         converter=converter,
+                        trace=trace,
                     )
                 if isinstance(converter, ChatToResponsesStream):
 
@@ -834,7 +970,7 @@ async def _proxy_request(
             response_body = (
                 buffered_body
                 if buffered_body is not None
-                else await _read_buffered_response(upstream)
+                else await _read_buffered_response(upstream, trace)
             )
             if response_patch is not None and response_patch.sse_mapper is not None:
                 raise ProxyHttpError(
@@ -895,7 +1031,7 @@ async def _models_request(request: web.Request) -> web.StreamResponse:
             404, "unknown_provider", f"unknown provider: {provider_name}"
         )
 
-    request_id = f"hgc_{uuid.uuid4().hex}"
+    request_id = _request_id(request)
     hook_runtime = request.app[HOOKS_KEY][provider_name]
 
     if hook_runtime is not None and hook_runtime.fetch_models is not None:
@@ -1026,6 +1162,7 @@ async def _models_request(request: web.Request) -> web.StreamResponse:
                 )
             _apply_header_patch(headers, auth_patch.headers, auth=True)
             query = _apply_query_patch(query, auth_patch.query)
+            _trace_auth(request, auth_patch)
             final_url = _url(provider.base_url, models_path, query)
 
     timeout = aiohttp.ClientTimeout(
@@ -1035,14 +1172,19 @@ async def _models_request(request: web.Request) -> web.StreamResponse:
         sock_read=provider.idle_timeout_seconds,
     )
     session = request.app[SESSION_KEY]
+    trace = request_trace(request)
+    if trace is not None:
+        await trace.begin("upstream_request", method=request.method, url=final_url)
     try:
         async with session.get(
             final_url,
             headers=headers,
             allow_redirects=False,
             timeout=timeout,
+            trace_request_ctx=trace,
         ) as upstream:
-            body = await _read_buffered_response(upstream)
+            await _trace_upstream(request, upstream)
+            body = await _read_buffered_response(upstream, trace)
             response_patch: ResponsePatch | None = None
             if hook_runtime is not None and hook_runtime.process_response is not None:
                 provider_response = ProviderResponse(
@@ -1125,53 +1267,93 @@ async def _models_request(request: web.Request) -> web.StreamResponse:
         ) from exc
 
 
+def _internal_error_response(
+    request: web.Request, operation: str, error: Exception
+) -> web.Response:
+    if (trace := request_trace(request)) is not None:
+        trace.reason = "internal_error"
+    frames = " -> ".join(
+        f"{Path(frame.f_code.co_filename).name}:{lineno}:{frame.f_code.co_name}"
+        for frame, lineno in walk_tb(error.__traceback__)
+    )
+    LOGGER.error(
+        "model proxy %s failed error=%s frames=%s",
+        operation,
+        type(error).__name__,
+        frames,
+    )
+    return _error_response(
+        ProxyHttpError(500, "internal_error", "model proxy request failed")
+    )
+
+
 async def _models_route(request: web.Request) -> web.StreamResponse:
     try:
         return await _models_request(request)
     except ProxyHttpError as exc:
+        if (trace := request_trace(request)) is not None:
+            trace.reason = exc.code
         return _error_response(exc)
     except web.HTTPException as exc:
+        if (trace := request_trace(request)) is not None:
+            trace.reason = "http_error"
         return _error_response(ProxyHttpError(exc.status, "http_error", exc.reason))
     except Exception as exc:
-        LOGGER.exception(
-            "model proxy models request failed error=%s", type(exc).__name__
-        )
-        return _error_response(
-            ProxyHttpError(500, "internal_error", "model proxy request failed")
-        )
+        return _internal_error_response(request, "models request", exc)
 
 
 async def _route(request: web.Request, *, protocol: str) -> web.StreamResponse:
     try:
         return await _proxy_request(request, protocol)
     except ProxyHttpError as exc:
+        if (trace := request_trace(request)) is not None:
+            trace.reason = exc.code
         return _error_response(exc)
     except web.HTTPException as exc:
+        if (trace := request_trace(request)) is not None:
+            trace.reason = "http_error"
         return _error_response(ProxyHttpError(exc.status, "http_error", exc.reason))
     except Exception as exc:
-        LOGGER.exception("model proxy request failed error=%s", type(exc).__name__)
-        return _error_response(
-            ProxyHttpError(500, "internal_error", "model proxy request failed")
-        )
+        return _internal_error_response(request, "request", exc)
 
 
 async def _start_session(app: web.Application) -> None:
-    app[SESSION_KEY] = aiohttp.ClientSession(auto_decompress=False, trust_env=False)
+    app[SESSION_KEY] = aiohttp.ClientSession(
+        auto_decompress=False,
+        trust_env=False,
+        trace_configs=[trace_config()] if LOGS_KEY in app else [],
+    )
 
 
 async def _close_session(app: web.Application) -> None:
     await app[SESSION_KEY].close()
 
 
-def create_model_proxy_app(config: ProxyConfig) -> web.Application:
+def create_model_proxy_app(
+    config: ProxyConfig, *, debug_directory: Path | None = None
+) -> web.Application:
     hooks = {
         name: load_hook(provider, config.path, config.env, LOGGER)
         for name, provider in config.providers.items()
     }
+    logs = (
+        DebugLogs(debug_directory, config.providers)
+        if debug_directory is not None
+        else None
+    )
     app = web.Application(
+        middlewares=[debug_middleware(logs, config.default_provider)] if logs else [],
         client_max_size=MAX_REQUEST_BYTES,
         handler_args={"auto_decompress": False},
     )
+    if logs is not None:
+        app[LOGS_KEY] = logs
+        app.on_response_prepare.append(response_prepared)
+
+        async def close_logs(app: web.Application) -> None:
+            await logs.close()
+
+        app.on_cleanup.append(close_logs)
     app[CONFIG_KEY] = config
     app[HOOKS_KEY] = hooks
     app.on_startup.append(_start_session)
@@ -1191,16 +1373,3 @@ def create_model_proxy_app(config: ProxyConfig) -> web.Application:
     for models_path in ("/v1/models", "/{provider}/v1/models"):
         app.router.add_route("GET", models_path, _models_route)
     return app
-
-
-def run_model_proxy(config_path: Path, *, host: str, port: int) -> None:
-    validate_loopback_host(host)
-    config = load_proxy_config(config_path)
-    app = create_model_proxy_app(config)
-    LOGGER.info(
-        "starting model proxy host=%s port=%s providers=%s",
-        host,
-        port,
-        ",".join(config.providers),
-    )
-    web.run_app(app, host=host, port=port, print=None)

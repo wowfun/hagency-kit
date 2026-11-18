@@ -10,7 +10,7 @@ subdirectory is always lowercase `hagency`:
 | Content | Location | Default when the XDG variable is unset or empty |
 | --- | --- | --- |
 | Saved purge path list | `$XDG_CONFIG_HOME/hagency/space-purge-paths` | `~/.config/hagency/space-purge-paths` |
-| Model proxy state, lock, and service log | `$XDG_STATE_HOME/hagency/model-proxy/<config-hash>/` | `~/.local/state/hagency/model-proxy/<config-hash>/` |
+| Model proxy state, lock, service log, and debug logs | `$XDG_STATE_HOME/hagency/model-proxy/<config-hash>/` | `~/.local/state/hagency/model-proxy/<config-hash>/` |
 
 XDG variables must contain absolute paths for the current platform. Relative
 values, including literal `~/...`, are ignored in favor of the defaults; shell

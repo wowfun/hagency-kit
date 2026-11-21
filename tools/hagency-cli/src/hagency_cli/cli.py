@@ -92,6 +92,8 @@ def normalize_legacy_multi_value_options(args: Sequence[str]) -> list[str]:
 
 def explicit_completion_shell(args: Sequence[str]) -> str | None:
     for index, arg in enumerate(args):
+        if arg == "--":
+            break
         option, separator, inline_value = arg.partition("=")
         if option not in {"--install-completion", "--show-completion"}:
             continue

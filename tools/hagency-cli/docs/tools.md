@@ -49,6 +49,13 @@ Hagency selects the first available manager in the declared order. Installer out
 
 New Windows installations default to `D:\hagency\<username>\tools`. When the default location is unavailable they use `$XDG_DATA_HOME/hagency/tools`, defaulting to `~/.local/share/hagency/tools`. The executable directory is added to the current user's PATH for new terminals. Other platforms use the manager's global paths. An explicit `--install-dir` selects a separate installation even when another version is on PATH. Use the reported command path directly, or put its directory on PATH. System package managers that cannot relocate a generic package report the unsupported destination.
 
+When the current shell resolves a different executable or has no matching command, `install` shows both the verified `Installed:` path and the current `PATH:` result, including when it reuses an existing installation. In an open Git Bash session, prepend the reported executable directory to use it immediately. For MarkItDown in the default Windows location, run:
+
+```bash
+export PATH="/d/hagency/$USERNAME/tools/bin:$PATH"
+hgc tool check markitdown
+```
+
 `upgrade` and `uninstall` can act on external installations when the manager identifies the package and its matching executable. Operations remember the installation root, manager and executable under the user's Hagency state directory. Use `--install-dir` to choose among multiple recorded copies. The final PATH check shows which copy the current shell resolves.
 
 Use `profile apply/install/i NAME --with-tools/-T` to apply skills and then ensure the effective tool catalog. The command attempts every selected tool and reports all failures together. With the default flags only skills are applied. `--install-dir` controls tools independently of the skills destination.

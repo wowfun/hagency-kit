@@ -197,6 +197,9 @@ def tool_install(
 ) -> None:
     """Install the newest compatible release, or reuse a suitable existing tool.
 
+    If the shell resolves a different copy or cannot find the command, show
+    the installed path and the current PATH result.
+
     \b
     Examples:
       hgc tool i playwright

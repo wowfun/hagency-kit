@@ -234,14 +234,29 @@ def record_install(
 
 
 def report_active(
-    tool: Tool, progress: Progress | None, verified: Status | None = None
+    tool: Tool,
+    progress: Progress | None,
+    verified: Status | None = None,
+    *,
+    reused: bool = False,
 ) -> None:
     path = active_path(tool)
-    if verified and same_entry(verified.path, path):
+    matches = verified is not None and same_entry(verified.path, path)
+    if verified is not None:
+        if matches and reused:
+            emit_event(progress, verified.display(tool.name))
+            return
+        emit_event(progress, "Installed: " + verified.display(tool.name))
+    if matches:
         status = Status(path, verified.version, verified.status)
     else:
         status = probe(tool, path) if path else Status(None, None, "missing")
     emit_event(progress, "PATH: " + status.display(tool.name))
+    if verified and verified.path and not matches:
+        emit_event(
+            progress,
+            f"To select this installation, prepend {verified.path.parent} to the current shell's PATH.",
+        )
 
 
 def execute_change(
@@ -369,7 +384,7 @@ def _apply(
     ):
         if not dry_run and os.name == "nt" and target.root:
             record_install(tool, target, entry, receipt.checksum if receipt else None)
-        emit_event(progress, status.display(tool.name))
+        report_active(tool, progress, status, reused=True)
         return
 
     version = None
@@ -389,9 +404,7 @@ def _apply(
             and not args
             and status.version == upstream_version(version)
         ):
-            emit_event(progress, status.display(tool.name))
-            if not same_entry(entry, active_path(tool)):
-                report_active(tool, progress)
+            report_active(tool, progress, status, reused=True)
             return
     emit_event(
         progress,
@@ -434,5 +447,4 @@ def finish_change(
     if verified.status != "available":
         fail(f"installed tool failed verification: {verified.display(tool.name)}")
     record_install(tool, target, installed, checksum)
-    emit_event(progress, "Installed: " + verified.display(tool.name))
     report_active(tool, progress, verified)

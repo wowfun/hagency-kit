@@ -94,9 +94,6 @@ class ToolLifecycleTests(unittest.TestCase):
                     "UV_CACHE_DIR": str(self.root / "cache"),
                     "UV_PYTHON": sys.executable,
                     "UV_PYTHON_DOWNLOADS": "never",
-                    "PATH": os.pathsep.join(
-                        [str(self.public / "bin"), os.environ["PATH"]]
-                    ),
                 },
             )
         )
@@ -114,6 +111,29 @@ class ToolLifecycleTests(unittest.TestCase):
         self.cli("tool", "i", name, "--install-dir", str(self.public))
         (record,) = self.records(name)
         self.assertTrue(Path(record.path).is_file())
+        self.assertIn("\tmissing\t", self.cli("tool", "check", name, code=1))
+        reused = self.cli("tool", "i", name, "--dry-run")
+        self.assertIn(f"Installed: {name}\tavailable\t1.0\t{record.path}", reused)
+        self.assertIn(f"PATH: {name}\tmissing\t-\t-", reused)
+
+        shadow = self.root / "other-bin"
+        shadow.mkdir()
+        other = shadow / (name + ".cmd" if os.name == "nt" else name)
+        other.write_text("@echo 0.9\n" if os.name == "nt" else "#!/bin/sh\necho 0.9\n")
+        other.chmod(0o755)
+        with patch.dict(
+            os.environ, {"PATH": str(shadow) + os.pathsep + os.environ["PATH"]}
+        ):
+            reused = self.cli("tool", "i", name, "--dry-run")
+            self.assertIn(f"Installed: {name}\tavailable\t1.0", reused)
+            self.assertIn(f"PATH: {name}\tavailable\t0.9\t", reused)
+
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {"PATH": str(self.public / "bin") + os.pathsep + os.environ["PATH"]},
+            )
+        )
         self.assertIn("\tavailable\t1.0\t", self.cli("tool", "check", name))
         if os.name == "nt":
             with tool_state.receipts(False) as db:

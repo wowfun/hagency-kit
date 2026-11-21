@@ -1,0 +1,1 @@
+- Pre-release with no compatibility guarantees. Prefer the correct foundation over compatibility shims, and update all affected paths, code, tests, and docs together.

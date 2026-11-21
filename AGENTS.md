@@ -1,1 +1,0 @@
-- Keep skill files agent-agnostic; do not create `agents/openai.yaml`.

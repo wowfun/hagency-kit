@@ -1,10 +1,15 @@
-.DS_Store
 .agents/skills/
+.claude/skills/
+.vscode/
+
+# workspace
+.local
+.references/
 
 # py
 __pycache__/
 .venv/
 
-# dev
-.local
-.references/
+# files
+.DS_Store
+.env

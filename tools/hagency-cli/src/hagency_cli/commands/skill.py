@@ -229,8 +229,7 @@ def skill_add_cli(
     )
 
 
-@skill_app.command("ls", short_help="Alias for list.")
-@skill_app.command("list", short_help="List discovered skills.")
+@aliased_command(skill_app, "skill", "list", short_help="List discovered skills.")
 @command_errors
 def skill_list_cli(
     sources: Annotated[

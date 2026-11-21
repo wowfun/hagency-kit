@@ -93,8 +93,7 @@ def profile_show_command(*, name: str, root_value: str | None) -> None:
     print(text.rstrip())
 
 
-@profile_app.command("ls", short_help="Alias for list.")
-@profile_app.command("list", short_help="List profiles.")
+@aliased_command(profile_app, "profile", "list", short_help="List profiles.")
 @command_errors
 def profile_list_cli(
     root: Annotated[
@@ -122,7 +121,7 @@ def profile_list_cli(
     profile_list_command(root_value=root)
 
 
-@profile_app.command("add", short_help="Add a profile.")
+@aliased_command(profile_app, "profile", "add", short_help="Add a profile.")
 @command_errors
 def profile_add_cli(
     name: Annotated[str, typer.Argument(help="Profile name under profiles/")],
@@ -203,8 +202,7 @@ def profile_add_cli(
     )
 
 
-@profile_app.command("u", short_help="Alias for update.")
-@profile_app.command("update", short_help="Update a profile.")
+@aliased_command(profile_app, "profile", "update", short_help="Update a profile.")
 @command_errors
 def profile_update_cli(
     name: Annotated[
@@ -308,8 +306,7 @@ def profile_update_cli(
     )
 
 
-@profile_app.command("rm", short_help="Alias for remove.")
-@profile_app.command("remove", short_help="Remove a profile.")
+@aliased_command(profile_app, "profile", "remove", short_help="Remove a profile.")
 @command_errors
 def profile_remove_cli(
     name: Annotated[
@@ -452,7 +449,7 @@ def profile_apply_cli(
     Relative destinations use the invocation directory and
     ~ expands to your home. --root and --checkout-dir only locate profile/sources.
     Prints the resolved destination, including for empty profiles and dry runs.
-    Aliases: install, a, i.
+    Aliases: install, i.
 
     The default is symlink, or junction on Windows. -cp or --link-mode copy creates
     independent copies; -cp cannot be combined with symlink or junction modes.

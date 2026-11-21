@@ -368,7 +368,7 @@ class CommandTreeTests(unittest.TestCase):
             {"init", "ln", "source", "s", "skill", "profile", "p", "file", "service"},
         )
         expected = {
-            "source": {"list", "ls", "show", "add", "remove", "rm", "sync"},
+            "source": {"list", "ls", "show", "add", "a", "remove", "rm", "sync"},
             "skill": {"list", "ls", "add", "install", "a", "i"},
             "profile": {
                 "list",
@@ -642,7 +642,7 @@ class CommandTreeTests(unittest.TestCase):
             "draft",
         ]
         for group in ("profile", "p"):
-            for action in ("add", "update", "u"):
+            for action in ("add", "a", "update", "u"):
                 self.assertEqual(
                     cli.normalize_legacy_multi_value_options([group, action, *suffix]),
                     [group, action, *expanded],

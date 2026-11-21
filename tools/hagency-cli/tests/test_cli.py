@@ -546,7 +546,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("--paths", values)
 
         values, _stderr = self.complete_bash("hgc source ", 2)
-        self.assertEqual(values, ["list", "ls", "show", "add", "remove", "rm", "sync"])
+        self.assertEqual(values, ["list", "ls", "show", "add", "a", "remove", "rm", "sync"])
 
         values, _stderr = self.complete_bash("hgc source sync --", 3)
         self.assertIn("--profile", values)

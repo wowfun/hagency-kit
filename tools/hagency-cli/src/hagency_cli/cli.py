@@ -8,7 +8,7 @@ from hagency_cli.commands.file import file_app
 from hagency_cli.commands.ln import ln_cli
 from hagency_cli.commands.profile import profile_app
 from hagency_cli.commands.service import service_app
-from hagency_cli.commands.shared import make_app
+from hagency_cli.commands.shared import CommandGroup, make_app
 from hagency_cli.commands.skill import skill_app
 from hagency_cli.commands.source import source_app
 from hagency_cli.commands.workspace import init_cli
@@ -66,7 +66,7 @@ def normalize_legacy_multi_value_options(args: Sequence[str]) -> list[str]:
     if (
         len(args) < 2
         or args[0] not in {"profile", "p"}
-        or args[1] not in {"add", "update", "u"}
+        or CommandGroup.aliases_for("profile").get(args[1], args[1]) not in {"add", "update"}
     ):
         return list(args)
     normalized: list[str] = []

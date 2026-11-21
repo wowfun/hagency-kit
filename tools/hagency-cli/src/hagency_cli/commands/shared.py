@@ -75,18 +75,26 @@ class CommandGroup(TyperGroup):
         "s": "source",
         "p": "profile",
         "ls": "list",
+        "a": "add",
+        "i": "install",
         "rm": "remove",
         "u": "update",
     }
     group_aliases = {
-        "profile": {"install": "apply", "a": "apply", "i": "apply"},
-        "skill": {"install": "add", "a": "add", "i": "add"},
+        "profile": {"u": "update", "install": "apply", "i": "apply"},
+        "skill": {"install": "add", "i": "add"},
     }
 
     @classmethod
     def aliases_for(cls, group: str | None) -> dict[str, str]:
         canonical = cls.aliases.get(group, group)
-        return {**cls.aliases, **cls.group_aliases.get(canonical, {})}
+        scoped = cls.group_aliases.get(canonical, {})
+        # A scoped target is canonical in this group (e.g. profile update).
+        return {
+            **{key: value for key, value in cls.aliases.items()
+               if key not in scoped and key not in scoped.values()},
+            **scoped,
+        }
 
     @classmethod
     def command_names(cls, group: str, name: str) -> tuple[str, ...]:

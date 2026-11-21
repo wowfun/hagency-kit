@@ -21,7 +21,7 @@ hgc profile apply review --dir ./project
 
 `profile remove NAME` deletes the profile directory and its contents; installed skills and source checkouts remain in place. Add, update, and remove support `--dry-run`. Editing configuration does not apply it to existing installation targets.
 
-`profile apply` (aliases: `install`, `a`, `i`) defaults to `--dir ./`, installing into the invocation directory's `.agents/skills`. Use `--path/-p` for an exact skills container or `--dir/-d` for another project's `.agents/skills`; the two options are mutually exclusive. `--root` locates the Hagency workspace without changing the installation destination. Applying a profile requires locally available source content and never syncs implicitly:
+`profile apply` (aliases `install`, `i`) defaults to `--dir ./`, installing into the invocation directory's `.agents/skills`. Use `--path/-p` for an exact skills container or `--dir/-d` for another project's `.agents/skills`; the two options are mutually exclusive. `--root` locates the Hagency workspace without changing the installation destination. Applying a profile requires locally available source content and never syncs implicitly:
 
 ```sh
 hgc profile apply review

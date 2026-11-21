@@ -10,6 +10,7 @@ from hagency_cli.commands.completion import (
     complete_source,
 )
 from hagency_cli.commands.shared import (
+    aliased_command,
     command_errors,
     diagnostic,
     die,
@@ -108,8 +109,7 @@ def source_show_command(
         print(f"remote.ref: {raw_remote.get('ref', remote.ref)}")
 
 
-@source_app.command("ls", short_help="Alias for list.")
-@source_app.command("list", short_help="List configured sources.")
+@aliased_command(source_app, "source", "list", short_help="List configured sources.")
 @command_errors
 def source_list_cli(
     root: Annotated[
@@ -183,7 +183,8 @@ def source_show_cli(
     source_show_command(name=name, root_value=root, checkout_dir=checkout_dir)
 
 
-@source_app.command(
+@aliased_command(
+    source_app, "source",
     "add",
     short_help="Register a local or remote source.",
 )
@@ -266,8 +267,7 @@ def source_add_cli(
     )
 
 
-@source_app.command("rm", short_help="Alias for remove.")
-@source_app.command("remove", short_help="Remove a source from the workspace config.")
+@aliased_command(source_app, "source", "remove", short_help="Remove a source from the workspace config.")
 @command_errors
 def source_remove_cli(
     name: Annotated[

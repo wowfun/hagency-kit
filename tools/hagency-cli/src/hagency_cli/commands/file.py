@@ -175,6 +175,7 @@ SFTPUpdateOption = Annotated[
     bool,
     typer.Option(
         "--update",
+        "-u",
         help="Do not replace newer destination paths (temporary endpoint only)",
     ),
 ]
@@ -237,7 +238,7 @@ SyncBundleIgnoreExistingOption = Annotated[
 
 SyncBundleUpdateOption = Annotated[
     bool,
-    typer.Option("--update", help="Do not replace newer destination paths"),
+    typer.Option("--update", "-u", help="Do not replace newer destination paths"),
 ]
 
 

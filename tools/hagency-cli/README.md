@@ -41,7 +41,7 @@ hgc service model-proxy start|stop|restart
 
 Use `ls` for `list`, `a` for `add`, `rm` for `remove`, and `i` for `install`. Tool upgrades also accept `update` and `u`. Profile edits use `profile update/u`. `profile a` creates a profile. To apply one, use `profile apply/install/i`. Skill installation also supports `skill add/a`. Help and completion include every alias.
 
-Option aliases likewise share a row. Use `--install/-i` on `tool add`. `source sync` updates Git checkouts and `file sync` synchronizes project files over SFTP.
+Option aliases likewise share a row. Use `--install/-i` on `tool add` and `--update/-u` on one-way file transfers and bundle application. `source sync` updates Git checkouts and `file sync` synchronizes project files over SFTP.
 
 Use `hgc ln -s TARGET [DEST]` to create a link from any directory. `DEST` defaults
 to the current directory. An existing destination directory receives a link

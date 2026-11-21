@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -31,8 +32,7 @@ def write_toml(path: Path, data: dict) -> None:
 
 def toml_value(value: Any) -> str:
     if isinstance(value, str):
-        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{escaped}"'
+        return json.dumps(value, ensure_ascii=False).replace(chr(127), "\\u007f")
     if isinstance(value, list):
         return "[" + ", ".join(toml_value(item) for item in value) + "]"
     if isinstance(value, bool):

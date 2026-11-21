@@ -3,6 +3,15 @@ checkout_dir = "~/Projects/references"
 checkout_dir_windows = "/d/Projects/references"
 depth = 1
 
+[tool.playwright]
+install = ["pnpm", "npm"]
+
+[tool.ffmpeg]
+
+[tool.markitdown]
+install = ["uv"]
+package = "markitdown[pdf,docx,pptx]"
+
 [source.baoyu-skills]
 
 [source.baoyu-skills.remote]

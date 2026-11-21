@@ -15,7 +15,9 @@ The CLI is organized around workspace content, project files, and the model prox
 | `workspace/profiles.py` | Profile definitions, selection, application, source reference checks |
 | `workspace/source_inputs.py` | Read-only classification and source reuse decisions for shortcut installation |
 | `workspace/catalog.py` | Discoverable skill queries shared by commands and completion |
-| `workspace/operations` | Source, profile, and skill workflows |
+| `workspace/tool_catalog.py` | Effective tool declarations, editing, version checks and PATH probes |
+| `workspace/tool_packages.py`, `tool_native.py`, `ffmpeg_portable.py` | Package installation and package-owned command discovery |
+| `workspace/operations` | Source, profile, skill and tool workflows |
 | `files/sync` | Configuration, selection/scanning, planning, content comparison, SFTP and offline bundles |
 | `files/purge` | Purge scan-root discovery and the saved paths editor |
 | `files/cleanup` | Rule loading/matching, project and Agent inspection, frozen plans, statistics, revalidation and deletion |

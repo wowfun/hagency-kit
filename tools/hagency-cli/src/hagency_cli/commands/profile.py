@@ -38,10 +38,10 @@ from hagency_cli.workspace.profiles import (
 from hagency_cli.workspace.skills import LinkMode, SkillScan, workspace_skill_scans
 
 profile_app = make_app(
-    help_text="""Manage reusable skill selections in profiles/NAME/config.toml.
+    help_text="""Manage reusable skill selections and tool overrides in profiles/NAME/config.toml.
 
     Add or update a profile, sync its sources, then apply it to a skills container.
-    Editing a profile changes its configuration; apply materializes its skills.
+    Apply materializes its skills. Add --with-tools/-T to install its effective tools.
     Commands resolve --root, then current-directory ancestors, then the
     editable-installed Hagency Kit checkout.
 
@@ -171,7 +171,7 @@ def profile_add_cli(
 ) -> None:
     """Create profiles/NAME/config.toml in a Hagency workspace.
 
-    The profile name must be new. An omitted --add-skill creates an empty profile.
+    The profile name must be new. Omitting --add-skill leaves the skill selection empty.
     -AS/--add-skill accepts a source name, unique discovered skill name, or
     SOURCE:selector. Selectors are source-relative skills or subtrees; inspect
     them with hgc skill list. Obtain missing checkouts with hgc source sync first.
@@ -398,6 +398,13 @@ def profile_apply_cli(
             autocompletion=complete_directory,
         ),
     ] = None,
+    with_tools: Annotated[
+        bool, typer.Option("--with-tools", "-T", help="Also install effective profile tools")
+    ] = False,
+    install_dir: Annotated[
+        str | None,
+        typer.Option("--install-dir", help="Installation root for tools", autocompletion=complete_directory),
+    ] = None,
     skills_root: Annotated[
         str | None,
         typer.Option(
@@ -449,7 +456,9 @@ def profile_apply_cli(
     Relative destinations use the invocation directory and
     ~ expands to your home. --root and --checkout-dir only locate profile/sources.
     Prints the resolved destination, including for empty profiles and dry runs.
-    Aliases: install, i.
+    Aliases: install, i. Pass --with-tools/-T to install the effective tool catalog.
+    Use --install-dir for tool files independently of the skills destination.
+    Each selected tool is attempted. Failures are reported together.
 
     The default is symlink, or junction on Windows. -cp or --link-mode copy creates
     independent copies; -cp cannot be combined with symlink or junction modes.
@@ -478,10 +487,14 @@ def profile_apply_cli(
       hgc profile apply dev --dir ./project -cp
     """
     require_at_most_one({"--path": skills_path, "--dir": skills_root})
+    if install_dir and not with_tools:
+        raise typer.BadParameter("--install-dir requires --with-tools/-T")
     from hagency_cli.commands.skill_ui import QuestionarySkillConflictUI
 
     apply_profile_to_directory(
         cwd=Path.cwd(),
+        with_tools=with_tools,
+        install_dir=install_dir,
         conflict_ui=QuestionarySkillConflictUI(),
         name=name,
         skills_path=skills_path,

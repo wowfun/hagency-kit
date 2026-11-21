@@ -160,6 +160,17 @@ def complete_source(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]
     )
 
 
+def complete_tool(ctx: typer.Context, incomplete: str) -> list[tuple[str, str]]:
+    from hagency_cli.workspace.tool_catalog import catalog
+
+    try:
+        root = resolve_workspace_root(_context_value(ctx, "root", "--root", "-r"), Path.cwd())
+        tools = catalog(root, _context_value(ctx, "profile", "--profile"))
+    except Exception:
+        return []
+    return _items(((name, "tool") for name in tools), incomplete)
+
+
 def complete_source_or_workspace(
     ctx: typer.Context, incomplete: str
 ) -> list[tuple[str, str]]:

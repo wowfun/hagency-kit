@@ -12,6 +12,7 @@ Practical agent skills for reviewing, diagnosing, and operating AI-assisted engi
 uv tool install -e tools/hagency-cli
 hgc --help
 hgc skill list --source workspace
+hgc tool check
 hgc skill add workspace:skills/analyze-diff --dry-run
 hgc skill add workspace:skills/analyze-diff
 ```

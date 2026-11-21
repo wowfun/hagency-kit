@@ -12,6 +12,7 @@
 uv tool install -e tools/hagency-cli
 hgc --help
 hgc skill list --source workspace
+hgc tool check
 hgc skill add workspace:skills/analyze-diff --dry-run
 hgc skill add workspace:skills/analyze-diff
 ```
@@ -19,6 +20,8 @@ hgc skill add workspace:skills/analyze-diff
 Skill 默认安装到调用目录的 `.agents/skills`；使用 `--dir /path/to/project` 指定其他项目，或用 `--global` 安装到 `~/.agents/skills`。Workspace 按 `--root`、当前目录及其父目录、editable 安装所用的 Hagency Kit 源码仓库顺序查找。Wheel 安装在 workspace 外运行时需要指定 `--root`。
 
 通过 `hgc COMMAND --help` 和 `hgc COMMAND SUBCOMMAND --help` 查看完整操作说明。[Hagency CLI 文档索引（英文）](tools/hagency-cli/README.md#documentation) 提供配置、source 与 profile、SFTP 与离线传输、清理、模型代理、排错和开发的主题文档入口。使用 `hgc --install-completion` 安装 shell 补全。
+
+`hgc tool` 管理工作区和 profile 声明的工具。可用 `hgc tool check --profile dev` 检测当前环境，用 `hgc profile i dev -T` 在应用技能时一并安装工具。[工具命令与配置](tools/hagency-cli/docs/tools.md)
 
 ## Skills
 

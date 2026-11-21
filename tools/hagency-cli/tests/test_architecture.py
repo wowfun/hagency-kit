@@ -365,10 +365,12 @@ class CommandTreeTests(unittest.TestCase):
         command = get_command(cli.app)
         self.assertEqual(
             set(command.commands),
-            {"init", "ln", "source", "s", "skill", "profile", "p", "file", "service"},
+            {"init", "ln", "source", "s", "skill", "tool", "profile", "p", "file", "service"},
         )
         expected = {
             "source": {"list", "ls", "show", "add", "a", "remove", "rm", "sync"},
+            "tool": {"list", "ls", "check", "add", "a", "remove", "rm", "install", "i",
+                     "upgrade", "update", "u", "uninstall"},
             "skill": {"list", "ls", "add", "install", "a", "i"},
             "profile": {
                 "list",
@@ -466,7 +468,7 @@ class CommandTreeTests(unittest.TestCase):
                 self.assertEqual(stdout.split("\n\n", 1)[1], full.split("\n\n", 1)[1])
                 self.assertIn("Examples:", stdout)
 
-        for path in ((), ("source",), ("skill",), ("profile",)):
+        for path in ((), ("source",), ("skill",), ("profile",), ("tool",)):
             with self.subTest(group=path):
                 stdout, _stderr = self.run_main(*path, "--help")
                 command_list = stdout.split("Commands:\n", 1)[1]

@@ -10,6 +10,7 @@ subdirectory is always lowercase `hagency`:
 | Content | Location | Default when the XDG variable is unset or empty |
 | --- | --- | --- |
 | Saved purge path list | `$XDG_CONFIG_HOME/hagency/space-purge-paths` | `~/.config/hagency/space-purge-paths` |
+| Tool installation records | `$XDG_STATE_HOME/hagency/tools/installs.sqlite3` | `~/.local/state/hagency/tools/installs.sqlite3` |
 | Model proxy state, lock, service log, and debug logs | `$XDG_STATE_HOME/hagency/model-proxy/<config-hash>/` | `~/.local/state/hagency/model-proxy/<config-hash>/` |
 
 XDG variables must contain absolute paths for the current platform. Relative
@@ -23,8 +24,8 @@ longer used. Old contents are neither read nor migrated nor deleted. Stop an
 existing worker with the previous version before switching its state location.
 
 Workspace configuration, profiles, source checkouts, and skill installation
-destinations follow the project and destination rules below. Hagency currently
-has no separate user data or cache directory.
+destinations follow the project and destination rules below. Workspace and profile
+tool declarations and platform installation paths are described in the [tool guide](tools.md).
 
 ## Workspace discovery
 

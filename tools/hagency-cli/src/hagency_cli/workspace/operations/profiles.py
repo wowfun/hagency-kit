@@ -44,6 +44,8 @@ def apply_profile_to_directory(
     dry_run: bool,
     conflict_ui: SkillConflictUI | None = None,
     progress: Progress | None = None,
+    with_tools: bool = False,
+    install_dir: str | None = None,
 ) -> tuple[SkillLinkCandidate, ...]:
     root = resolve_workspace_root(root_value, cwd)
     invalid: dict[str, str] = {}
@@ -56,7 +58,13 @@ def apply_profile_to_directory(
         cwd,
     )
     emit_event(progress, f"Skills destination: {skills_dir}")
-    return apply_profile(
+    if with_tools:
+        from hagency_cli.workspace.context import load_registry
+        from hagency_cli.workspace.operations.tools import manage_tool
+        from hagency_cli.workspace.tool_catalog import effective_tools
+
+        tools = effective_tools(load_registry(root), profile)
+    links = apply_profile(
         profile,
         sources,
         root,
@@ -68,6 +76,22 @@ def apply_profile_to_directory(
         conflict_ui=conflict_ui,
         progress=progress,
     )
+    if with_tools:
+        failures = []
+        for tool in tools.values():
+            try:
+                manage_tool(
+                    tool,
+                    "install",
+                    install_dir=install_dir,
+                    dry_run=dry_run,
+                    progress=progress,
+                )
+            except WorkspaceError as exc:
+                failures.append(f"{tool.name}: {exc}")
+        if failures:
+            fail("profile tool installation failed:\n" + "\n".join(failures))
+    return links
 
 
 def validate_profile_skill_args(

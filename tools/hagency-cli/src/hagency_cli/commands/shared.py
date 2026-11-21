@@ -78,7 +78,8 @@ class CommandGroup(TyperGroup):
         "a": "add",
         "i": "install",
         "rm": "remove",
-        "u": "update",
+        "update": "upgrade",
+        "u": "upgrade",
     }
     group_aliases = {
         "profile": {"u": "update", "install": "apply", "i": "apply"},

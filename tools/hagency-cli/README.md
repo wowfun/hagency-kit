@@ -33,14 +33,15 @@ hgc init
 hgc ln -s TARGET [DEST]
 hgc source  list|show|add|remove|sync
 hgc skill   list|add
+hgc tool    list|check|add|remove|install|upgrade|uninstall
 hgc profile list|show|add|update|remove|apply
 hgc file    init|push|pull|sync|pack|apply|purge|clean
 hgc service model-proxy start|stop|restart
 ```
 
-Use `ls` for `list`, `a` for `add`, and `rm` for `remove`. Profile edits use `profile update/u`. `profile a` creates a profile. To apply one, use `profile apply/install/i`. Skill installation also supports `skill add/a`. Help and completion include every alias.
+Use `ls` for `list`, `a` for `add`, `rm` for `remove`, and `i` for `install`. Tool upgrades also accept `update` and `u`. Profile edits use `profile update/u`. `profile a` creates a profile. To apply one, use `profile apply/install/i`. Skill installation also supports `skill add/a`. Help and completion include every alias.
 
-Option aliases likewise share a row, such as `-p, --path PATH`. `source sync` updates Git checkouts; `file sync` synchronizes project files over SFTP.
+Option aliases likewise share a row. Use `--install/-i` on `tool add`. `source sync` updates Git checkouts and `file sync` synchronizes project files over SFTP.
 
 Use `hgc ln -s TARGET [DEST]` to create a link from any directory. `DEST` defaults
 to the current directory. An existing destination directory receives a link
@@ -72,6 +73,7 @@ For a non-editable installation, use `uv tool install tools/hagency-cli`, or ins
 | [Directories and configuration](docs/configuration.md) | Workspace discovery, TOML configuration, and installation destinations. |
 | [Sources](docs/sources.md) | Register, inspect, sync, and remove local or Git sources. |
 | [Skills](docs/skills.md) | Discover, select, and install skills from workspace and external sources. |
+| [Tools](docs/tools.md) | Declare, check, install, upgrade, and uninstall workspace or profile tools. |
 | [Profiles](docs/profiles.md) | Create reusable skill selections and apply them to a project. |
 | [SFTP file sync](docs/file-sync.md) | Initialize SFTP configuration and push, pull, or synchronize project files. |
 | [Offline sync bundles](docs/sync-bundles.md) | Pack, verify, and apply portable ZIP snapshots or Git patches. |

@@ -112,4 +112,13 @@ def render_toml(data: dict) -> str:
         lines.append(toml_table(["skill", name]))
         append_scalar_lines(lines, raw_skill, ["include", "exclude"])
 
+    for name, tool in data.get("tool", {}).items():
+        if not isinstance(tool, dict):
+            fail(f"tool {name} must be a table")
+        if lines:
+            lines.append("")
+        lines.append(toml_table(["tool", name]))
+        for key, value in tool.items():
+            lines.append(f"{toml_key_part(key)} = {toml_value(value)}")
+
     return "\n".join(lines).rstrip() + "\n"

@@ -11,10 +11,11 @@ from hagency_cli.commands.service import service_app
 from hagency_cli.commands.shared import CommandGroup, make_app
 from hagency_cli.commands.skill import skill_app
 from hagency_cli.commands.source import source_app
+from hagency_cli.commands.tool import tool_app
 from hagency_cli.commands.workspace import init_cli
 
 app = make_app(
-    help_text="""Manage Hagency sources, skills, profiles, files, and services.
+    help_text="""Manage Hagency sources, skills, tools, profiles, files, and services.
 
     Sources are local skill directories or persistent Git checkouts. Discover
     skills, install them directly, or select them through reusable profiles.
@@ -56,6 +57,7 @@ app.command("ln", short_help="Create a link to a file or directory.")(ln_cli)
 app.add_typer(source_app, name="source")
 app.add_typer(source_app, name="s", short_help="Alias for source.")
 app.add_typer(skill_app, name="skill")
+app.add_typer(tool_app, name="tool")
 app.add_typer(profile_app, name="profile")
 app.add_typer(profile_app, name="p", short_help="Alias for profile.")
 app.add_typer(file_app, name="file")

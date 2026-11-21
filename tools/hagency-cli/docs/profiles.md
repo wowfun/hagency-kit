@@ -15,7 +15,7 @@ hgc profile apply review --dir ./project --dry-run
 hgc profile apply review --dir ./project
 ```
 
-`profile add` creates a new profile; without `--add-skill/-AS`, it is empty. `profile update` edits an existing one. `-AS` accepts a source, unique discovered skill name, or `SOURCE:selector`. It merges the selected entry by default; `--replace` rewrites that entry's selection. `--include/-i` and `--exclude/-e` are repeatable and require `-AS`; `--replace` also requires it. Exact references supply an include selector automatically. Ambiguous skill names require an explicit source reference. Missing source content must be obtained with `source sync` before selector validation.
+`profile add` creates a new profile; omitting `--add-skill/-AS` leaves its skill selection empty. Each profile inherits the workspace tool catalog. `profile update` edits an existing one. `-AS` accepts a source, unique discovered skill name, or `SOURCE:selector`. It merges the selected entry by default; `--replace` rewrites that entry's selection. `--include/-i` and `--exclude/-e` are repeatable and require `-AS`; `--replace` also requires it. Exact references supply an include selector automatically. Ambiguous skill names require an explicit source reference. Missing source content must be obtained with `source sync` before selector validation.
 
 `profile update -RS/--remove-skill` removes a source entry or exact included selector and cannot accompany `-AS`. A description-only update is allowed. `profile show` prints saved TOML; `profile list` prints names, descriptions, and selected source names. Both commands check saved references locally and report problems on stderr. A warning identifies the profile, source and selector. An exact archive path is usable with a warning. Unsynced remote selections are unverified. A saved source or exact include can be removed even after its checkout or directory disappears. To list individual skill candidates use `skill list --profile NAME`.
 
@@ -32,6 +32,8 @@ hgc profile apply review --dir ./project --link-mode junction
 ```
 
 The resolved destination is printed before the per-skill plan, including for empty profiles and dry runs. Omitting destination options from your home directory targets `~/.agents/skills`. Use an explicit `--path` or `--dir` in scripts that need a fixed installation location.
+
+Add `--with-tools/-T` to install the profile's effective tools after applying skills. Hagency attempts each selected tool and returns a failure summary if any installation fails. Use `--install-dir PATH` to select the tools' installation root and `--dry-run` to preview both operations. The `a` alias now creates a profile. See the [tool guide](tools.md).
 
 The default materialization mode is symlink, or junction on Windows. `-cp` and `--link-mode copy` create independent copies; `-cp` conflicts with explicit symlink or junction modes. Junction mode is for Windows; explicit Windows symlinks may require an elevated terminal. Applying a profile refuses to overwrite independent directories, can retarget existing links of the selected type, and leaves unselected installations in place. There is no tracking or pruning; installation is not transactional.
 

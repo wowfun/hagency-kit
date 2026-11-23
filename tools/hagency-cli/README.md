@@ -16,15 +16,7 @@ hgc skill add workspace:skills/analyze-diff --dry-run
 hgc skill add workspace:skills/analyze-diff
 ```
 
-The last command links the skill into the invocation directory's `.agents/skills`. Use `--dir /path/to/project` for another project's skills container, or `--global` for your user's `~/.agents/skills`. Inspect each command before running it:
-
-```sh
-hgc source --help
-hgc source sync --help
-hgc profile apply --help
-hgc file push --help
-hgc service model-proxy --help
-```
+`skill ls` prints one `SOURCE:selector` reference per line. Pass a reference to `skill add` to install it in `./.agents/skills`. Use `--dir /path/to/project` for another project or `--global` for `~/.agents/skills`.
 
 The command tree is:
 

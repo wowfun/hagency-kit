@@ -80,7 +80,7 @@ description = "Review changes"
 include = ["skills/analyze-diff"]
 ```
 
-Each `[skill.SOURCE]` selects a source. Optional `include` and `exclude` lists contain source-relative skill or subtree selectors. Without includes, all discovered skills in the source are selected before exclusions. Use `hgc skill list` to inspect selectors; selectors must remain inside the source. Edit profiles through [profile commands](profiles.md).
+Each `[skill.SOURCE]` selects a source. Optional `include` and `exclude` lists contain source-relative skill or subtree selectors, which must stay within the source. Without includes, all discovered skills in the source are selected before exclusions. In the `SOURCE:selector` lines printed by `hgc skill ls`, use the part after the colon for an include or exclude. Edit profiles through [profile commands](profiles.md).
 
 ## Installation destinations
 

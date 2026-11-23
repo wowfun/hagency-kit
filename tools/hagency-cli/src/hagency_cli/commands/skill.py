@@ -49,11 +49,8 @@ def skill_list_command(
         source_filters=source_filters,
         progress=render_event,
     )
-    print("source\tname\tselector\tpath")
     for entry in entries:
-        print(
-            "\t".join([entry.source_name, entry.name, entry.selector, str(entry.path)])
-        )
+        print(entry.reference)
 
 
 @aliased_command(
@@ -167,7 +164,7 @@ def skill_add_cli(
     )
 
 
-@aliased_command(skill_app, "skill", "list", short_help="List discovered skills.")
+@aliased_command(skill_app, "skill", "list", short_help="List local skill references.")
 @command_errors
 def skill_list_cli(
     sources: Annotated[
@@ -198,22 +195,9 @@ def skill_list_cli(
         ),
     ] = None,
 ) -> None:
-    """List discoverable SKILL.md directories from local source content.
-
-    Requires a Hagency workspace. With no filters, scans registered sources and
-    the workspace. Repeat --source to narrow sources; workspace selects repo-local
-    skills. --profile restricts discovery to that profile's selectors. Filters
-    can be combined. Output columns are source, name, selector, and path.
-
-    Discovery excludes archived, archive and deprecated directories. A profile
-    can explicitly select an exact archived skill path and receive a warning.
-    This is a discovery view, not an installed-skill inventory. It does not fetch
-    missing checkouts; run hgc source sync to obtain or refresh remote sources.
-
-    \b
-    Examples:
-      hgc skill list --source workspace
-      hgc skill list --profile dev --root ./kit
+    """List locally discoverable skills, one SOURCE:selector per line. Pass a
+    reference to hgc skill add. Source and profile filters can be combined.
+    Use hgc source sync to obtain a missing checkout.
     """
     skill_list_command(
         source_filters=list(sources or []),

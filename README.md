@@ -19,7 +19,7 @@ hgc skill add workspace:skills/analyze-diff
 
 Skill installation defaults to the invocation directory's `.agents/skills`; use `--dir /path/to/project` for another project or `--global` for `~/.agents/skills`. Workspace discovery checks `--root`, current-directory ancestors, then the editable-installed Hagency Kit checkout. Wheel installations require `--root` outside a workspace.
 
-Read `hgc COMMAND --help` and `hgc COMMAND SUBCOMMAND --help` for complete operation instructions. The [Hagency CLI documentation index](tools/hagency-cli/README.md#documentation) links to guides for configuration, sources and profiles, SFTP and offline transfers, cleanup, the model proxy, troubleshooting, and development. Install shell completion with `hgc --install-completion`.
+`hgc skill ls` prints one reference per line, ready to pass to `hgc skill add`. Use `--help` on any command for usage and options, or `hgc --install-completion` for shell completion. See the [CLI guides](tools/hagency-cli/README.md#documentation) for configuration and workflows.
 
 ## Skills
 

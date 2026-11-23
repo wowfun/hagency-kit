@@ -333,10 +333,10 @@ class SkillPreferenceTests(unittest.TestCase):
         for filters in (("--source", "design"), ("--profile", "content")):
             with self.subTest(filters=filters):
                 result = self.invoke("skill", "list", *filters)
-                for path in (ordinary, *plugins):
-                    self.assertIn(
-                        path.relative_to(self.source.path).as_posix(), result.stdout
-                    )
+                self.assertCountEqual(
+                    result.stdout.splitlines(),
+                    [f"design:{path.relative_to(self.source.path).as_posix()}" for path in (ordinary, *plugins)],
+                )
 
     def test_skill_list_profile_name_retains_all_candidates(self):
         ordinary, plugins = self.dataviz()
@@ -344,8 +344,10 @@ class SkillPreferenceTests(unittest.TestCase):
         (self.root / "profiles/content").mkdir(parents=True)
         write_toml(self.root / "profiles/content/config.toml", self.profile)
         result = self.invoke("skill", "list", "--profile", "content")
-        for path in (ordinary, *plugins):
-            self.assertIn(path.relative_to(self.source.path).as_posix(), result.stdout)
+        self.assertCountEqual(
+            result.stdout.splitlines(),
+            [f"design:{path.relative_to(self.source.path).as_posix()}" for path in (ordinary, *plugins)],
+        )
 
     def test_remaining_dry_run_conflicts_only_list_ordinary_candidates(self):
         first = self.skill("one/dataviz")

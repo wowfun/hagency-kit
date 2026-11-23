@@ -2,18 +2,23 @@
 
 [CLI guide](../README.md) | [Sources](sources.md) | [Profiles](profiles.md)
 
-`skill list` discovers `SKILL.md` directories in the workspace and registered source content. It does not track installed skills or fetch missing checkouts:
+`hgc skill ls` lists locally discoverable `SKILL.md` directories. Each output line is an exact `SOURCE:selector` reference that can be passed to `hgc skill add`. A dot selects a skill at the source root.
+
+```text
+$ hgc skill ls --source workspace
+workspace:skills/analyze-diff
+workspace:skills/diagnose-ai-workflow
+workspace:skills/log-analyzer
+```
 
 ```sh
-hgc skill list
-hgc skill list --source workspace
 hgc skill list --source repo --root ./kit
 hgc skill list --profile dev
 ```
 
 Discovery skips entire directory segments named `archive`, `archived` or `deprecated`, ignoring case. Names such as `archive-tools` remain discoverable. Bare names, subtrees, `--all`, interactive pickers and completion use the same rule. To install an archived skill, give its exact directory, for example `hgc skill add workspace:skills/deprecated/git-collab-flow`. This emits a warning. Shell completion omits archived paths, so type or paste the exact directory. Pointing at an archive parent does not select its descendants.
 
-Repeat `--source` to narrow discovery; it can be combined with `--profile`. Output columns are source, name, selector, and path. Run `source sync` before discovery when remote content is missing or needs updating. Installation uses the [destination rules](configuration.md#installation-destinations).
+Repeat `--source` to narrow discovery or combine it with `--profile` to list their intersection. An empty selection produces no output on stdout. Warnings about missing checkouts go to stderr. Use `source sync` to obtain or update remote content. Installation uses the [destination rules](configuration.md#installation-destinations).
 
 `skill add` also accepts the aliases `install`, `a`, and `i`, with the same options and behavior.
 

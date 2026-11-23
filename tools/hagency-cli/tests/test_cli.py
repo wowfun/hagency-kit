@@ -3709,32 +3709,47 @@ class CliTests(unittest.TestCase):
 
     def test_skill_list_default_scans_workspace_and_sources(self) -> None:
         stdout, stderr = self.run_cli("skill", "list")
-        lines = stdout.strip().splitlines()
-
-        self.assertEqual(lines[0], "source\tname\tselector\tpath")
-        self.assertIn(
-            f"workspace\tlocal-one\tskills/local-one\t{(self.root / 'skills' / 'local-one').resolve()}",
-            lines,
-        )
-        self.assertIn(
-            f"local-source\texternal-one\tnested/external-one\t{(self.root / 'local-source' / 'nested' / 'external-one').resolve()}",
-            lines,
+        self.assertEqual(
+            stdout.splitlines(),
+            ["workspace:skills/local-one", "local-source:nested/external-one"],
         )
         self.assertEqual(stderr, "")
+        self.assertEqual(self.run_cli("skill", "ls"), (stdout, stderr))
 
-        stdout, _stderr = self.run_cli("skill", "ls")
-        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
+    def test_skill_list_empty_selection_has_empty_stdout(self) -> None:
+        self.assertEqual(self.run_cli("skill", "ls", "--profile", "content"), ("", ""))
+
+    def test_listed_references_select_the_exact_directory_in_add(self) -> None:
+        source = self.root / "local-source"
+        self.write_skill(source)
+        self.write_skill(source / "plugins/external-one")
+        expected = {
+            "local-source:.": source,
+            "local-source:nested/external-one": source / "nested/external-one",
+            "local-source:plugins/external-one": source / "plugins/external-one",
+        }
+        listed, stderr = self.run_cli("skill", "ls", "--source", "local-source")
+        self.assertEqual(stderr, "")
+        self.assertCountEqual(listed.splitlines(), expected)
+        for reference in listed.splitlines():
+            with self.subTest(reference=reference):
+                preview, stderr = self.run_cli("skill", "add", reference, "--dry-run")
+                self.assertEqual(stderr, "")
+                self.assertEqual(
+                    [line.split(" -> ", 1)[1] for line in preview.splitlines() if " -> " in line],
+                    [str(expected[reference].resolve())],
+                )
 
     def test_skill_list_source_filters(self) -> None:
         stdout, _stderr = self.run_cli("skill", "list", "--source", "workspace")
 
-        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
-        self.assertNotIn("local-source\texternal-one", stdout)
+        self.assertIn("workspace:skills/local-one", stdout)
+        self.assertNotIn("local-source:nested/external-one", stdout)
 
         stdout, _stderr = self.run_cli("skill", "list", "-s", "local-source")
 
-        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
-        self.assertNotIn("workspace\tlocal-one", stdout)
+        self.assertIn("local-source:nested/external-one", stdout)
+        self.assertNotIn("workspace:skills/local-one", stdout)
 
     def test_skill_list_multiple_source_filters_preserve_order_and_dedupe(self) -> None:
         stdout, _stderr = self.run_cli(
@@ -3749,9 +3764,8 @@ class CliTests(unittest.TestCase):
         )
         lines = stdout.strip().splitlines()
 
-        self.assertEqual(lines[0], "source\tname\tselector\tpath")
         self.assertEqual(
-            [line.split("\t")[0] for line in lines[1:]], ["local-source", "workspace"]
+            lines, ["local-source:nested/external-one", "workspace:skills/local-one"]
         )
 
     def test_skill_list_profile_applies_include_and_exclude(self) -> None:
@@ -3775,8 +3789,8 @@ class CliTests(unittest.TestCase):
 
         stdout, _stderr = self.run_cli("skill", "list", "--profile", "content")
 
-        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
-        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertIn("workspace:skills/local-one", stdout)
+        self.assertIn("local-source:nested/external-one", stdout)
         self.assertNotIn("external-two", stdout)
 
     def test_skill_list_profile_and_source_filter_intersect(self) -> None:
@@ -3800,8 +3814,8 @@ class CliTests(unittest.TestCase):
             "skill", "list", "-p", "content", "-s", "local-source"
         )
 
-        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
-        self.assertNotIn("workspace\tlocal-one", stdout)
+        self.assertIn("local-source:nested/external-one", stdout)
+        self.assertNotIn("workspace:skills/local-one", stdout)
 
     def test_skill_list_profile_can_show_duplicate_star_matches(self) -> None:
         self.write_skill(self.root / "local-source" / "other" / "external-one")
@@ -3819,8 +3833,8 @@ class CliTests(unittest.TestCase):
 
         stdout, _stderr = self.run_cli("skill", "list", "-p", "content")
 
-        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
-        self.assertIn("local-source\texternal-one\tother/external-one", stdout)
+        self.assertIn("local-source:nested/external-one", stdout)
+        self.assertIn("local-source:other/external-one", stdout)
 
     def test_archive_discovery_exact_paths_and_completion(self):
         for folder in ("Archive", "ARCHIVED", "deprecated", "archive-tools"):
@@ -4069,8 +4083,8 @@ class CliTests(unittest.TestCase):
 
         stdout, stderr = self.run_cli("skill", "list")
 
-        self.assertIn("workspace\tlocal-one\tskills/local-one", stdout)
-        self.assertIn("local-source\texternal-one\tnested/external-one", stdout)
+        self.assertIn("workspace:skills/local-one", stdout)
+        self.assertIn("local-source:nested/external-one", stdout)
         self.assertIn("Warning: skipping missing source remote-source:", stderr)
 
     def test_skill_list_rejects_unknown_missing_source_and_unknown_profile(

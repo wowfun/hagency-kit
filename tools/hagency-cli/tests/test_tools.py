@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -15,7 +16,7 @@ from hagency_cli.workspace import tool_native, tool_packages
 from hagency_cli.workspace.config import read_toml, write_toml
 from hagency_cli.workspace.errors import WorkspaceError
 from hagency_cli.workspace.operations.tools import manage_tool
-from hagency_cli.workspace.tool_catalog import catalog, effective_tools, probe
+from hagency_cli.workspace.tool_catalog import Status, catalog, effective_tools, probe
 
 
 class ToolTests(unittest.TestCase):
@@ -189,31 +190,127 @@ class ToolTests(unittest.TestCase):
                     ("--index", "two words", "--foo=bar"),
                 )
 
-    def test_check_availability_and_versions(self):
+    def test_list_reports_configured_and_detected_versions_and_strict_exits(self):
+        command = Path(sys.executable).stem
         write_toml(
             self.registry,
             {
                 "tool": {
-                    "demo": {"command": Path(sys.executable).stem, "version": ">=3,<4"},
-                    "hgc-missing-tool-test": {},
+                    "hgc-missing-tool-test": {"install": "uv"},
+                    "demo": {
+                        "command": command,
+                        "version": ">=1,<2",
+                        "version_args": ["-c", "print('1.4.0')"],
+                        "install": ["pnpm", "npm"],
+                        "package": "demo-cli",
+                    },
                 }
             },
         )
-        self.assertIn("available", self.cli("tool", "check", "demo"))
-        self.assertIn("missing", self.cli("tool", "check", code=1))
-        tool = effective_tools({"tool": {"demo": {"version": ">=9"}}}, {})["demo"]
-        self.assertEqual(probe(tool, Path(sys.executable)).status, "version-mismatch")
-        entry = {"version_args": ["-c", "print('unversioned')"]}
-        tool = effective_tools({"tool": {"demo": entry}}, {})["demo"]
-        self.assertEqual(probe(tool, Path(sys.executable)).status, "available")
-        entry["version"] = "2.0"
-        self.assertEqual(
-            probe(
-                effective_tools({"tool": {"demo": entry}}, {})["demo"],
-                Path(sys.executable),
-            ).status,
-            "version-unknown",
+        missing = "Undetected: hgc-missing-tool-test\n    install: uv\n"
+        available = (
+            "Detected: demo v1.4.0\n"
+            f"    command: {command}\n"
+            f"    path: {Path(shutil.which(command)).absolute()}\n"
+            "    install: pnpm, npm\n"
+            "    package: demo-cli\n"
         )
+        expected = missing + "\n" + available
+        self.assertEqual(self.cli("tool", "ls"), expected)
+        self.assertEqual(self.cli("tool", "list"), expected)
+        self.assertEqual(self.cli("tool", "ls", "--strict", code=1), expected)
+        with patch("hagency_cli.commands.tool.probe", wraps=probe) as detect:
+            self.assertEqual(self.cli("tool", "ls", "demo", "--strict"), available)
+            detect.assert_called_once()
+
+    def test_list_profile_uses_effective_constraints_and_enabled_tools(self):
+        write_toml(
+            self.registry,
+            {
+                "tool": {
+                    "demo": {
+                        "command": Path(sys.executable).stem,
+                        "version_args": ["-c", "print('2.0')"],
+                    },
+                    "disabled": {},
+                }
+            },
+        )
+        for version_args, required, heading, code in (
+            (["-c", "print('2.0')"], "<2", "Detected: demo v2.0", 1),
+            (["-c", "print('unknown')"], "<2", "Detected: demo", 1),
+            (["-c", "print('unknown')"], "*", "Detected: demo", 0),
+            (["-c", "raise SystemExit(1)"], "<2", "Undetected: demo", 1),
+        ):
+            with self.subTest(args=version_args, required=required):
+                write_toml(
+                    self.profile,
+                    {
+                        "name": "dev",
+                        "tool": {
+                            "disabled": {"enabled": False},
+                            "demo": {"version": required, "version_args": version_args},
+                        },
+                    },
+                )
+                output = self.cli(
+                    "tool", "ls", "--profile", "dev", "--strict", code=code
+                )
+                self.assertNotIn("disabled", output)
+                self.assertEqual(output.splitlines()[0], heading)
+                if code:
+                    self.assertIn(f"    configured_version: {required}\n", output)
+                else:
+                    self.assertNotIn("configured_version:", output)
+
+    def test_list_omits_all_redundant_fields_even_installer(self):
+        write_toml(self.registry, {"tool": {"uv": {"install": "uv", "version": "*"}}})
+        with patch.dict(os.environ, {"PATH": str(self.root)}):
+            self.assertEqual(self.cli("tool", "ls", "uv"), "Undetected: uv\n")
+
+    def test_list_no_probe_shows_effective_configuration_without_running_tools(self):
+        write_toml(
+            self.profile,
+            {"tool": {"demo": {"version": "<2"}, "extra": {"install": "uv"}}},
+        )
+        with patch(
+            "hagency_cli.commands.tool.probe", side_effect=AssertionError("unexpected probe")
+        ):
+            self.assertEqual(
+                self.cli("tool", "list", "--no-probe"), "demo\n    install: npm\n"
+            )
+            self.assertEqual(
+                self.cli("tool", "ls", "--no-probe", "--profile", "dev"),
+                "demo\n    configured_version: <2\n    install: npm\n\nextra\n    install: uv\n",
+            )
+            self.assertEqual(
+                self.cli("tool", "ls", "extra", "--no-probe", "--profile", "dev"),
+                "extra\n    install: uv\n",
+            )
+            self.assertIn(
+                "not in the effective catalog", self.cli("tool", "ls", "extra", "--no-probe", code=1)
+            )
+            self.assertIn(
+                "mutually exclusive", self.cli("tool", "ls", "--no-probe", "--strict", code=2)
+            )
+
+    def test_list_unknown_probe_status_does_not_claim_detection(self):
+        with patch(
+            "hagency_cli.commands.tool.probe", return_value=Status(None, None, "new-failure")
+        ):
+            self.assertEqual(
+                self.cli("tool", "ls", "--strict", code=1), "Undetected: demo\n    install: npm\n"
+            )
+
+    def test_list_empty_catalog_errors_and_removed_check_command(self):
+        write_toml(self.registry, {})
+        self.assertEqual(self.cli("tool", "list", "--strict"), "")
+        self.assertIn(
+            "not in the effective catalog", self.cli("tool", "ls", "other", code=1)
+        )
+        write_toml(self.registry, {"tool": {"demo": {"version": "invalid"}}})
+        self.assertIn("invalid tool version range", self.cli("tool", "ls", code=1))
+        self.assertIn("No such command", self.cli("tool", "check", code=2))
 
     def test_unrecognized_external_executable_is_never_uninstalled(self):
         tool = effective_tools(

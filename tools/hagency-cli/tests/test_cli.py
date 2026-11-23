@@ -549,8 +549,10 @@ class CliTests(unittest.TestCase):
         values, _stderr = self.complete_bash("hgc source ", 2)
         self.assertEqual(values, ["list", "ls", "show", "add", "a", "remove", "rm", "sync"])
         values, _stderr = self.complete_bash("hgc tool ", 2)
-        self.assertEqual(set(values), {"list", "ls", "check", "add", "a", "remove", "rm",
+        self.assertEqual(set(values), {"list", "ls", "add", "a", "remove", "rm",
                                       "install", "i", "upgrade", "update", "u", "uninstall"})
+        values, _stderr = self.complete_bash("hgc tool ls --", 3)
+        self.assertIn("--strict", values)
 
         values, _stderr = self.complete_bash("hgc source sync --", 3)
         self.assertIn("--profile", values)
@@ -804,6 +806,11 @@ class CliTests(unittest.TestCase):
             self.run_cli("file", "purge", expected=130)
 
     def test_bash_completion_includes_workspace_catalog_values(self) -> None:
+        self.run_cli("tool", "add", "demo", "--profile", "content")
+        for verb in ("ls", "list"):
+            values, _stderr = self.complete_bash(f"hgc tool {verb} --profile content de", 5)
+            self.assertEqual(values, ["demo"])
+
         values, _stderr = self.complete_bash("hgc source show ", 3)
         self.assertEqual(values, ["local-source"])
 

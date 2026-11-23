@@ -15,6 +15,7 @@ from hagency_cli.commands.shared import (
     command_errors,
     make_app,
     render_event,
+    require_at_most_one,
 )
 from hagency_cli.workspace.context import workspace_root_arg
 from hagency_cli.workspace.operations.tools import forget_installation, manage_tool
@@ -48,43 +49,58 @@ DryRun = Annotated[bool, typer.Option("--dry-run", help="Preview without writing
 Extra = Annotated[list[str] | None, typer.Argument(help="Installer arguments after --")]
 
 
-@aliased_command(tool_app, "tool", "list", short_help="List configured tools.")
+@aliased_command(
+    tool_app, "tool", "list", short_help="List tools and their status on PATH."
+)
 @command_errors
-def tool_list(profile: Profile = None, root: WorkspaceRootOption = None) -> None:
-    """List effective tool declarations and installer preference.
-
-    \b
-    Examples:
-      hgc tool ls --profile dev
-    """
-    print("name\tcommand\tversion\tinstall\tpackage")
-    for tool in catalog(workspace_root_arg(root), profile).values():
-        print(
-            f"{tool.name}\t{tool.command}\t{tool.version or '*'}\t{','.join(tool.methods)}\t{tool.package}"
-        )
-
-
-@tool_app.command("check", short_help="Check commands and versions on PATH.")
-@command_errors
-def tool_check(
+def tool_list(
     name: Annotated[str | None, typer.Argument(autocompletion=complete_tool)] = None,
     profile: Profile = None,
     root: WorkspaceRootOption = None,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--strict", help="Exit 1 if any tool is unavailable or fails its version requirement"
+        ),
+    ] = False,
+    no_probe: Annotated[
+        bool,
+        typer.Option("--no-probe", help="Show configuration only (incompatible with --strict)"),
+    ] = False,
 ) -> None:
-    """Check one tool or every effective tool. Exit 1 if any are unavailable.
-
-    \b
-    Examples:
-      hgc tool check
-      hgc tool check ffmpeg --profile dev
-    """
+    """List tools and run each selected tool's version command on PATH (up to 60 seconds each)."""
+    require_at_most_one({"--strict": strict, "--no-probe": no_probe})
+    selected = select_tools(catalog(workspace_root_arg(root), profile), name)
     failed = False
-    print("name\tstatus\tversion\tpath")
-    for tool in select_tools(catalog(workspace_root_arg(root), profile), name):
-        status = probe(tool)
-        print(status.display(tool.name))
-        failed |= status.status != "available"
-    if failed:
+    for index, tool in enumerate(selected):
+        heading = tool.name
+        required = tool.version if tool.version != "*" else ""
+        path = ""
+        if not no_probe:
+            status = probe(tool)
+            detected = status.status in {"available", "version-mismatch", "version-unknown"}
+            label = "Detected" if detected else "Undetected"
+            version = f" v{status.version}" if status.version is not None else ""
+            heading = f"{label}: {tool.name}{version}"
+            if status.path is not None:
+                path = str(status.path)
+            if status.status == "available":
+                required = ""
+            else:
+                failed = True
+        if index:
+            print()
+        print(heading)
+        for key, value in (
+            ("command", tool.command),
+            ("configured_version", required),
+            ("path", path),
+            ("install", ", ".join(tool.methods)),
+            ("package", tool.package),
+        ):
+            if value and value != tool.name:
+                print(f"    {key}: {value}")
+    if strict and failed:
         raise typer.Exit(1)
 
 

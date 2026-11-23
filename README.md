@@ -12,7 +12,7 @@ Practical agent skills for reviewing, diagnosing, and operating AI-assisted engi
 uv tool install -e tools/hagency-cli
 hgc --help
 hgc skill list --source workspace
-hgc tool check
+hgc tool ls
 hgc skill add workspace:skills/analyze-diff --dry-run
 hgc skill add workspace:skills/analyze-diff
 ```
@@ -20,6 +20,8 @@ hgc skill add workspace:skills/analyze-diff
 Skill installation defaults to the invocation directory's `.agents/skills`; use `--dir /path/to/project` for another project or `--global` for `~/.agents/skills`. Workspace discovery checks `--root`, current-directory ancestors, then the editable-installed Hagency Kit checkout. Wheel installations require `--root` outside a workspace.
 
 `hgc skill ls` prints one reference per line, ready to pass to `hgc skill add`. Use `--help` on any command for usage and options, or `hgc --install-completion` for shell completion. See the [CLI guides](tools/hagency-cli/README.md#documentation) for configuration and workflows.
+
+`hgc tool ls --profile dev` runs each selected tool's version command. Use `--no-probe` to view the configuration alone, or `--strict` to exit with status 1 if a tool is unavailable or fails its version requirement. Use `hgc profile i dev -T` to install the profile's tools alongside its skills. [Tool guide](tools/hagency-cli/docs/tools.md)
 
 ## Skills
 

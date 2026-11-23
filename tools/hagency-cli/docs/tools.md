@@ -17,7 +17,8 @@ package = "markitdown[pdf,docx,pptx]"
 
 ```sh
 hgc tool ls
-hgc tool check --profile dev
+hgc tool ls --no-probe
+hgc tool ls --profile dev --strict
 hgc tool a ffmpeg --profile dev --version ">=7,<10"
 hgc tool rm ffmpeg --profile dev
 hgc tool i playwright --install-dir ./tools
@@ -26,7 +27,22 @@ hgc tool uninstall playwright --install-dir ./tools
 hgc profile i dev -T --dry-run
 ```
 
-`list` reads declarations. `check` reports the executable selected by the current PATH, its version and availability. It exits with status 1 if any requested command is missing, fails to launch, or cannot satisfy its version constraint. A working command whose version is unrecognized satisfies an unconstrained declaration.
+`hgc tool ls [NAME]` (also `list`) looks up each selected command on PATH and runs it with its configured `version_args`. It checks one tool at a time and allows up to 60 seconds per command.
+
+```text
+$ hgc tool ls playwright
+Detected: playwright v1.55.0
+    path: /usr/local/bin/playwright
+    install: pnpm, npm
+```
+
+The heading shows `Detected:` when the command runs on PATH and `Undetected:` when the command is missing or fails to run. A known version follows the name as `v1.55.0`. Empty fields and values identical to the tool name are omitted.
+
+`configured_version` appears when a version requirement is unmet or cannot be verified. For example, a detected Playwright v1.55.0 with a requirement of `>=2` shows `configured_version: >=2` and fails `--strict`. A working command with an unknown version satisfies an unconstrained declaration.
+
+Listing succeeds even when a selected tool is unavailable. For scripts that require every selected tool to be available, use `hgc tool ls --strict`. It prints all results and exits with status 1 if any tool is unavailable or fails its version requirement. Unknown names and invalid configurations are always errors.
+
+Use `--no-probe` to read the catalog without running tools. Each entry starts with its name and includes any configured version requirement. Both `NAME` and `--profile` filter this view. Combining `--strict` with `--no-probe` is a usage error because strict checks require probing.
 
 `add` updates the supplied fields. Use repeated `--install`, `--version-arg` and `--install-arg` options for arrays. `remove` edits the catalog. In a profile it disables an inherited tool or deletes a profile-only entry. `uninstall` removes the software and keeps its declaration. Use `--dry-run` to preview edits and lifecycle operations.
 
@@ -53,7 +69,7 @@ When the current shell resolves a different executable or has no matching comman
 
 ```bash
 export PATH="/d/hagency/$USERNAME/tools/bin:$PATH"
-hgc tool check markitdown
+hgc tool ls markitdown
 ```
 
 `upgrade` and `uninstall` can act on external installations when the manager identifies the package and its matching executable. Operations remember the installation root, manager and executable under the user's Hagency state directory. Use `--install-dir` to choose among multiple recorded copies. The final PATH check shows which copy the current shell resolves.

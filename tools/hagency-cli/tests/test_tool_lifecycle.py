@@ -111,7 +111,9 @@ class ToolLifecycleTests(unittest.TestCase):
         self.cli("tool", "i", name, "--install-dir", str(self.public))
         (record,) = self.records(name)
         self.assertTrue(Path(record.path).is_file())
-        self.assertIn("\tmissing\t", self.cli("tool", "check", name, code=1))
+        self.assertIn(
+            f"Undetected: {name}\n", self.cli("tool", "ls", name, "--strict", code=1)
+        )
         reused = self.cli("tool", "i", name, "--dry-run")
         self.assertIn(f"Installed: {name}\tavailable\t1.0\t{record.path}", reused)
         self.assertIn(f"PATH: {name}\tmissing\t-\t-", reused)
@@ -134,7 +136,9 @@ class ToolLifecycleTests(unittest.TestCase):
                 {"PATH": str(self.public / "bin") + os.pathsep + os.environ["PATH"]},
             )
         )
-        self.assertIn("\tavailable\t1.0\t", self.cli("tool", "check", name))
+        self.assertIn(
+            f"Detected: {name} v1.0\n", self.cli("tool", "ls", name, "--strict")
+        )
         if os.name == "nt":
             with tool_state.receipts(False) as db:
                 self.assertEqual(
@@ -143,11 +147,15 @@ class ToolLifecycleTests(unittest.TestCase):
                 )
         self.wheel("2.0")
         self.cli("tool", "u", name)
-        self.assertIn("\tavailable\t2.0\t", self.cli("tool", "check", name))
+        self.assertIn(
+            f"Detected: {name} v2.0\n", self.cli("tool", "ls", name, "--strict")
+        )
         self.cli("tool", "uninstall", name)
         self.assertFalse(Path(record.path).exists())
         self.assertEqual(self.records(name), [])
-        self.assertIn("\tmissing\t", self.cli("tool", "check", name, code=1))
+        self.assertIn(
+            f"Undetected: {name}\n", self.cli("tool", "ls", name, "--strict", code=1)
+        )
         if os.name == "nt":
             expose.assert_called_with(Path(record.path).parent, remove=True)
             with tool_state.receipts(False) as db:

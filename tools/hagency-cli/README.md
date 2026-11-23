@@ -25,7 +25,7 @@ hgc init
 hgc ln -s TARGET [DEST]
 hgc source  list|show|add|remove|sync
 hgc skill   list|add
-hgc tool    list|check|add|remove|install|upgrade|uninstall
+hgc tool    list|add|remove|install|upgrade|uninstall
 hgc profile list|show|add|update|remove|apply
 hgc file    init|push|pull|sync|pack|apply|rule|purge|clean
 hgc service model-proxy start|stop|restart
@@ -65,7 +65,7 @@ For a non-editable installation, use `uv tool install tools/hagency-cli`, or ins
 | [Directories and configuration](docs/configuration.md) | Workspace discovery, TOML configuration, and installation destinations. |
 | [Sources](docs/sources.md) | Register, inspect, sync, and remove local or Git sources. |
 | [Skills](docs/skills.md) | Discover, select, and install skills from workspace and external sources. |
-| [Tools](docs/tools.md) | Declare, check, install, upgrade, and uninstall workspace or profile tools. |
+| [Tools](docs/tools.md) | Check PATH status with `ls`, read declarations with `--no-probe`, require availability with `--strict`, and manage installations. |
 | [Profiles](docs/profiles.md) | Create reusable skill selections and apply them to a project. |
 | [SFTP file sync](docs/file-sync.md) | Initialize SFTP configuration and push, pull, or synchronize project files. |
 | [Offline sync bundles](docs/sync-bundles.md) | Pack, verify, and apply portable ZIP snapshots or Git patches. |

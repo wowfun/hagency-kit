@@ -371,7 +371,7 @@ class CommandTreeTests(unittest.TestCase):
         )
         expected = {
             "source": {"list", "ls", "show", "add", "a", "remove", "rm", "sync"},
-            "tool": {"list", "ls", "check", "add", "a", "remove", "rm", "install", "i",
+            "tool": {"list", "ls", "add", "a", "remove", "rm", "install", "i",
                      "upgrade", "update", "u", "uninstall"},
             "skill": {"list", "ls", "add", "install", "a", "i"},
             "profile": {
@@ -500,6 +500,7 @@ class CommandTreeTests(unittest.TestCase):
             ("source", "remove"): ("keep its checkout", "retain their references"),
             ("skill", "add"): ("./.agents/skills", "without network access or writes"),
             ("profile", "apply"): ("./.agents/skills", "--with-tools", "links may be retargeted"),
+            ("tool", "list"): ("--strict", "Exit 1", "version command", "--no-probe"),
             ("file", "push"): ("Destination-only", "--delete", "Connect and compare"),
             ("file", "pull"): ("Local-only", "--delete", "Connect and compare"),
             ("file", "sync"): ("without deleting", "exact timestamp tie", "Connect and compare"),
@@ -515,7 +516,7 @@ class CommandTreeTests(unittest.TestCase):
         }
         for path in (
             ("skill", "list"), ("source", "list"), ("profile", "list"),
-            ("service", "model-proxy", "stop"),
+            ("service", "model-proxy", "stop"), ("tool", "list"),
         ):
             cases[path] = (*cases.get(path, ()), "current directory", "editable checkout")
         for path, phrases in cases.items():

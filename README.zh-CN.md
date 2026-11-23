@@ -12,7 +12,7 @@
 uv tool install -e tools/hagency-cli
 hgc --help
 hgc skill list --source workspace
-hgc tool check
+hgc tool ls
 hgc skill add workspace:skills/analyze-diff --dry-run
 hgc skill add workspace:skills/analyze-diff
 ```
@@ -21,7 +21,7 @@ Skill 默认安装到调用目录的 `.agents/skills`；使用 `--dir /path/to/p
 
 `hgc skill ls` 每行输出一个技能引用，可直接传给 `hgc skill add`。在任意命令后加 `--help` 可查看用法和选项，用 `hgc --install-completion` 安装 shell 补全。配置和操作流程见 [CLI 指南（英文）](tools/hagency-cli/README.md#documentation)。
 
-`hgc tool` 管理工作区和 profile 声明的工具。可用 `hgc tool check --profile dev` 检测当前环境，用 `hgc profile i dev -T` 在应用技能时一并安装工具。[工具命令与配置](tools/hagency-cli/docs/tools.md)
+`hgc tool ls --profile dev` 运行该 profile 中各工具的版本命令，版本要求未满足时显示配置的范围。只查看配置时加 `--no-probe`。脚本可用 `--strict` 检查可用性，任一工具不可用或版本要求未满足时退出码为 1。用 `hgc profile i dev -T` 可在应用技能时一并安装工具。[工具命令与配置](tools/hagency-cli/docs/tools.md)
 
 ## Skills
 

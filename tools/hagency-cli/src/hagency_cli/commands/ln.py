@@ -23,22 +23,12 @@ def ln_cli(
         typer.Option("--symbolic", "-s", help="Create a symbolic link"),
     ] = False,
 ) -> None:
-    """Create a link to a file or directory.
-
-    DEST defaults to the current directory. An existing destination directory
-    receives a link named after the target.
-    Relative targets are interpreted from the final link's parent directory.
-    The parent must exist and the final link path must be free.
-
-    On native Windows, including Git Bash, directory links are PowerShell
-    junctions and the target must exist. File symlinks may require Windows
-    Developer Mode or an elevated shell. Linux, macOS, and WSL allow dangling
-    symlinks. No Hagency workspace is needed.
+    """Create a link with -s. DEST defaults to the current directory. A directory
+    destination receives a link named after TARGET. Relative targets resolve
+    from the link's parent directory. Windows uses junctions for directories
+    and requires the target to exist.
 
     \b
-    Examples:
-      hgc ln -s ./shared/assets
-      hgc ln -s ./assets ./assets-link
       hgc ln -s ../assets ./public
     """
     if not symbolic:

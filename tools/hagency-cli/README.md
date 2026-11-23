@@ -1,6 +1,6 @@
 # Hagency CLI
 
-`hgc` manages Hagency workspaces, skill sources, skill installation, reusable profiles, project file transfers, artifact cleanup, and a local model proxy. Each command's `--help` includes its prerequisites, defaults, effects, and examples, including when no workspace is available.
+`hgc` manages Hagency workspaces, tools, skills, profiles, file transfers, cleanup, and the local model proxy. Use `--help` at any level for offline usage and options.
 
 Warnings and errors go to stderr. On a terminal, warnings appear in yellow and errors in red. Redirect stderr or set `NO_COLOR` for plain text.
 
@@ -35,7 +35,7 @@ hgc source  list|show|add|remove|sync
 hgc skill   list|add
 hgc tool    list|check|add|remove|install|upgrade|uninstall
 hgc profile list|show|add|update|remove|apply
-hgc file    init|push|pull|sync|pack|apply|purge|clean
+hgc file    init|push|pull|sync|pack|apply|rule|purge|clean
 hgc service model-proxy start|stop|restart
 ```
 
@@ -64,7 +64,7 @@ hgc --show-completion bash
 
 Completion covers commands, aliases, options, directories, and locally available source, profile, skill, and selector values. It respects workspace discovery and `--checkout-dir`; missing, invalid, unreadable, or unsynced workspace data is silently omitted. Completion performs no network access or writes.
 
-For a non-editable installation, use `uv tool install tools/hagency-cli`, or install a built wheel. Such installations require an explicit `--root` when run outside a Hagency workspace. The packaged help works without access to this repository or README.
+For a non-editable installation, use `uv tool install tools/hagency-cli`, or install a built wheel. Such installations require an explicit `--root` when run outside a Hagency workspace. The packaged help works offline, and `hgc --help` links to the online guides.
 
 ## Documentation
 

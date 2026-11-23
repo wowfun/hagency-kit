@@ -12,6 +12,7 @@ from hagency_cli.commands.completion import (
     complete_skill_add,
     complete_source_or_workspace,
 )
+from hagency_cli.commands.options import WorkspaceRootOption
 from hagency_cli.commands.shared import (
     aliased_command,
     command_errors,
@@ -25,26 +26,7 @@ from hagency_cli.workspace.operations.skills import add_skills
 from hagency_cli.workspace.profiles import read_profile_config
 
 skill_app = make_app(
-    help_text="""Discover and install skills from SKILL.md directories.
-
-    list scans available source content; add installs selected skills. A Hagency
-    workspace must exist even when installing from a URL or local directory.
-    Commands resolve --root, then current-directory ancestors, then the
-    editable-installed Hagency Kit checkout. --checkout-dir affects source
-    discovery; installation destinations resolve from the invocation directory.
-
-    Discovery skips archive, archived and deprecated directory segments.
-    Sync sources first when you need updated content. Installation obtains only
-    missing checkouts. Discovery is not an installed-skill inventory, and there
-    is no uninstall or installation tracking.
-
-    \b
-    Examples:
-      hgc skill list --source workspace
-      hgc skill add workspace:skills/analyze-diff --dry-run
-      hgc skill add owner/repo --all -d ./project
-      hgc skill add --help
-    """,
+    help_text="Discover and install skills from local and Git sources.",
     add_completion=False,
 )
 
@@ -78,7 +60,7 @@ def skill_list_command(
     skill_app,
     "skill",
     "add",
-    short_help="Install skills from a reference, source, Git URL, or local directory.",
+    short_help="Install skills from a source or reference.",
 )
 @command_errors
 def skill_add_cli(
@@ -94,7 +76,7 @@ def skill_add_cli(
         typer.Option(
             "--skill",
             "-s",
-            help="Source-relative skill selector; repeatable",
+            help="Source-relative selector (repeatable, mutually exclusive with --all)",
             autocompletion=complete_install_selector,
         ),
     ] = None,
@@ -117,7 +99,7 @@ def skill_add_cli(
             "--path",
             "-p",
             metavar="PATH",
-            help="Exact skills directory; no .agents/skills suffix is added",
+            help="Exact skills directory",
             autocompletion=complete_directory,
         ),
     ] = None,
@@ -127,7 +109,7 @@ def skill_add_cli(
             "--dir",
             "-d",
             metavar="DIR",
-            help="Target project directory; install under DIR/.agents/skills",
+            help="Install under DIR/.agents/skills",
             autocompletion=complete_directory,
         ),
     ] = None,
@@ -135,75 +117,31 @@ def skill_add_cli(
         bool,
         typer.Option("--global", help="Install under ~/.agents/skills"),
     ] = False,
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     checkout_dir: Annotated[
         str | None,
         typer.Option(
             "--checkout-dir",
-            help="Override the platform checkout base; explicit source paths still win",
+            help="Checkout base for sources without an explicit path",
             autocompletion=complete_directory,
         ),
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print planned actions without changing files"),
+        typer.Option("--dry-run", help="Preview without writing"),
     ] = False,
 ) -> None:
-    """Install skills from a reference, source, Git URL, or local directory.
+    """Install selected skills into ./.agents/skills by default. Choose at most
+    one of --path, --dir and --global. Existing links may be
+    retargeted. Independent directories are preserved.
 
-    Aliases: install, a, i.
-
-    Requires an existing Hagency workspace; use hgc init first if needed. Inputs
-    accept a unique discovered skill name, SOURCE:selector, registered source,
-    Git URL, GitHub owner/repo, or explicit local path such as ./skills. Registered
-    references take precedence over GitHub shorthand. Local inputs and destination
-    paths resolve against the invocation directory; ~ expands to your home.
-
-    The default destination is ./.agents/skills. Choose at most one of --path
-    (exact container), --dir (DIR/.agents/skills), or --global (~/.agents/skills).
-    --root and --checkout-dir locate sources, not the installation destination.
-    Installation uses symlinks, or junctions on Windows, and refuses to overwrite
-    independent directories. Existing links of the selected type may be retargeted.
-
-    Discovery skips archived, archive and deprecated directories (case-insensitive).
-    An exact path to an archived SKILL.md directory can be installed with a warning.
-
-    Repeat --skill for source-relative selectors or use --all; they are mutually
-    exclusive and cannot accompany an exact skill input. Selectors must stay inside
-    the source. One discovered skill installs directly; multiple skills need TTY
-    multiselect or explicit selectors/--all in non-TTY use. Nothing is preselected.
-    Duplicate names within one source prefer paths without 'plugin' (ignoring
-    case) relative to that source. Remaining conflicts require a choice or
-    narrower selectors, including with --all. Exact paths and multiselect choices
-    are preserved, so explicitly selected plugin copies remain conflict candidates.
-    All selections and conflicts resolve before target writes.
-
-    URLs and local paths reuse matching sources or register new ones. Use
-    --source-name to resolve ambiguous matches or choose a new registration name.
-    Only missing checkouts are obtained; existing checkouts are not updated or
-    switched. An explicit --ref mismatch requires source sync first. A new remote
-    source persists its resolved --checkout-dir override; existing sources use it
-    only for this invocation. Cancellation or fetch failure retains registration
-    and any checkout. Installation is not transactional and has no tracking/pruning.
-
-    --dry-run does not access the network or write configuration/targets. It may
-    run read-only Git checks for an explicit ref. Missing checkouts yield a
-    provisional report with unverified candidates. Conflict previews never prompt.
+    For a source with multiple skills, select interactively or pass --skill
+    or --all. URL inputs can register sources and fetch missing checkouts.
+    A dry run previews without network access or writes.
 
     \b
-    Examples:
-      hgc skill add workspace:skills/analyze-diff --dry-run
-      hgc skill add owner/repo --skill one --skill nested/two -d ./project
-      hgc skill add ./local-skills --all --global
-      hgc skill add my-skills --all -p ./custom/skills -r ./kit
+      hgc skill add workspace:skills/analyze-diff
+      hgc skill add owner/repo --skill nested/one -d ./project
     """
     require_at_most_one({"--skill": selectors, "--all": all_skills})
     require_at_most_one(
@@ -237,7 +175,7 @@ def skill_list_cli(
         typer.Option(
             "--source",
             "-s",
-            help="Limit to a source name or workspace",
+            help="Source name or workspace (repeatable)",
             autocompletion=complete_source_or_workspace,
         ),
     ] = None,
@@ -250,20 +188,12 @@ def skill_list_cli(
             autocompletion=complete_profile,
         ),
     ] = None,
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     checkout_dir: Annotated[
         str | None,
         typer.Option(
             "--checkout-dir",
-            help="Override the platform checkout base; explicit source paths still win",
+            help="Checkout base for sources without an explicit path",
             autocompletion=complete_directory,
         ),
     ] = None,

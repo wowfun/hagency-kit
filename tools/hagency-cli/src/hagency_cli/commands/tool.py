@@ -9,6 +9,7 @@ from hagency_cli.commands.completion import (
     complete_profile,
     complete_tool,
 )
+from hagency_cli.commands.options import WorkspaceRootOption
 from hagency_cli.commands.shared import (
     aliased_command,
     command_errors,
@@ -20,25 +21,10 @@ from hagency_cli.workspace.operations.tools import forget_installation, manage_t
 from hagency_cli.workspace.tool_catalog import catalog, edit_tool, probe, select_tools
 
 tool_app = make_app(
-    help_text="""Manage workspace and profile tools.
-
-    Register commands in TOML, check their availability, and manage global installations.
-
-    \b
-    Examples:
-      hgc tool check --profile dev
-      hgc tool install playwright
-      hgc tool upgrade markitdown -- --offline
-    """,
+    help_text="Manage workspace and profile tools.",
     add_completion=False,
 )
 
-Root = Annotated[
-    str | None,
-    typer.Option(
-        "--root", "-r", autocompletion=complete_directory, help="Hagency workspace"
-    ),
-]
 Profile = Annotated[
     str | None,
     typer.Option(
@@ -64,7 +50,7 @@ Extra = Annotated[list[str] | None, typer.Argument(help="Installer arguments aft
 
 @aliased_command(tool_app, "tool", "list", short_help="List configured tools.")
 @command_errors
-def tool_list(profile: Profile = None, root: Root = None) -> None:
+def tool_list(profile: Profile = None, root: WorkspaceRootOption = None) -> None:
     """List effective tool declarations and installer preference.
 
     \b
@@ -83,7 +69,7 @@ def tool_list(profile: Profile = None, root: Root = None) -> None:
 def tool_check(
     name: Annotated[str | None, typer.Argument(autocompletion=complete_tool)] = None,
     profile: Profile = None,
-    root: Root = None,
+    root: WorkspaceRootOption = None,
 ) -> None:
     """Check one tool or every effective tool. Exit 1 if any are unavailable.
 
@@ -107,7 +93,7 @@ def tool_check(
 def tool_add(
     name: str,
     profile: Profile = None,
-    root: Root = None,
+    root: WorkspaceRootOption = None,
     dry_run: DryRun = False,
     version: Annotated[
         str | None, typer.Option(help="Exact version, comparison range or *")
@@ -132,12 +118,11 @@ def tool_add(
         list[str] | None, typer.Option(help="Saved installer argument (repeatable)")
     ] = None,
 ) -> None:
-    """Register or update fields in the workspace or selected profile.
+    """Register a tool or edit its supplied fields. Profiles inherit other fields
+    from the workspace declaration.
 
     \b
-    Examples:
-      hgc tool add playwright --install pnpm --install npm
-      hgc tool a ffmpeg --profile dev --version ">=7,<10"
+      hgc tool add playwright -i pnpm -i npm
     """
     print(
         edit_tool(
@@ -160,14 +145,9 @@ def tool_add(
 @aliased_command(tool_app, "tool", "remove", short_help="Remove a tool declaration.")
 @command_errors
 def tool_remove(
-    name: Name, profile: Profile = None, root: Root = None, dry_run: DryRun = False
+    name: Name, profile: Profile = None, root: WorkspaceRootOption = None, dry_run: DryRun = False
 ) -> None:
-    """Delete the declaration or disable an inherited entry in a profile.
-
-    \b
-    Examples:
-      hgc tool rm ffmpeg --profile dev
-    """
+    """Remove a tool declaration. Removing an inherited tool from a profile disables it there."""
     print(edit_tool(workspace_root_arg(root), profile, name, None, dry_run))
 
 
@@ -190,19 +170,15 @@ def _change(action, name, profile, root, install_dir, dry_run, extra=()):
 def tool_install(
     name: Name,
     profile: Profile = None,
-    root: Root = None,
+    root: WorkspaceRootOption = None,
     install_dir: Directory = None,
     dry_run: DryRun = False,
     extra: Extra = None,
 ) -> None:
-    """Install the newest compatible release, or reuse a suitable existing tool.
-
-    If the shell resolves a different copy or cannot find the command, show
-    the installed path and the current PATH result.
+    """Reuse a compatible installation or install the newest compatible release.
+    Pass extra installer arguments after --.
 
     \b
-    Examples:
-      hgc tool i playwright
       hgc tool install markitdown --install-dir ./tools -- --offline
     """
     _change("install", name, profile, root, install_dir, dry_run, extra)
@@ -213,18 +189,12 @@ def tool_install(
 def tool_upgrade(
     name: Name,
     profile: Profile = None,
-    root: Root = None,
+    root: WorkspaceRootOption = None,
     install_dir: Directory = None,
     dry_run: DryRun = False,
     extra: Extra = None,
 ) -> None:
-    """Upgrade a recorded or package-manager-owned installation within its version range.
-
-    \b
-    Examples:
-      hgc tool update markitdown
-      hgc tool u playwright --dry-run
-    """
+    """Upgrade a recorded or package-manager-owned tool within its configured range."""
     _change("upgrade", name, profile, root, install_dir, dry_run, extra)
 
 
@@ -235,7 +205,7 @@ def tool_upgrade(
 def tool_uninstall(
     name: Name,
     profile: Profile = None,
-    root: Root = None,
+    root: WorkspaceRootOption = None,
     install_dir: Directory = None,
     dry_run: DryRun = False,
     forget: Annotated[
@@ -246,14 +216,9 @@ def tool_uninstall(
         ),
     ] = False,
 ) -> None:
-    """Uninstall a tool after verifying the installation's package ownership.
+    """Uninstall a verified package and keep its declaration.
 
-    Use --forget to discard a receipt after a manual replacement or catalog removal.
-    When several copies are recorded, select the receipt with --install-dir.
-
-    \b
-    Examples:
-      hgc tool uninstall playwright --install-dir ./tools
+    Use --install-dir to select among recorded copies.
     """
     if forget:
         if profile is not None:

@@ -35,18 +35,8 @@ def init_cli(
         typer.Option("--dry-run", help="Print planned actions without changing files"),
     ] = False,
 ) -> None:
-    """Initialize a Hagency workspace with hagency-config.toml.
+    """Create hagency-config.toml in the specified directory or the current directory.
 
-    Creates the invocation directory or --root if needed. This command does not
-    search parent directories or fall back to the editable-installed checkout.
-    The generated defaults use ~/Projects/references and shallow Git depth 1.
-
-    An existing config requires --force, which replaces it rather than merging.
-    --dry-run prints the path and configuration without writing or connecting.
-
-    \b
-    Examples:
-      hgc init --root ./kit --dry-run
-      hgc init --root ./kit
+    Overwriting with --force replaces the entire config.
     """
     init_workspace_command(root=root, force=force, dry_run=dry_run)

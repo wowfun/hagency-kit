@@ -163,6 +163,7 @@ sys.meta_path.insert(0, RejectRuntimeImports())
 from hagency_cli.cli import app, main
 from typer.main import get_command
 def paths(command, prefix=()):
+    assert (command.help or '').strip(), ('missing command description', prefix)
     yield prefix
     for name, child in getattr(command, 'commands', {}).items():
         yield from paths(child, (*prefix, name))
@@ -199,7 +200,8 @@ for invalid_config in (False, True):
                     else:
                         raise AssertionError(('help did not exit', path))
                 assert stderr.getvalue() == '', (path, stderr.getvalue())
-                assert 'Examples:' in stdout.getvalue(), path
+                assert stdout.getvalue().startswith('Usage: hgc'), path
+                assert '-h, --help' in stdout.getvalue(), path
     after = {str(p): p.read_bytes() if p.is_file() else None
              for p in Path('.').rglob('*')}
     assert before == after, 'help changed files'
@@ -466,7 +468,6 @@ class CommandTreeTests(unittest.TestCase):
                 self.assertEqual((stderr, full_stderr), ("", ""))
                 # The invoked spelling appears in Usage; all operational help is shared.
                 self.assertEqual(stdout.split("\n\n", 1)[1], full.split("\n\n", 1)[1])
-                self.assertIn("Examples:", stdout)
 
         for path in ((), ("source",), ("skill",), ("profile",), ("tool",)):
             with self.subTest(group=path):
@@ -493,61 +494,30 @@ class CommandTreeTests(unittest.TestCase):
 
     def test_help_explains_operation_boundaries(self):
         cases = {
-            ("init",): ("does not search parent", "--force", "--dry-run"),
+            (): ("https://github.com/wowfun/hagency-kit/tree/main/tools/hagency-cli/docs",),
+            ("init",): ("replaces the entire config", "--force", "--dry-run"),
             ("source", "sync"): ("1-based", "local-only commits", "without fetching"),
-            ("source", "remove"): ("only the registry entry", "profile references"),
-            ("skill", "add"): (
-                "./.agents/skills",
-                "mutually exclusive",
-                "non-TTY",
-                "provisional report",
-                "Cancellation or fetch failure",
-            ),
-            ("profile", "apply"): (
-                "./.agents/skills",
-                "at most one",
-                "DIR/.agents/skills",
-                "Non-TTY",
-                "no tracking or pruning",
-            ),
-            ("file", "push"): ("still connects", "--git-changed", "no deletion"),
-            ("file", "pull"): ("still connects", "Local-only paths", "--delete"),
-            ("file", "sync"): (
-                "exact timestamp tie",
-                "not supported",
-                "still connects",
-            ),
-            ("file", "pack"): (
-                "No network connection",
-                "creates no ZIP",
-                "--no-config",
-            ),
-            ("file", "apply"): (
-                "before any destination write",
-                "manifest deletion markers",
-            ),
-            ("file", "purge"): (
-                "Non-TTY",
-                "preview unless",
-                "--yes",
-                "skips both prompts",
-                "Permanent deletion",
-            ),
-            ("file", "clean"): (
-                "--yes",
-                "skips both prompts",
-                "never deletes",
-            ),
-            ("service", "model-proxy", "start"): (
-                "mutually exclusive",
-                "127.0.0.1:8765",
-                "same resolved config path",
-            ),
+            ("source", "remove"): ("keep its checkout", "retain their references"),
+            ("skill", "add"): ("./.agents/skills", "without network access or writes"),
+            ("profile", "apply"): ("./.agents/skills", "--with-tools", "links may be retargeted"),
+            ("file", "push"): ("Destination-only", "--delete", "Connect and compare"),
+            ("file", "pull"): ("Local-only", "--delete", "Connect and compare"),
+            ("file", "sync"): ("without deleting", "exact timestamp tie", "Connect and compare"),
+            ("file", "pack"): ("offline ZIP", "deletion markers", "creates no ZIP"),
+            ("file", "apply"): ("before writing", "removes extra paths", "marked for deletion"),
+            ("file", "purge"): ("Permanently delete", "previews unless --yes", "skip both deletion prompts"),
+            ("file", "clean"): ("Permanently remove", "previews unless --yes", "skip both deletion prompts"),
+            ("service", "model-proxy", "start"): ("Loopback IP", "same config path", "full request and response bodies"),
             ("service", "model-proxy", "restart"): (
-                "repeat custom",
+                "Repeat custom",
                 "old worker remains stopped",
             ),
         }
+        for path in (
+            ("skill", "list"), ("source", "list"), ("profile", "list"),
+            ("service", "model-proxy", "stop"),
+        ):
+            cases[path] = (*cases.get(path, ()), "current directory", "editable checkout")
         for path, phrases in cases.items():
             with self.subTest(path=path):
                 stdout, stderr = self.run_main(*path, "--help")

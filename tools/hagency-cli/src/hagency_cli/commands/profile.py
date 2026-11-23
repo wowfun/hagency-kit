@@ -12,6 +12,7 @@ from hagency_cli.commands.completion import (
     complete_selector,
     complete_skill_reference,
 )
+from hagency_cli.commands.options import WorkspaceRootOption
 from hagency_cli.commands.shared import (
     aliased_command,
     command_errors,
@@ -38,25 +39,7 @@ from hagency_cli.workspace.profiles import (
 from hagency_cli.workspace.skills import LinkMode, SkillScan, workspace_skill_scans
 
 profile_app = make_app(
-    help_text="""Manage reusable skill selections and tool overrides in profiles/NAME/config.toml.
-
-    Add or update a profile, sync its sources, then apply it to a skills container.
-    Apply materializes its skills. Add --with-tools/-T to install its effective tools.
-    Commands resolve --root, then current-directory ancestors, then the
-    editable-installed Hagency Kit checkout.
-
-    Source names select their discovered skills. SOURCE:selector identifies a
-    source-relative skill or subtree; a unique discovered skill name is also
-    accepted. Use hgc skill list to inspect names and selectors.
-
-    \b
-    Examples:
-      hgc profile add dev -AS workspace:skills/analyze-diff
-      hgc source sync --profile dev
-      hgc profile apply dev --dry-run
-      hgc profile apply dev --dir ./project --dry-run
-      hgc profile update --help
-    """,
+    help_text="Manage and apply workspace profiles.",
     add_completion=False,
 )
 
@@ -93,31 +76,12 @@ def profile_show_command(*, name: str, root_value: str | None) -> None:
     print(text.rstrip())
 
 
-@aliased_command(profile_app, "profile", "list", short_help="List profiles.")
+@aliased_command(profile_app, "profile", "list", short_help="List profiles and their sources.")
 @command_errors
 def profile_list_cli(
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
 ) -> None:
-    """List workspace profiles with descriptions and source selections.
-
-    Requires a Hagency workspace. Reads profiles/NAME/config.toml and prints name,
-    description, and skills columns. The skills column lists selected source names,
-    not individual installed skills. Use hgc skill list --profile NAME to discover
-    that profile's skills. Local checks warn on stderr about stale and deprecated
-    references. This command does not sync or apply profiles.
-
-    \b
-    Examples:
-      hgc profile list --root ./kit
-    """
+    """List profiles, their descriptions and selected sources."""
     profile_list_command(root_value=root)
 
 
@@ -155,38 +119,17 @@ def profile_add_cli(
             autocompletion=complete_selector,
         ),
     ] = None,
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print planned actions without changing files"),
+        typer.Option("--dry-run", help="Preview without writing"),
     ] = False,
 ) -> None:
-    """Create profiles/NAME/config.toml in a Hagency workspace.
-
-    The profile name must be new. Omitting --add-skill leaves the skill selection empty.
-    -AS/--add-skill accepts a source name, unique discovered skill name, or
-    SOURCE:selector. Selectors are source-relative skills or subtrees; inspect
-    them with hgc skill list. Obtain missing checkouts with hgc source sync first.
-
-    Repeat --include/-i and --exclude/-e to select or exclude source-relative
-    skills/subtrees; both require --add-skill. A source without includes selects
-    all its discovered skills. An exact skill reference supplies an include
-    selector automatically. --dry-run prints the proposed TOML without writes.
-    Exact archived skill paths warn when selected. Unsynced remote skills are
-    marked unverified. Creating a profile does not install skills; use hgc profile apply afterward.
+    """Create a profile with an optional skill selection. An exact skill reference
+    selects that skill. A source selects all its skills unless filtered.
+    --include and --exclude require --add-skill.
 
     \b
-    Examples:
-      hgc profile add dev --description 'Development skills'
-      hgc profile add review -AS workspace -i skills/analyze-diff --dry-run
       hgc profile add review -AS workspace:skills/analyze-diff
     """
     add_profile(
@@ -202,7 +145,7 @@ def profile_add_cli(
     )
 
 
-@aliased_command(profile_app, "profile", "update", short_help="Update a profile.")
+@aliased_command(profile_app, "profile", "update", short_help="Edit a description or skill selection.")
 @command_errors
 def profile_update_cli(
     name: Annotated[
@@ -253,42 +196,18 @@ def profile_update_cli(
     replace: Annotated[
         bool, typer.Option("--replace", help="Replace one profile skill entry")
     ] = False,
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print planned actions without changing files"),
+        typer.Option("--dry-run", help="Preview without writing"),
     ] = False,
 ) -> None:
-    """Update a saved profile's description or skill selections.
-
-    Requires an existing profile in a Hagency workspace. -AS/--add-skill accepts
-    a source, unique skill name, or SOURCE:selector and merges that entry by
-    default. --replace rewrites that entry's selection instead. -RS/--remove-skill
-    removes a source entry or an exact included selector. Add and remove are
-    mutually exclusive. Inspect candidates with hgc skill list first.
-
-    Repeat --include/-i and --exclude/-e for source-relative skills/subtrees.
-    These options and --replace require --add-skill. Missing source content must
-    be obtained with hgc source sync before selector validation.
-    A saved source or exact include can be removed even if its skill has moved
-    or the source no longer exists. Exact archived paths warn when selected.
-    --dry-run prints updated TOML without writes. Existing installations are
-    unchanged; apply the profile separately to materialize its current selection.
+    """Edit a saved profile. Add and remove are mutually exclusive. Includes,
+    excludes and --replace require --add-skill. Apply the profile separately
+    to install its selection.
 
     \b
-    Examples:
-      hgc profile update dev -AS workspace -i skills/analyze-diff --dry-run
-      hgc profile update dev -AS workspace:skills/analyze-diff --replace
-      hgc profile update dev -RS workspace
-      hgc profile update dev --description 'Development and review skills'
+      hgc profile update review -AS workspace -i skills/log-analyzer --replace
     """
     require_at_most_one({"--add-skill": add_skill, "--remove-skill": remove_skill})
     update_profile(
@@ -315,34 +234,17 @@ def profile_remove_cli(
             help="Profile name under profiles/", autocompletion=complete_profile
         ),
     ],
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print planned actions without changing files"),
+        typer.Option("--dry-run", help="Preview without writing"),
     ] = False,
 ) -> None:
-    """Remove a profile directory from the Hagency workspace.
-
-    Requires an existing profiles/NAME directory. Removes that directory and its
-    contents, including its config; installed skills and source checkouts remain
-    in place. --dry-run prints the planned removal without changing files.
-
-    \b
-    Examples:
-      hgc profile remove dev --dry-run
-    """
+    """Delete the entire profile directory. Installed skills and source checkouts are retained."""
     remove_profile(name=name, root_value=root, dry_run=dry_run, progress=render_event)
 
 
-@profile_app.command("show", short_help="Show one profile config.")
+@profile_app.command("show", short_help="Print the saved profile TOML.")
 @command_errors
 def profile_show_cli(
     name: Annotated[
@@ -351,26 +253,9 @@ def profile_show_cli(
             help="Profile name under profiles/", autocompletion=complete_profile
         ),
     ],
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
 ) -> None:
-    """Print one workspace profile configuration as TOML.
-
-    Requires profiles/NAME/config.toml in the resolved Hagency workspace. Shows
-    saved TOML on stdout. Local source/include/exclude checks report invalid or
-    deprecated references on stderr. Use hgc skill list --profile NAME to inspect discovered candidates.
-
-    \b
-    Examples:
-      hgc profile show dev --root ./kit
-    """
+    """Print a profile's saved TOML. Local reference warnings go to stderr."""
     profile_show_command(name=name, root_value=root)
 
 
@@ -378,7 +263,7 @@ def profile_show_cli(
     profile_app,
     "profile",
     "apply",
-    short_help="Apply profile skills into a target directory.",
+    short_help="Install profile skills and optional tools.",
 )
 @command_errors
 def profile_apply_cli(
@@ -394,7 +279,7 @@ def profile_apply_cli(
             "--path",
             "-p",
             metavar="PATH",
-            help="Exact skills directory; no .agents/skills suffix is added",
+            help="Exact skills directory",
             autocompletion=complete_directory,
         ),
     ] = None,
@@ -411,7 +296,7 @@ def profile_apply_cli(
             "--dir",
             "-d",
             metavar="DIR",
-            help="Target project directory; install under DIR/.agents/skills (default: ./ when --path and --dir are omitted)",
+            help="Install under DIR/.agents/skills",
             autocompletion=complete_directory,
         ),
     ] = None,
@@ -422,69 +307,30 @@ def profile_apply_cli(
         LinkMode | None,
         typer.Option(
             "--link-mode",
-            help="How to materialize profile skills; defaults to junction on Windows and symlink elsewhere",
+            help="Install method (default: junction on Windows, symlink elsewhere)",
         ),
     ] = None,
-    root: Annotated[
-        str | None,
-        typer.Option(
-            "--root",
-            "-r",
-            help="Workspace with hagency-config.toml; defaults to current-directory ancestors, then editable-installed checkout",
-            autocompletion=complete_directory,
-        ),
-    ] = None,
+    root: WorkspaceRootOption = None,
     checkout_dir: Annotated[
         str | None,
         typer.Option(
             "--checkout-dir",
-            help="Override the platform checkout base; explicit source paths still win",
+            help="Checkout base for sources without an explicit path",
             autocompletion=complete_directory,
         ),
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Print planned actions without changing files"),
+        typer.Option("--dry-run", help="Preview without writing"),
     ] = False,
 ) -> None:
-    """Materialize a profile's selected skills in a target directory.
+    """Install the profile's skills into ./.agents/skills by default. Choose
+    either --path or --dir. Existing links may be retargeted. Independent
+    directories and previously installed, unselected skills are kept.
 
-    Requires an existing profile and locally available source checkouts; obtain
-    missing sources with hgc source sync --profile NAME. The default destination
-    is ./.agents/skills. Choose at most one of --path (the final skills container)
-    or --dir (a project whose destination is DIR/.agents/skills).
-    Relative destinations use the invocation directory and
-    ~ expands to your home. --root and --checkout-dir only locate profile/sources.
-    Prints the resolved destination, including for empty profiles and dry runs.
-    Aliases: install, i. Pass --with-tools/-T to install the effective tool catalog.
-    Use --install-dir for tool files independently of the skills destination.
-    Each selected tool is attempted. Failures are reported together.
-
-    The default is symlink, or junction on Windows. -cp or --link-mode copy creates
-    independent copies; -cp cannot be combined with symlink or junction modes.
-    Explicit Windows symlinks may require an elevated terminal. Existing links of
-    the selected type can be retargeted; independent directories are not overwritten.
-    Unselected installations remain in place; there is no tracking or pruning.
-
-    Invalid references are reported together before any installation, including
-    during --dry-run. Exact archived skills remain selectable with a warning.
-
-    After include/exclude filtering, duplicate names within one source prefer
-    source-relative paths without 'plugin', ignoring case. A unique ordinary
-    candidate is selected automatically. Exact paths are preserved, so explicitly
-    included plugin copies remain conflict candidates when a twin is also selected.
-    Remaining conflicts prompt for a source path in a TTY without changing the
-    profile. Non-TTY conflicts fail with guidance to narrow its include selectors.
-    --dry-run previews materialization without writes and lists conflicts without
-    prompting, even in a TTY. Installation is not transactional.
-
-    \b
-    Examples:
-      hgc profile apply dev
-      hgc profile apply dev --dry-run
-      hgc profile apply dev --dir ./project --dry-run
-      hgc profile apply dev --path ./custom/skills --root ./kit
-      hgc profile apply dev --dir ./project -cp
+    Source checkouts must already exist. Resolve duplicate-name conflicts
+    interactively or narrow the profile selection. With --with-tools, tool
+    installation follows skill installation and reports failures together.
     """
     require_at_most_one({"--path": skills_path, "--dir": skills_root})
     if install_dir and not with_tools:

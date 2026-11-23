@@ -36,32 +36,7 @@ from hagency_cli.files.sync.operations import sync_workspace_files
 from hagency_cli.paths import expand_path
 
 file_app = make_app(
-    help_text="""Manage project files and rebuildable artifacts.
-
-    init creates a placeholder .vscode/sftp.json; edit it before syncing.
-    push uploads, pull downloads, and sync transfers in both directions over
-    SFTP. A temporary [user@]host:path endpoint bypasses that configuration.
-    pack and apply transfer offline ZIP bundles without a network connection.
-    purge finds project artifacts; clean finds obsolete Agent installations and caches.
-    By default, both confirm deletion in a TTY and preview without a TTY.
-    --yes/-y deletes all eligible candidates after scanning without prompts.
-    rule lists the available cleanup rules and their automatic application status.
-
-    Sync and bundle commands use the invocation directory or their --root.
-    They do not discover a Hagency workspace. Purge uses explicit paths, a saved
-    path list, or automatic project roots. Cleanup rules come from the selected
-    Hagency repository or --config. Online --dry-run still connects and
-    reads both sides; offline dry runs read local data only.
-
-    \b
-    Examples:
-      hgc file init --root ./project --dry-run
-      hgc file push dev@server:/srv/project -r ./project --dry-run
-      hgc file pack -r ./project -o transfer.zip
-      hgc file apply transfer.zip -r ./restore --dry-run
-      hgc file purge ./project --dry-run
-      hgc file sync --help
-    """,
+    help_text="Transfer project files and clean up local artifacts.",
     add_completion=False,
 )
 
@@ -79,7 +54,7 @@ SFTPProjectRootOption = Annotated[
 SFTPRemoteArgument = Annotated[
     str | None,
     typer.Argument(
-        help="Optional temporary [user@]host:path SFTP endpoint",
+        help="Use [user@]host:path in place of .vscode/sftp.json and --profile",
         metavar="REMOTE",
     ),
 ]
@@ -91,8 +66,7 @@ SFTPProfileOption = Annotated[
         "--profile",
         "-p",
         help=(
-            "Named config or SFTP profile; use CONFIG: for the base config "
-            "or CONFIG:PROFILE for a nested profile"
+            "Select NAME, CONFIG: (base config), or CONFIG:PROFILE"
         ),
     ),
 ]
@@ -100,7 +74,9 @@ SFTPProfileOption = Annotated[
 
 SFTPSyncDryRunOption = Annotated[
     bool,
-    typer.Option("--dry-run", help="Compare both sides without changing any files"),
+    typer.Option(
+        "--dry-run", help="Connect and compare both sides without writing or deleting files"
+    ),
 ]
 
 
@@ -371,7 +347,7 @@ def apply_sync_bundle_command(
         die(str(exc))
 
 
-@file_app.command("push", short_help="Sync local project files to the remote.")
+@file_app.command("push", short_help="Upload project files over SFTP.")
 @command_errors
 def local_to_remote_sync_cli(
     remote_endpoint: SFTPRemoteArgument = None,
@@ -387,46 +363,11 @@ def local_to_remote_sync_cli(
     git_changed: SFTPGitChangedOption = False,
     dry_run: SFTPSyncDryRunOption = False,
 ) -> None:
-    """Upload local project files to an SFTP destination.
-
-    Uses .vscode/sftp.json under the invocation directory or --root, including its
-    context, remotePath, ignore rules, and syncOption settings. For multiple configs
-    or profiles use --profile NAME, CONFIG:PROFILE, or CONFIG: for the base config.
-    No Hagency workspace is required.
-
-    Passing REMOTE bypasses all SFTP config, including malformed files, and uses
-    --root or the invocation directory as the local tree. REMOTE must include a
-    path: [user@]host:/path, host:~/path, host:., host:C:/path, or [IPv6]:/path.
-    SSH aliases are supported. --profile cannot accompany REMOTE. --port,
-    --identity, --exclude, --delete, --skip-create, --ignore-existing, and --update
-    require REMOTE; in config mode set their equivalents in .vscode/sftp.json.
-
-    The local side wins shared-path conflicts. Destination-only paths remain
-    unless syncOption.delete or temporary --delete is enabled. --update preserves
-    newer destinations. Temporary mode defaults to no deletion. All modes protect
-    .git metadata and every .vscode/sftp.json, even against negated ignore rules.
-
-    SSH host keys must already be trusted. Temporary mode uses SSH config, agents,
-    or keys; load encrypted keys into your agent. Endpoint user, --port, and
-    --identity override SSH config. A Windows SSH alias running RemoteCommand wsl
-    still uses Windows SFTP; a WSL filesystem needs its own reachable SFTP server.
-
-    --git-changed narrows the plan to staged, unstaged, untracked, deleted, and
-    renamed Git paths. Git errors fail before connecting; a clean worktree returns
-    without a connection. Deleting old rename paths still requires deletion enabled.
-    Ordinary uploads need no Git. Same-size edits within one mtime second can be
-    missed; --git-changed does not force comparison. CRLF/LF-equivalent text is left
-    untouched, and transferred bytes are never rewritten. Counts are planned actions.
-
-    --dry-run still connects and reads both sides, but writes or deletes nothing.
-    Preview before enabling deletion.
+    """Upload project files over SFTP. Local files win conflicts. Destination-only
+    files are kept unless deletion is enabled in the config or with --delete.
 
     \b
-    Examples:
-      hgc file push --root ./project --dry-run
       hgc file push dev@server:/srv/project -r ./project --dry-run
-      hgc file push server:/srv/project --git-changed --delete --dry-run
-      hgc file push --profile staging
     """
     sync_files_command(
         direction=SyncDirection.LOCAL_TO_REMOTE,
@@ -445,7 +386,7 @@ def local_to_remote_sync_cli(
     )
 
 
-@file_app.command("pull", short_help="Sync remote project files to local.")
+@file_app.command("pull", short_help="Download project files over SFTP.")
 @command_errors
 def remote_to_local_sync_cli(
     remote_endpoint: SFTPRemoteArgument = None,
@@ -460,38 +401,8 @@ def remote_to_local_sync_cli(
     update: SFTPUpdateOption = False,
     dry_run: SFTPSyncDryRunOption = False,
 ) -> None:
-    """Download SFTP files into the local project tree.
-
-    Uses .vscode/sftp.json under the invocation directory or --root, mapping
-    remotePath to local context. --profile selects NAME, CONFIG:PROFILE, or CONFIG:
-    for the base config. No Hagency workspace is required.
-
-    REMOTE bypasses all config and downloads into --root or the invocation directory.
-    Use [user@]host:/path, host:~/path, host:., host:C:/path, or [IPv6]:/path;
-    SSH aliases work and the remote path must be nonempty. REMOTE and --profile
-    are mutually exclusive. --port, --identity, --exclude, --delete, --skip-create,
-    --ignore-existing, and --update require REMOTE. Config mode reads the
-    corresponding SSH, ignore, and syncOption settings from .vscode/sftp.json.
-
-    The remote side wins shared-path conflicts. Local-only paths remain unless
-    syncOption.delete or temporary --delete is enabled; --update preserves newer
-    local files. Temporary mode defaults to no deletion. .git metadata and every
-    .vscode/sftp.json are protected at all depths, including against negation rules.
-    SSH host keys must already be trusted; temporary mode uses SSH config, agents,
-    or keys. Endpoint user, --port, and --identity override SSH config; preload
-    encrypted keys in your agent. A remote WSL tree needs an SFTP server inside WSL,
-    not a Windows alias with RemoteCommand wsl.
-
-    --dry-run still connects and reads both sides without writes/deletes. Shared
-    CRLF/LF-equivalent text is left untouched and transferred bytes are preserved.
-    Same-size edits within one mtime second can be missed; there is no force/checksum
-    option. Counts report planned actions. Preview before enabling deletion.
-
-    \b
-    Examples:
-      hgc file pull --root ./project --dry-run
-      hgc file pull server:~/project --root ./restore --dry-run
-      hgc file pull server:/srv/project --delete --dry-run
+    """Download project files over SFTP. Remote files win conflicts. Local-only
+    paths are kept unless deletion is enabled in the config or with --delete.
     """
     sync_files_command(
         direction=SyncDirection.REMOTE_TO_LOCAL,
@@ -525,38 +436,9 @@ def bidirectional_sync_cli(
     ignore_existing: SFTPIgnoreExistingOption = False,
     dry_run: SFTPSyncDryRunOption = False,
 ) -> None:
-    """Synchronize local and remote files in both directions over SFTP.
-
-    Uses .vscode/sftp.json under the invocation directory or --root, mapping local
-    context to remotePath. --profile selects NAME, CONFIG:PROFILE, or CONFIG: for
-    the base config. No Hagency workspace is required.
-
-    REMOTE bypasses all config and uses --root or the invocation directory as the
-    local tree. It requires a nonempty remote path: [user@]host:/path, host:~/path,
-    host:., host:C:/path, or [IPv6]:/path. SSH aliases work. REMOTE and --profile
-    are mutually exclusive. --port, --identity, --exclude, --skip-create, and
-    --ignore-existing require REMOTE; config mode reads their equivalents from
-    .vscode/sftp.json. SSH host keys must already be trusted. SSH config, agents,
-    and keys supply authentication; endpoint user, --port, and --identity override
-    SSH config. Preload encrypted keys in your agent. Remote WSL trees need an SFTP
-    server inside WSL; RemoteCommand wsl on a Windows alias does not provide one.
-
-    Unique files are copied to the other side. The precisely newer shared file
-    wins, with local winning an exact timestamp tie. Only skipCreate and
-    ignoreExisting affect bidirectional sync; --delete, --update, and --git-changed
-    are not supported. .git metadata and every .vscode/sftp.json are protected,
-    including from negated ignore rules.
-
-    --dry-run still connects and reads both trees, without writes or deletes.
-    CRLF/LF-equivalent text is left untouched; transfers preserve original bytes.
-    Same-size edits within one mtime second can be missed. There is no force/checksum
-    option, and summaries count planned actions.
-
-    \b
-    Examples:
-      hgc file sync --root ./project --dry-run
-      hgc file sync dev@server:/srv/project --exclude '*.tmp' --dry-run
-      hgc file sync --profile staging
+    """Copy files both ways over SFTP without deleting them. A file present on
+    one side is copied to the other. For shared files, the newer version wins
+    and an exact timestamp tie favors the local file.
     """
     sync_files_command(
         direction=SyncDirection.BOTH,
@@ -589,18 +471,9 @@ def init_sftp_config_cli(
         typer.Option("--dry-run", help="Print the config without changing files"),
     ] = False,
 ) -> None:
-    """Create a placeholder .vscode/sftp.json in an existing project.
+    """Create .vscode/sftp.json in an existing project.
 
-    Uses the invocation directory or --root directly, without Hagency workspace
-    lookup. The project directory must already exist. Edit placeholder connection
-    settings before using push, pull, or sync; initialization never connects.
-    An existing config requires --force to overwrite it. --dry-run prints the
-    config and planned path without creating files.
-
-    \b
-    Examples:
-      hgc file init --root ./project --dry-run
-      hgc file init --root ./project
+    Edit the connection settings before syncing.
     """
     init_sftp_config_command(root_value=root, force=force, dry_run=dry_run)
 
@@ -616,7 +489,7 @@ def pack_sync_bundle_cli(
         bool,
         typer.Option(
             "--no-config",
-            help="Do not discover or read .vscode/sftp.json",
+            help="Ignore .vscode/sftp.json (mutually exclusive with --profile)",
         ),
     ] = False,
     output: Annotated[
@@ -635,35 +508,8 @@ def pack_sync_bundle_cli(
     exclude: SyncBundleExcludeOption = None,
     dry_run: SyncBundleDryRunOption = False,
 ) -> None:
-    """Create a portable offline sync ZIP from local files.
-
-    Reads the invocation directory or --root without Hagency workspace lookup.
-    When .vscode/sftp.json exists, reuses only profile selection, context, ignore,
-    and ignoreFile; connection/authentication settings are neither used nor stored.
-    Missing config means ordinary-directory mode. --no-config bypasses even an
-    invalid config and cannot accompany --profile. No network connection is made.
-
-    By default packs a full snapshot to ./hgc-sync.zip in the invocation directory.
-    Relative --output paths also use that directory; --force permits replacement.
-    --git-changed packs a Git patch of staged, unstaged, untracked, deleted, and
-    renamed paths, with deletion markers for removed/old rename paths. A clean or
-    fully filtered Git selection creates no ZIP. Full snapshots need no Git.
-
-    Always excludes .git metadata, every .vscode/sftp.json, and the output ZIP,
-    even against negated ignore rules. Repeat --exclude for Gitignore patterns.
-    Symlinks are skipped with warnings and recorded in the manifest. The manifest
-    is capped at 16 MiB; total payload size is not capped. SHA-256 detects corruption
-    but the ZIP is not authenticated or encrypted.
-
-    --dry-run reads and hashes selected files without writing a ZIP. Transfer a
-    real ZIP through your chosen channel, then run hgc file apply at the destination.
-    Reverse transfer requires packing from the other side.
-
-    \b
-    Examples:
-      hgc file pack --root ./project --dry-run
-      hgc file pack -r ./project -o transfer.zip --no-config
-      hgc file pack --git-changed --exclude '*.tmp' --force
+    """Pack a project snapshot into an offline ZIP. With --git-changed, the ZIP
+    includes deletion markers for removed paths. An empty patch creates no ZIP.
     """
     pack_sync_bundle_command(
         root_value=root,
@@ -691,32 +537,9 @@ def apply_sync_bundle_cli(
     update: SyncBundleUpdateOption = False,
     dry_run: SyncBundleDryRunOption = False,
 ) -> None:
-    """Verify and apply an offline ZIP created by hgc file pack.
-
-    BUNDLE and --root resolve from the invocation directory; the destination
-    defaults to that directory. Requires no Hagency workspace, SFTP config, Git,
-    or network. A missing destination is created only during a real apply.
-
-    Validates the whole archive, paths, entries, sizes, and SHA-256 hashes before
-    any destination write. Rejects protected .git metadata, SFTP config paths,
-    and excluded paths. Checksums detect corruption, not authenticity.
-
-    The bundle wins shared-path conflicts. --skip-create preserves absent paths,
-    --ignore-existing preserves existing ones, and --update preserves newer files.
-    Without --delete, destination-only paths stay. For full snapshots, --delete
-    mirrors non-ignored paths; for Git patches it applies only manifest deletion
-    markers. Writes use atomic file replacement and deletions happen last; the
-    whole apply is not transactional. CRLF/LF-equivalent text is left untouched,
-    and transferred bytes are preserved.
-
-    --dry-run verifies and previews without creating the destination or changing
-    files. Preview before enabling deletion.
-
-    \b
-    Examples:
-      hgc file apply transfer.zip --root ./restore --dry-run
-      hgc file apply transfer.zip --root ./restore
-      hgc file apply transfer.zip --root ./restore --delete --dry-run
+    """Verify the entire offline bundle before writing to the destination.
+    Bundle files win conflicts by default. With --delete, a full snapshot
+    removes extra paths and a patch removes only paths marked for deletion.
     """
     apply_sync_bundle_command(
         bundle_value=bundle,
@@ -744,7 +567,7 @@ CleanupYesOption = Annotated[
     typer.Option(
         "--yes",
         "-y",
-        help="After scanning, delete all eligible candidates without selection or confirmation, including without a TTY",
+        help="Select every eligible candidate and skip both deletion prompts",
     ),
 ]
 
@@ -762,19 +585,9 @@ def cleanup_rules_cli(
         Path | None, typer.Option("--config", help="Explicit cleanup TOML")
     ] = None,
 ) -> None:
-    """Show merged rules, including disabled rules, without scanning targets.
+    """List effective cleanup rules, including disabled rules.
 
-    Uses the same repository discovery and --config behavior as clean and purge.
-    A full rule ID shows all effective configuration fields; its prefix identifies
-    the command. The match field is a copyable expression with canonical byte
-    sizes and full reference IDs. --command filters the list.
-    States are auto, explicit-only and disabled.
-
-    \b
-    Examples:
-      hgc file rule
-      hgc file rule --command clean
-      hgc file rule clean.codex.versions
+    Supply a full rule ID to inspect its settings.
     """
     if command is not None and command not in CLEANUP_COMMANDS:
         raise typer.BadParameter("choose clean or purge", param_hint="--command")
@@ -852,70 +665,12 @@ def space_purge_cli(
         typer.Option("--paths", help="Edit the configured purge scan directories"),
     ] = False,
 ) -> None:
-    """Find and permanently remove rebuildable project artifacts.
+    """Permanently delete rebuildable artifacts. Scan explicit paths, saved paths,
+    or automatic project roots, in that order. Git-tracked data is protected.
 
-    Windows supports previews and permanent deletion with the same Git, link,
-    junction, mount and stable filesystem identity checks.
-
-    Scans dependency directories, build output, caches, and valid CACHEDIR.TAG
-    directories. Explicit PATH values replace saved and automatic roots for this
-    invocation. Otherwise a nonempty per-user space-purge-paths file wins; missing
-    or empty files restore automatic home project roots and agent worktrees.
-    Scan depth defaults to 6 (root is depth 0); -R/--recursive removes that limit.
-    Generic scanning has no time limit by default. --scan-timeout SECONDS sets a
-    shared budget across paths and candidate processing; 0 means unlimited.
-    A timeout reports incomplete scanning and permits confirmation of only fully
-    checked candidates, returning status 1 even if their deletion succeeds.
-    Without --rule, applies enabled auto_apply rules. Repeat --rule/-r to select
-    only named rules; omit the purge. prefix or use full IDs. Add -r auto to
-    include automatic rules. Use hgc file rule to inspect available rules.
-    Rules combine builtins with hagency-cleanup.toml from the nearest ancestor
-    Hagency workspace or editable source repository. --config overrides this
-    discovery; scan paths never choose the rules file. A missing automatic file
-    uses builtins; invalid or missing explicit configs stop the operation.
-    Configured project rules can match files and directories. Git-tracked data,
-    linked candidates and child mount points remain protected. Excluded descendants
-    protect whole directory candidates across rules. Foreign-owned entries on
-    systems with effective user IDs protect their entire candidate directory.
-    Scan roots containing the home directory disable all default selections.
-
-    Match expressions combine conditions with |, &, ! and parentheses.
-    Use ref="purge.artifacts", within="cache", glob="*.tmp" and source="project".
-    File sizes support <, <=, =, !=, >= and >, for example file_size <= 1MB.
-    Size and is_text/is_image/is_video leaves select ordinary files and traverse
-    directories. CLI PATH intersects within entries without changing glob bases.
-
-    --include-unverified also lists rule-matched artifacts without enclosing
-    project markers, non-Composer vendor directories and bins without confirmed
-    .NET output. Each unverified reason is shown; these candidates are never
-    preselected. Patterns use the project root when known, otherwise the scan root.
-    Global Xcode DerivedData, Git, filesystem, Agent and retention protections
-    still apply. Changed project or artifact verification requires a new preview.
-
-    --paths is an exclusive mode: create/edit the saved roots with VISUAL, EDITOR,
-    or the platform editor, then reload. It cannot accompany PATH, --dry-run,
-    --recursive, --include-unverified, --config, --rule, --scan-timeout or --yes.
-    Entries are absolute or ~ paths, one per line; blanks and # comments are ignored.
-    On every platform the file lives under XDG_CONFIG_HOME/hagency, defaulting
-    to ~/.config/hagency when XDG_CONFIG_HOME is unset, empty, or relative.
-
-    In a TTY, select candidates; only artifacts inactive for strictly more than
-    seven days are preselected by default; recent candidates may be selected.
-    Permanent deletion then requires confirmation,
-    which defaults to No. --dry-run still opens the selection UI but only previews.
-    Non-TTY invocations preview unless --yes/-y is supplied. --yes selects every
-    eligible candidate after scanning and skips both prompts, including recent
-    candidates; deletion still revalidates all protection checks. With --yes and
-    --dry-run, all candidates are previewed without prompts or deletion. Partial deletion
-    may leave some contents removed; other selections continue and exit status 1
-    indicates incomplete cleanup. Nothing is moved to Trash or the Recycle Bin.
-
-    \b
-    Examples:
-      hgc file purge ./project --dry-run
-      hgc file purge ./project
-      hgc file purge ./cache --include-unverified --dry-run
-      hgc file purge --paths
+    An interactive run asks for selection and confirmation. A non-interactive
+    run previews unless --yes is supplied. --dry-run always previews.
+    Use --paths on its own to edit saved scan roots.
     """
     selected_paths = list(paths or [])
     if any(not value.strip() for value in selected_paths):
@@ -1028,71 +783,15 @@ def clean_files_cli(
         ),
     ] = False,
 ) -> None:
-    """Inspect project artifacts, configured paths and obsolete Agent versions.
+    """Permanently remove files selected by cleanup rules. An interactive run
+    asks for selection and confirmation. A non-interactive run previews unless
+    --yes is supplied. --dry-run always previews.
 
-    Project, cachedir-tag and paths rules support Linux/WSL and Windows.
-    Agent sources require Linux/WSL. On Windows, selecting any Agent source,
-    including through automatic rules, stops the entire operation before scanning.
-    Windows requires explicit --rule selection of project/path rules. Use purge
-    for project artifacts or clean -r empty_directories ./ with packaged defaults.
-    The project_default rule requires this repository's hagency-cleanup.toml;
-    wheel installations outside a Hagency workspace use only packaged defaults.
-
-    Defaults to enabled auto_apply rules. Repeat --rule/-r to select only named
-    rules; the clean. prefix is optional. Add -r auto to include automatic rules.
-    New rules default to explicit-only. Use hgc file rule to inspect rules.
-    Repeated --agent filters automatic Agent sources; automatic paths rules still
-    apply. --agent and --rule are mutually exclusive.
-    PATH intersects rule entries; rootless generic rules require PATH. Relative
-    PATH uses the invocation directory; within paths use the declaring TOML directory.
-    Match expressions combine conditions with |, &, ! and parentheses (! > & > |).
-    Use ref="clean.media", within="cache", glob="*.log" and is_text.
-    File sizes support <, <=, =, !=, >= and >, for example file_size <= 1MB.
-    Clean rules may reference purge rules, preserving project checks and depth 6.
-    -R/--recursive removes that depth limit; --include-unverified admits artifacts
-    with unverified project context or purpose. These options affect project sources;
-    generic paths remain recursive. Project sources require PATH or a within entry.
-    Size and is_text/is_image/is_video conditions and their negations select only
-    ordinary files. Classification uses names; sizes use logical bytes.
-    Keeps current, one rollback and pending newer versions by default. Unknown
-    layouts and prereleases stay protected. Staging must be inactive for strictly
-    more than seven days. Running tools and uncertain state are skipped.
-    Paths scanning is unlimited by default; --scan-timeout SECONDS sets a shared
-    budget across paths and candidate processing (0 means unlimited). A timeout
-    retains only fully checked candidates and returns status 1 even if their
-    confirmed deletion succeeds. Agent sources keep independent 60-second budgets.
-    TTY scanning shows progress on stderr; Ctrl+C interrupts with status 130.
-    Inspection never launches an Agent,
-    installer or network request. Sessions, authentication, configuration, plugin
-    installations, worktree bodies and Desktop data stay protected.
-
-    Rules combine builtins with hagency-cleanup.toml in the nearest Hagency
-    workspace or editable source repository. --config selects an explicit file.
-    Relative rule roots resolve against that file; ~ means the current home.
-    Custom paths rules default to preselecting only files older than seven days;
-    recent eligible files remain manually selectable. Foreign-owned entries protect
-    their containing candidates on systems with effective user IDs.
-    A missing automatic config uses builtins; invalid or missing explicit files
-    stop before scanning. See the CLI README for fields and matching semantics.
-
-    TTY: select exact paths, then confirm permanent deletion (default No).
-    --yes/-y selects every eligible candidate after scanning and skips both prompts,
-    including without a TTY. Recent candidates are included; protection checks and
-    deletion revalidation still apply. --dry-run never deletes; with --yes it previews
-    all candidates without prompting. Non-TTY runs without --yes only preview.
-    Config or filesystem changes
-    after review require a new preview; revalidation never adds candidates.
-    Exit codes: 0 success/cancel, 1 invalid config or incomplete cleanup,
-    2 invalid CLI arguments, 130 interrupted.
+    Agent cleanup requires Linux/WSL. On Windows, select project or path
+    rules explicitly with --rule. Choose either --agent or --rule.
 
     \b
-    Examples:
-      hgc file clean --dry-run
-      hgc file clean --agent codex --agent claude
-      hgc file clean --config ./hagency-cleanup.toml --dry-run
       hgc file clean -r empty_directories ./ --dry-run
-      hgc file clean -r project_default ./ --dry-run
-      hgc file clean ./cache -r temp-files --dry-run
     """
     if agent is not None and rule is not None:
         raise typer.BadParameter("--agent and --rule are mutually exclusive")

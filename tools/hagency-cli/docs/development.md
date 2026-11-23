@@ -32,9 +32,9 @@ Questionary imports happen when interactive adapters are used. SFTP imports Para
 
 ## Maintaining help
 
-Command docstrings hold the full operational help; `short_help` keeps command lists concise. Aliases reuse those docstrings. The command group's formatter combines aliases into one row while preserving command parsing and completion. `aliased_command` registers the shared verb aliases and the profile and skill exceptions. Registration, help, profile argument normalization, and skill selector completion use the same alias map. A registration check verifies shared callbacks and Typer instances without relying on registration order. Options use Typer's native multiple name declarations. Example blocks use Click's `\b` paragraph marker to preserve newlines. Help is part of the package and never loads Markdown files at runtime.
+Give the root and each command group one sentence of purpose. The generated command table handles navigation and groups aliases on one row. Use leaf command docstrings for decisions that affect the outcome, such as write destinations, deletion scope, or network access during a dry run. Put option meanings on the options themselves. Keep examples for syntax or combinations that need illustration, using Click's `\b` marker to preserve line breaks. Put detailed rules and workflows in the topic guides.
 
-When changing a command, update its help and the matching [user guide](../README.md#documentation) together. Keep runtime behavior in the owning operation module, and keep help usable from an empty directory without loading interactive, SFTP, or HTTP implementations.
+Root help links to the online guides so wheel users can find them. Aliases share their canonical callback and help. Registration, profile argument normalization, and selector completion use the same alias map. When changing a command, update its help and the matching [user guide](../README.md#documentation) together. Keep help usable from an empty directory without loading interactive, SFTP, or HTTP implementations.
 
 ## Filesystem and transport implementation
 
